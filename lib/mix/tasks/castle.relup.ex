@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Castle.Relup do
   end
 
   defp make_relup_args(cmdline_args) do
-    target = Keyword.fetch!(cmdline_args, :target)
+    target = Keyword.fetch!(cmdline_args, :target) |> to_charlist()
     upfrom = get_rel_paths(cmdline_args, :upfrom)
     downto = get_rel_paths(cmdline_args, :downto)
     fromto = get_rel_paths(cmdline_args, :fromto)

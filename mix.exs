@@ -8,10 +8,12 @@ defmodule Castle.MixProject do
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      source_url: "https://github.com/ausimian/castle",
       docs: [
         main: "README",
         extras: ["README.md"]
-      ]
+      ],
+      package: package()
     ]
   end
 
@@ -26,6 +28,16 @@ defmodule Castle.MixProject do
   defp deps do
     [
       {:ex_doc, "~> 0.27", only: :dev, runtime: false},
+    ]
+  end
+
+  defp package do
+    [
+      description: "Hot-Code Upgrade support for Elixir",
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/ausimian/castle"
+      }
     ]
   end
 end

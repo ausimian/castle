@@ -46,6 +46,6 @@ case $1 in
         ;;
     *)
         $CTRL "$@"
-        if [ $# == 0 ]; then print_help; fi
+        if [ $# -eq 0 ]; then print_help; fi
         ;;
 esac

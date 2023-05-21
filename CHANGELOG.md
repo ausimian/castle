@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3 - May 21, 2023
+
+- Fix bug in shell script that prevented execution on Linux
+
 ## 0.2.2 - May 21, 2023
 
 - Update Changelog

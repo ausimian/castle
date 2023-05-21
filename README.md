@@ -22,7 +22,7 @@ The package can be installed by adding `castle` to your list of dependencies in
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.1.0"}
+    {:castle, "~> 0.2.0"}
   ]
 end
 ```

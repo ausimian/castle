@@ -53,7 +53,8 @@ The following steps shape the release at build-time:
 In the pre-assembly step:
 
   - The default evaluation of runtime configuration is disabled. `Castle` will
-    do its own equivalent expansion into `sys.config` prior to system start.
+    do its own equivalent expansion into `sys.config` prior to system start,
+    first with `runtime.exs` (if it exists) and then with any Config Providers.
   - A 'preboot' boot script is created that starts only `Castle` and its
     dependencies. This is used only during the aforementioned expansion.
 
@@ -77,7 +78,9 @@ In the post-assembly step:
 
 At runtime, the script in the `bin` folder will intercept any calls to `start`,
 `start_iex`, `daemon` and `daemon_iex` and bring up an ephemeral node to generate
-`sys.config` by merging `build.config` with the results of evaluating `runtime.exs`.
+`sys.config` by merging `build.config` with the results of evaluating `runtime.exs`
+and any Config Providers.
+
 Additionally, this ephemeral node will create the `RELEASES` file if it does not
 already exist.
 

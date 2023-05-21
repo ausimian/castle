@@ -30,7 +30,8 @@ defmodule Mix.Tasks.Castle.Relup do
   @impl Mix.Task
   def run(command_line_args) do
     {:ok, _} = :application.ensure_all_started(:sasl)
-    case OptionParser.parse(command_line_args, [strict: @options]) do
+
+    case OptionParser.parse(command_line_args, strict: @options) do
       {cmdline_args, _, _} ->
         relup_args = make_relup_args(cmdline_args)
         apply(:systools, :make_relup, relup_args)
@@ -59,5 +60,4 @@ defmodule Mix.Tasks.Castle.Relup do
     |> Enum.map(&Path.expand/1)
     |> Enum.map(&to_charlist/1)
   end
-
 end

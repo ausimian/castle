@@ -4,7 +4,7 @@ defmodule Castle.MixProject do
   def project do
     [
       app: :castle,
-      version: "0.2.3",
+      version: "0.3.0",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -27,16 +27,18 @@ defmodule Castle.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:forecastle, "~> 0.1.0", runtime: false},
       {:ex_doc, "~> 0.27", only: :dev, runtime: false}
     ]
   end
 
   defp package do
     [
-      description: "Hot-Code Upgrade support for Elixir",
+      description: "Runtime Hot-Code Upgrade support for Elixir",
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/ausimian/castle"
+        "GitHub" => "https://github.com/ausimian/castle",
+        "Forecastle" => "https://hex.pm/packages/forecastle"
       }
     ]
   end

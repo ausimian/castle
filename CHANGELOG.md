@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 - May 27, 2023
+
+- Move build time support into Forecastle
+
 ## 0.2.3 - May 21, 2023
 
 - Fix bug in shell script that prevented execution on Linux

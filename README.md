@@ -1,88 +1,58 @@
 # Castle
 
-Hot-code upgrade support for Elixir Releases.
+Runtime support for hot-code upgrades.
 
-`Castle` provides build and runtime support for the generation of releases that correctly support hot-code upgrades. This includes:
+`Castle` provides runtime support for hot-code upgrades. In particular, it generates a 
+valid `sys.config` from `runtime.exs` and/or other [Config Providers](https://hexdocs.pm/elixir/main/Config.Provider.html)
+prior to both boot and hot-code upgrade.
 
-  - Generation of runtime configuration into 
-    [sys.config](https://www.erlang.org/doc/man/config.html#sys.config) prior to
-    system boot.
-  - Creation of the [RELEASES](https://www.erlang.org/doc/man/release_handler.html#description)
-    file on first boot.
-  - Support for [appup](https://www.erlang.org/doc/man/appup.html) and 
-    [relup](https://www.erlang.org/doc/man/relup.html) files.
-  - Shell-script support for managing upgrades.
-
+It relies on [Forecastle](https://hexdocs.pm/forecastle/readme.html) for build-time release generation
+and brings it in as a build-time dependency.
 
 ## Installation
 
 The package can be installed by adding `castle` to your list of dependencies in
-`mix.exs`:
+`mix.exs`. For projects that don't define a release, but use the `appup` compiler,
+it's sufficient to bring `Castle` in as a build-time dependency:
 
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.2.0"}
+    {:castle, "~> 0.3.0", runtime: false}
   ]
 end
 ```
 
+For projects that _do_ define one or more releases, `Castle` should be brought in
+as a runtime dependency:
+
+```elixir
+def deps do
+  [
+    {:castle, "~> 0.3.0"}
+  ]
+end
+```
+
+`Castle` brings in `Forecastle` as a build-time dependency.
+
 ## Integration
 
-`Castle` integrates into the steps of the release assembly process. It requires
-that the `Castle.pre_assemble/1` and `Castle.post_assemble/1` functions are
-placed around the `:assemble` step, e.g.:
+Build-time integration is done via `Forecastle` and more details can be found in its
+documentation but, in summary, it will integrate into your release process via the
+release assembly process. In particular, it requires that that the `Forecastle.pre_assemble/1` 
+and `Forecastle.post_assemble/1` functions are placed around the `:assemble` step, e.g.:
 
 ```elixir
 defp releases do
   [
     myapp: [
       include_executables_for: [:unix],
-      steps: [&Castle.pre_assemble/1, :assemble, &Castle.post_assemble/1, :tar]
+      steps: [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
     ]
   ]
 end
 ```
-
-## Build Time Support
-
-The following steps shape the release at build-time:
-
-### Pre-assembly
-
-In the pre-assembly step:
-
-  - The default evaluation of runtime configuration is disabled. `Castle` will
-    do its own equivalent expansion into `sys.config` prior to system start,
-    first with `runtime.exs` (if it exists) and then with any Config Providers.
-  - A 'preboot' boot script is created that starts only `Castle` and its
-    dependencies. This is used only during the aforementioned expansion.
-
-The system is then assembled under the `:assemble` step as normal.
-
-### Post-assembly
-
-In the post-assembly step:
-
-  - The `sys.config` generated from build-time configuration is copied to 
-    `build.config`.
-  - The shell-script in the `bin` folder is renamed from _name_ to _.name_, and
-    a new script called _name_ is created in its place. This new script will
-    ensure that the `sys.config` is correctly generated before the system is 
-    started.
-  - Any `runtime.exs` is copied into the version path of the release.
-  - The generated _name.rel_ is copied into the `releases` folder as _name-vsn.rel_.
-  - Any `relup` file is copied into the version path of the release.
-
-## Runtime Support
-
-At runtime, the script in the `bin` folder will intercept any calls to `start`,
-`start_iex`, `daemon` and `daemon_iex` and bring up an ephemeral node to generate
-`sys.config` by merging `build.config` with the results of evaluating `runtime.exs`
-and any Config Providers.
-
-Additionally, this ephemeral node will create the `RELEASES` file if it does not
-already exist.
 
 ## Release Management
 

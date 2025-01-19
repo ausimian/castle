@@ -30,7 +30,7 @@ defmodule Castle do
 
     File.write!(
       Path.join(rel_vsn_dir, "sys.config"),
-      :io_lib.format('%% coding: utf-8~n~tp.~n', [sys_config])
+      :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [sys_config])
     )
   end
 

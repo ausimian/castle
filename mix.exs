@@ -4,7 +4,7 @@ defmodule Castle.MixProject do
   def project do
     [
       app: :castle,
-      version: "0.3.0",
+      version: "0.3.1",
       elixir: "~> 1.14",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -27,7 +27,7 @@ defmodule Castle.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:forecastle, "~> 0.1.0", runtime: false},
+      {:forecastle, "~> 0.1.3", runtime: false},
       {:ex_doc, "~> 0.27", only: :dev, runtime: false}
     ]
   end

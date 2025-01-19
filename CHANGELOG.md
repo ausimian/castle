@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - Jan 19, 2025
+
+- Switch to charlist sigils
+
 ## 0.3.0 - May 27, 2023
 
 - Move build time support into Forecastle

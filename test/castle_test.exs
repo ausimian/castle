@@ -35,6 +35,10 @@ defmodule CastleTest do
     test "confirms the release that is running, silently" do
       [{_, vsn, _, _}] = :release_handler.which_releases(:permanent)
 
+      # Through the real :init as well as the real :release_handler: a VM that
+      # has finished booting reports {:starting, :started}, which is the shape
+      # the confirmation has to accept.
+      assert {_internal, :started} = :init.get_status()
       assert capture_io(fn -> assert Castle.running(to_string(vsn)) == :ok end) == ""
     end
 

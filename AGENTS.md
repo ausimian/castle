@@ -26,10 +26,20 @@ Castle's job is configuration and release management on a running node.
   was accepted: a transition that restarts the emulator is replied to and then
   rebooted, and an emulator upgrade finishes on the way back up, where it can
   still roll back. `bin/castle install` therefore polls this rather than
-  trusting the reply. The running release is the `current` one, or the
-  `permanent` one when none is current — `install` leaves its target `current`
-  and `commit` promotes it, so both count; `unpacked` (a rolled-back
-  continuation) and `tmp_current` (written before the reboot) do not.
+  trusting the reply. Two conditions. The version is the running release: the
+  `current` one, or the `permanent` one when none is current — `install` leaves
+  its target `current` and `commit` promotes it, so both count; `unpacked` (a
+  rolled-back continuation) and `tmp_current` (written before the reboot) do
+  not. And its boot has finished, which is `:init.get_status/0`'s *provided*
+  status being `:started`. Do not gate on the internal status: it stays
+  `:starting` for the life of a release started by its boot script, so a booted
+  node reports `{:starting, :started}`. The provided status is what the script's
+  `{progress, _}` instructions move along, and `started` is its last one — after
+  the applications have started, and after `new_emulator_upgrade/2` in the
+  hybrid script that continues an emulator upgrade. Without that second
+  condition a poll can confirm a node that is still booting, and automation
+  that commits straight after installing would make a version that cannot boot
+  the permanent one.
 
 Every one of them is a command entry point, so `Castle` is the command
 boundary: an operation that fails raises `Castle.Error` there, which is what
@@ -52,7 +62,7 @@ into this module.
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
 | `lib/castle/error.ex` | The exception a failed command raises |
-| `test/support/` | Stubs for `:release_handler` and a config provider |
+| `test/support/` | Stubs for `:release_handler`, `:init` and a config provider |
 
 ## Working on this project
 
@@ -71,13 +81,14 @@ into this module.
 
 ## Tests
 
-`mix test` covers `Castle.Commands` as units. `:release_handler` is reached
-through a module argument that defaults to it, so the tests hand it
-`Castle.ReleaseHandlerStub` instead; `generate/1` takes the version directory
-it writes to, so the tests give it a `tmp_dir` holding a synthetic
-`build.config`. `test/castle_test.exs` drives the boundary itself against the
-real `:release_handler` — which is running under `mix test`, because castle
-depends on sasl — naming releases that do not exist.
+`mix test` covers `Castle.Commands` as units. `:release_handler` and `:init` are
+reached through module arguments that default to them, so the tests hand them
+`Castle.ReleaseHandlerStub` and `Castle.InitStub` instead; `generate/1` takes
+the version directory it writes to, so the tests give it a `tmp_dir` holding a
+synthetic `build.config`. `test/castle_test.exs` drives the boundary itself
+against the real `:release_handler` — which is running under `mix test`, because
+castle depends on sasl — and the real `:init`, naming releases that do not
+exist.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's

@@ -8,9 +8,16 @@
   accepted: a transition that restarts the emulator is replied to and *then*
   rebooted, and for an emulator upgrade the instructions run on the way back
   up, where they can still fail and roll back. Completion therefore has to be
-  observed, and `bin/castle install` polls this to observe it. The running
-  release is the one whose status is `current`, or the `permanent` one if none
-  is current, so a version is confirmed both before and after `commit`.
+  observed, and `bin/castle install` polls this to observe it. Confirmation
+  needs two things: the version is the release the system is running - the one
+  whose status is `current`, or the `permanent` one if none is current, so a
+  version is confirmed both before and after `commit` - *and* its boot has
+  finished. The second is not redundant. A node that restarted into the new
+  version is reachable long before it has finished booting: `release_handler`
+  makes the version `current` while `sasl` starts, and distribution answers
+  from `kernel` onwards, so an application started after `sasl` can still fail
+  and take the system back to the version that was permanent. Confirming
+  earlier than that would let automation `commit` a release that cannot boot.
   Nothing can build a relup that restarts the emulator until
   [forecastle#4](https://github.com/ausimian/forecastle/issues/4), so the
   restart transitions this addresses cannot be exercised end to end yet. The

@@ -3,6 +3,7 @@ defmodule Castle.CommandsTest do
 
   alias Castle.Commands
   alias Castle.ConfigProviderStub
+  alias Castle.InitStub
   alias Castle.ReleaseHandlerStub, as: Stub
 
   describe "generate/1" do
@@ -122,7 +123,7 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "running/2" do
+  describe "running/3" do
     test "confirms the version an install has made current" do
       handler =
         Stub.stub(:which_releases, [
@@ -130,7 +131,7 @@ defmodule Castle.CommandsTest do
           {~c"sample", ~c"1.2.2", [], :permanent}
         ])
 
-      assert Commands.running("1.2.3", handler) == {:ok, []}
+      assert Commands.running("1.2.3", handler, booted()) == {:ok, []}
     end
 
     test "confirms the version a commit has made permanent" do
@@ -140,7 +141,7 @@ defmodule Castle.CommandsTest do
           {~c"sample", ~c"1.2.2", [], :old}
         ])
 
-      assert Commands.running("1.2.3", handler) == {:ok, []}
+      assert Commands.running("1.2.3", handler, booted()) == {:ok, []}
     end
 
     test "refuses the permanent version while another one is current" do
@@ -152,7 +153,7 @@ defmodule Castle.CommandsTest do
           {~c"sample", ~c"1.2.2", [], :permanent}
         ])
 
-      assert Commands.running("1.2.2", handler) ==
+      assert Commands.running("1.2.2", handler, booted()) ==
                {:error, "1.2.2 is not the running release. 1.2.3 is."}
     end
 
@@ -163,7 +164,7 @@ defmodule Castle.CommandsTest do
           {~c"sample", ~c"1.2.2", [], :permanent}
         ])
 
-      assert Commands.running("1.2.3", handler) ==
+      assert Commands.running("1.2.3", handler, booted()) ==
                {:error, "1.2.3 is not the running release. 1.2.2 is."}
     end
 
@@ -176,21 +177,47 @@ defmodule Castle.CommandsTest do
           {~c"sample", ~c"1.2.2", [], :permanent}
         ])
 
-      assert Commands.running("1.2.3", handler) ==
+      assert Commands.running("1.2.3", handler, booted()) ==
                {:error, "1.2.3 is not the running release. 1.2.2 is."}
     end
 
     test "refuses a version the system has never heard of" do
       handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.2", [], :permanent}])
 
-      assert Commands.running("9.9.9", handler) ==
+      assert Commands.running("9.9.9", handler, booted()) ==
                {:error, "9.9.9 is not the running release. 1.2.2 is."}
+    end
+
+    test "refuses a version whose boot has not finished" do
+      # A node that restarted into the new version answers rpc from the moment
+      # kernel is up, and release_handler has made the version current by the
+      # time sasl has started - so it can be seen like this, with applications
+      # still to start and the boot still able to fail back to the release that
+      # was permanent before.
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :current}])
+      init = InitStub.stub({:starting, :applications_loaded})
+
+      assert Commands.running("1.2.3", handler, init) ==
+               {:error,
+                "1.2.3 is the running release but has not finished booting: :applications_loaded."}
+    end
+
+    test "confirms that same version once its boot has finished" do
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :current}])
+
+      # The internal status says nothing: it stays :starting for as long as the
+      # boot process lives, which is the whole life of a release started by its
+      # boot script. Only the provided status, which the script's last
+      # {progress, _} sets, answers the question.
+      for status <- [{:starting, :started}, {:started, :started}] do
+        assert Commands.running("1.2.3", handler, InitStub.stub(status)) == {:ok, []}
+      end
     end
 
     test "refuses everything when nothing is running" do
       handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :unpacked}])
 
-      assert Commands.running("1.2.3", handler) ==
+      assert Commands.running("1.2.3", handler, booted()) ==
                {:error, "1.2.3 is not the running release. No release is running."}
     end
   end
@@ -248,6 +275,9 @@ defmodule Castle.CommandsTest do
       assert Commands.releases(handler) == {:ok, []}
     end
   end
+
+  # What a node reports once its boot script has run to the end.
+  defp booted, do: InitStub.stub({:starting, :started})
 
   defp write_build_config(dir, config) do
     File.write!(

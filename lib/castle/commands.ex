@@ -166,13 +166,47 @@ defmodule Castle.Commands do
   is - notably `:unpacked`, which is what a rolled-back continuation leaves the
   target as, and `:tmp_current`, which is written before the reboot a restart
   transition has yet to make.
+
+  Being the running release is necessary but not sufficient, because a node
+  that restarted into it can be seen part-way up. `release_handler` records the
+  new version as `:current` while `sasl` starts, and distribution is already
+  answering by then - so a reply is available before the applications after
+  `sasl` have started, and one of them can still fail the boot and take the
+  system back to the previous permanent release. Committing on the strength of
+  that would make a version that cannot boot the permanent one. So the boot has
+  to have finished too, which is what the second condition below is for.
   """
-  @spec running(String.t(), module()) :: result()
-  def running(vsn, handler \\ :release_handler) do
+  @spec running(String.t(), module(), module()) :: result()
+  def running(vsn, handler \\ :release_handler, init \\ :init) do
     case running_release(handler) do
-      ^vsn -> {:ok, []}
+      ^vsn -> booted(vsn, init)
       nil -> {:error, "#{vsn} is not the running release. No release is running."}
       other -> {:error, "#{vsn} is not the running release. #{other} is."}
+    end
+  end
+
+  # `init:get_status/0` answers `{InternalStatus, ProvidedStatus}`, and only the
+  # second element is any use here. The internal one stays `:starting` for as
+  # long as the boot process is alive, which is the whole life of a release
+  # started by its boot script - a booted node reports `{:starting, :started}`,
+  # so waiting for `{:started, _}` would wait forever.
+  #
+  # The provided status is what the boot script's `{progress, _}` instructions
+  # set (init.erl:692), and `:started` is the last of them. Every boot script
+  # Mix generates ends with `{progress, started}`, after the instruction that
+  # starts the release's own applications; the hybrid script that continues an
+  # emulator upgrade has `release_handler:new_emulator_upgrade/2` applied just
+  # before that same marker (systools_make.erl:336). So a provided status of
+  # `:started` means the script ran to the end: applications up, and any
+  # continuation of the upgrade finished.
+  defp booted(vsn, init) do
+    case init.get_status() do
+      {_internal, :started} ->
+        {:ok, []}
+
+      {_internal, progress} ->
+        {:error,
+         "#{vsn} is the running release but has not finished booting: #{inspect(progress)}."}
     end
   end
 

@@ -1,8 +1,5 @@
 defmodule CastleTest do
-  use ExUnit.Case
-  doctest Castle
+  use ExUnit.Case, async: true
 
-  test "greets the world" do
-    assert Castle.hello() == :world
-  end
+  doctest Castle
 end

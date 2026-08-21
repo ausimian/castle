@@ -199,6 +199,13 @@ defmodule Castle.Commands do
   # before that same marker (systools_make.erl:336). So a provided status of
   # `:started` means the script ran to the end: applications up, and any
   # continuation of the upgrade finished.
+  #
+  # The marker is the whole of the evidence, so this trusts whichever boot
+  # script was selected to emit it where it means what it says. One that never
+  # reaches it is never confirmed - `install` waits, then fails, and the message
+  # below names the progress the node did reach - and one that emits it early
+  # defeats the check. Mix generates these scripts; both states take an operator
+  # writing their own and pointing RELEASE_BOOT_SCRIPT at it.
   defp booted(vsn, init) do
     case init.get_status() do
       {_internal, :started} ->

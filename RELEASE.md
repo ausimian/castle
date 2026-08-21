@@ -8,8 +8,14 @@
   accepted: a transition that restarts the emulator is replied to and *then*
   rebooted, and for an emulator upgrade the instructions run on the way back
   up, where they can still fail and roll back. Completion therefore has to be
-  observed, and `bin/castle install` polls this to observe it. Confirmation
-  needs two things: the version is the release the system is running - the one
+  observed rather than inferred, and this is what makes it observable: a caller
+  that repeats the question until it is answered - which is what Forecastle's
+  `bin/castle install` does, from its own 1.0.0 - can tell an upgrade that took
+  effect from one that did not. Castle supplies the answer; it does not do the
+  asking, and the Forecastle this release is built against does not yet ask.
+
+  Confirmation needs two things: the version is the release the system is
+  running - the one
   whose status is `current`, or the `permanent` one if none is current, so a
   version is confirmed both before and after `commit` - *and* its boot has
   finished. The second is not redundant. A node that restarted into the new
@@ -18,6 +24,16 @@
   from `kernel` onwards, so an application started after `sasl` can still fail
   and take the system back to the version that was permanent. Confirming
   earlier than that would let automation `commit` a release that cannot boot.
+
+  "Finished booting" means the boot script reached its `{progress, started}`
+  instruction, which is the last thing every boot script Mix generates does.
+  A release booted with a `RELEASE_BOOT_SCRIPT` that names a hand-written
+  script without that marker will therefore never be confirmed: `install` waits
+  and then fails, and the refusal names the progress the node did reach, so it
+  says what is wrong rather than failing silently - but it will not succeed. A
+  script that emits the marker before its applications are started defeats the
+  check instead, since the marker is all there is to go on.
+
   Nothing can build a relup that restarts the emulator until
   [forecastle#4](https://github.com/ausimian/forecastle/issues/4), so the
   restart transitions this addresses cannot be exercised end to end yet. The

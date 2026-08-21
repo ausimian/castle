@@ -25,8 +25,12 @@ Castle's job is configuration and release management on a running node.
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
   rebooted, and an emulator upgrade finishes on the way back up, where it can
-  still roll back. `bin/castle install` therefore polls this rather than
-  trusting the reply. Two conditions. The version is the running release: the
+  still roll back. So Castle answers the question and leaves the asking to
+  Forecastle: `bin/castle install` repeats it rather than trusting the reply,
+  from Forecastle 1.0.0 — the revision pinned in this project's `mix.lock`
+  installs with a single rpc and never calls this, so do not describe the
+  polling as something Castle's own integrated state does. Two conditions. The
+  version is the running release: the
   `current` one, or the `permanent` one when none is current — `install` leaves
   its target `current` and `commit` promotes it, so both count; `unpacked` (a
   rolled-back continuation) and `tmp_current` (written before the reboot) do
@@ -40,6 +44,18 @@ Castle's job is configuration and release management on a running node.
   condition a poll can confirm a node that is still booting, and automation
   that commits straight after installing would make a version that cannot boot
   the permanent one.
+
+  The marker is the whole of the evidence, so it inherits whatever the selected
+  boot script does with it. `RELEASE_BOOT_SCRIPT` naming a hand-written script
+  that never reaches `{progress, started}` will never be confirmed — `install`
+  waits and then fails, and the refusal names the progress the node did reach,
+  so it is diagnosable and never a false success — and one that emits the marker
+  before its applications start defeats the check. Both are documented rather
+  than validated: Mix generates the boot scripts and offers no `rel/` template
+  for them, so reaching either state takes deliberate work. (An earlier note
+  here claimed `systools_make:add_apply_upgrade/2`'s hard match on the trailing
+  marker ruled this out. It does not: that builds the hybrid script for an
+  emulator upgrade and says nothing about a script an operator supplies.)
 
 Every one of them is a command entry point, so `Castle` is the command
 boundary: an operation that fails raises `Castle.Error` there, which is what

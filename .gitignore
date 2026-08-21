@@ -24,3 +24,6 @@ castle-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# macOS directory metadata.
+.DS_Store

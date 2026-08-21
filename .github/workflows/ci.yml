@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  precommit:
+    name: Precommit (Elixir 1.19 / OTP 28)
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Set up Elixir
+      uses: erlef/setup-beam@v1
+      with:
+        elixir-version: '1.19'
+        otp-version: '28'
+
+    - name: Restore dependencies cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          deps
+          _build
+        key: ${{ runner.os }}-${{ runner.arch }}-mix-precommit-${{ hashFiles('**/mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-mix-precommit-
+
+    - name: Install dependencies
+      run: mix deps.get
+
+    - name: Run precommit checks
+      run: mix precommit
+
+  test:
+    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    # Only Linux for now. Castle is pure Elixir talking to :release_handler,
+    # with no shell scripts of its own and no suite that boots a release, so
+    # there is nothing platform-sensitive to run. Add macos-15 alongside the
+    # release fixture from castle#8.
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        elixir: ['1.18', '1.19', '1.20']
+        otp: ['27', '28', '29']
+        exclude:
+          # Elixir 1.18 supports Erlang/OTP 25-27
+          - elixir: '1.18'
+            otp: '28'
+          - elixir: '1.18'
+            otp: '29'
+          # Elixir 1.19 supports Erlang/OTP 26-28
+          - elixir: '1.19'
+            otp: '29'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Set up Elixir
+      uses: erlef/setup-beam@v1
+      with:
+        elixir-version: ${{ matrix.elixir }}
+        otp-version: ${{ matrix.otp }}
+
+    - name: Restore dependencies cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          deps
+          _build
+        key: ${{ runner.os }}-${{ runner.arch }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+    - name: Install dependencies
+      run: mix deps.get
+
+    - name: Compile
+      # Castle pokes at OTP release internals, so the deprecation surface across
+      # the supported Elixir and OTP range is the point of this matrix until
+      # there are tests to run on it.
+      run: mix compile --warnings-as-errors
+
+    - name: Run tests
+      run: mix test

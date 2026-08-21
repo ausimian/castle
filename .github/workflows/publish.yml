@@ -1,0 +1,45 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      # Bare semver tags, as produced by `mix publisho` (e.g. 0.4.0, 0.4.1-rc.1)
+      - '[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to Hex
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Set up Elixir
+      uses: erlef/setup-beam@v1
+      with:
+        elixir-version: '1.19'
+        otp-version: '28'
+
+    - name: Install dependencies
+      run: mix deps.get
+
+    - name: Verify tag matches project version
+      run: |
+        version=$(grep -m1 -oE '@version "[^"]+"' mix.exs | cut -d'"' -f2)
+        if [ "$version" != "$GITHUB_REF_NAME" ]; then
+          echo "::error::Tag '$GITHUB_REF_NAME' does not match mix.exs @version '$version'"
+          exit 1
+        fi
+        echo "Publishing version $version"
+
+    - name: Run tests
+      run: mix test
+
+    - name: Publish to Hex
+      run: mix hex.publish --yes
+      env:
+        HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

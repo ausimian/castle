@@ -1,19 +1,21 @@
 defmodule Castle.MixProject do
   use Mix.Project
 
+  @version "0.3.1"
+  @source_url "https://github.com/ausimian/castle"
+
   def project do
     [
       app: :castle,
-      version: "0.3.1",
-      elixir: "~> 1.14",
+      description: "Runtime Hot-Code Upgrade support for Elixir",
+      version: System.get_env("VERSION_OVERRIDE", @version),
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      source_url: "https://github.com/ausimian/castle",
-      docs: [
-        main: "readme",
-        extras: ["README.md", "CHANGELOG.md"]
-      ],
-      package: package()
+      aliases: aliases(),
+      package: package(),
+      docs: docs(),
+      source_url: @source_url
     ]
   end
 
@@ -24,22 +26,51 @@ defmodule Castle.MixProject do
     ]
   end
 
+  def cli do
+    [
+      preferred_envs: [precommit: :test]
+    ]
+  end
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
       {:forecastle, "~> 0.1.3", runtime: false},
-      {:ex_doc, "~> 0.27", only: :dev, runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:ex_doc, "~> 0.39", only: :dev, runtime: false},
+      {:publisho, "~> 1.0", only: :dev, runtime: false}
+    ]
+  end
+
+  defp aliases do
+    [
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "credo --strict",
+        "test"
+      ]
     ]
   end
 
   defp package do
     [
-      description: "Runtime Hot-Code Upgrade support for Elixir",
+      maintainers: ["Nick Gunn"],
       licenses: ["MIT"],
       links: %{
-        "GitHub" => "https://github.com/ausimian/castle",
+        "GitHub" => @source_url,
         "Forecastle" => "https://hex.pm/packages/forecastle"
-      }
+      },
+      files: ~w(lib CHANGELOG.md LICENSE mix.exs README.md .formatter.exs)
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      source_ref: @version,
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 end

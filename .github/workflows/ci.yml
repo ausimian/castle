@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'release/**' ]
+  # No branch filter. A PR into a release integration branch has to get CI too,
+  # or there is nothing for the merge gate to check.
   pull_request:
-    branches: [ main ]
 
 jobs:
   precommit:

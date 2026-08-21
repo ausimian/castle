@@ -5,7 +5,7 @@ defmodule Castle do
 
   @app Mix.Project.config()[:app]
 
-  def make_releases() do
+  def make_releases do
     reldir = "releases"
     releases_file = Path.join(reldir, "RELEASES")
 
@@ -26,7 +26,7 @@ defmodule Castle do
       build_config
       |> Keyword.get(@app, [])
       |> Keyword.get(:config_providers, [])
-      |> Enum.reduce(build_config, fn {mod, arg}, cfg -> apply(mod, :load, [cfg, arg]) end)
+      |> Enum.reduce(build_config, fn {mod, arg}, cfg -> mod.load(cfg, arg) end)
 
     File.write!(
       Path.join(rel_vsn_dir, "sys.config"),
@@ -78,7 +78,7 @@ defmodule Castle do
     end
   end
 
-  def releases() do
+  def releases do
     vsns =
       for {_, vsn, _, status} <- :release_handler.which_releases() do
         {to_string(vsn), to_string(status)}
@@ -94,5 +94,4 @@ defmodule Castle do
       IO.puts("#{String.pad_trailing(vsn, width + 2)}#{status}")
     end)
   end
-
 end

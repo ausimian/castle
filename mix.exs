@@ -35,7 +35,11 @@ defmodule Castle.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:forecastle, "~> 0.1.3", runtime: false},
+      # TEMPORARY for the 1.0.0 cycle. Castle and Forecastle are being developed
+      # together, so each depends on the other's integration branch. This MUST be
+      # flipped back to {:forecastle, "~> 1.0", runtime: false} before publishing:
+      # mix hex.publish hard-fails on a git dependency.
+      {:forecastle, github: "ausimian/forecastle", branch: "release/1.0.0", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:publisho, "~> 1.0", only: :dev, runtime: false}

@@ -22,6 +22,15 @@ Castle's job is configuration and release management on a running node.
   over `:release_handler`, with `generate/1` called ahead of `install` and
   `commit` so the target version's configuration exists before it is booted.
 
+Every one of them is a command entry point, so `Castle` is the command
+boundary: an operation that fails raises `Castle.Error` there, which is what
+leaves a non-zero exit status behind for the shell that asked for it. Raising,
+not halting — the expression runs on the *running* node, so halting would take
+down the system under management; `Kernel.CLI` catches on the node and
+re-raises in the calling VM, and only that VM exits. `Castle.Commands` holds
+the operations themselves, returning their outcome instead of acting on the
+process, which is what makes them testable.
+
 Forecastle is what arranges for these to be reachable: it renames `sys.config`
 to `build.config` at assembly time, adds a `:preboot` script that starts
 `:castle`, and writes the `env.sh` fragment and `bin/castle` wrapper that call
@@ -31,7 +40,10 @@ into this module.
 
 | Path | Purpose |
 | --- | --- |
-| `lib/castle.ex` | The whole of the runtime logic |
+| `lib/castle.ex` | The command boundary: print the outcome, or raise |
+| `lib/castle/commands.ex` | The commands themselves, returning their outcome |
+| `lib/castle/error.ex` | The exception a failed command raises |
+| `test/support/` | Stubs for `:release_handler` and a config provider |
 
 ## Working on this project
 
@@ -50,27 +62,31 @@ into this module.
 
 ## Tests
 
-There is no test coverage yet. `test/castle_test.exs` is a `doctest` stub.
+`mix test` covers `Castle.Commands` as units. `:release_handler` is reached
+through a module argument that defaults to it, so the tests hand it
+`Castle.ReleaseHandlerStub` instead; `generate/1` takes the version directory
+it writes to, so the tests give it a `tmp_dir` holding a synthetic
+`build.config`. `test/castle_test.exs` drives the boundary itself against the
+real `:release_handler` — which is running under `mix test`, because castle
+depends on sasl — naming releases that do not exist.
 
-Every function here talks to `:release_handler` against a real installed
-release, and `generate/1` resolves paths from `:code.root_dir()`, so none of it
-is reachable from a plain `mix test`. Testing it needs a release fixture booted
-in a workspace, the way Forecastle's `:e2e` suite does — tracked in
-[#8](https://github.com/ausimian/castle/issues/8). Forecastle's
-`test/forecastle/upgrade_test.exs` exercises this code end to end in the
-meantime.
+What is *not* covered here is a booted release: the upgrade of a running
+system, and the exit statuses `bin/castle` returns, belong to Forecastle's
+`:e2e` suite ([#8](https://github.com/ausimian/castle/issues/8)), which
+exercises this code against a real release and asserts on the success messages
+each command prints. Those strings — `Unpacked <vsn> ok`,
+`Now running <vsn> (previously <other>).`, `Committed <vsn>. …` and the
+`releases/0` table — are a contract with that suite. Failure messages are not.
 
 ## Known limitations
 
-- **Failed operations exit 0.** Every command catches the `:release_handler`
-  error, prints it and returns normally, so `bin/castle` cannot tell a failed
-  unpack/install/commit/remove from a successful one. Tracked in
-  [#10](https://github.com/ausimian/castle/issues/10), together with letting
-  `generate/1` take a caller-chosen destination path
-  ([#15](https://github.com/ausimian/castle/issues/15)).
 - **Concurrent boots race on `sys.config`.** `generate/1` writes into the
   version directory, so simultaneous `start`/`daemon`/`eval` invocations with
-  differing environments overwrite each other's configuration. Same issue.
+  differing environments overwrite each other's configuration. Do not fix this
+  by letting callers choose where the configuration is written: it goes away
+  with [#13](https://github.com/ausimian/castle/issues/13), which materialises
+  the target release's configuration in a `:peer` running its own config
+  providers, and takes `Castle.generate/1` with it.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

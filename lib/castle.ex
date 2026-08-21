@@ -38,6 +38,10 @@ defmodule Castle do
     report!(Commands.install(vsn))
   end
 
+  def running(vsn) when is_binary(vsn) do
+    report!(Commands.running(vsn))
+  end
+
   def commit(vsn) when is_binary(vsn) do
     generate(vsn)
     report!(Commands.commit(vsn))

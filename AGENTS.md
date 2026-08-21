@@ -21,6 +21,15 @@ Castle's job is configuration and release management on a running node.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with `generate/1` called ahead of `install` and
   `commit` so the target version's configuration exists before it is booted.
+- **`Castle.running/1`** — succeeds when the version it is given is the release
+  the system is running. `install_release/1`'s reply says only that the upgrade
+  was accepted: a transition that restarts the emulator is replied to and then
+  rebooted, and an emulator upgrade finishes on the way back up, where it can
+  still roll back. `bin/castle install` therefore polls this rather than
+  trusting the reply. The running release is the `current` one, or the
+  `permanent` one when none is current — `install` leaves its target `current`
+  and `commit` promotes it, so both count; `unpacked` (a rolled-back
+  continuation) and `tmp_current` (written before the reboot) do not.
 
 Every one of them is a command entry point, so `Castle` is the command
 boundary: an operation that fails raises `Castle.Error` there, which is what

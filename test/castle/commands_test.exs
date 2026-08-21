@@ -122,6 +122,79 @@ defmodule Castle.CommandsTest do
     end
   end
 
+  describe "running/2" do
+    test "confirms the version an install has made current" do
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [], :current},
+          {~c"sample", ~c"1.2.2", [], :permanent}
+        ])
+
+      assert Commands.running("1.2.3", handler) == {:ok, []}
+    end
+
+    test "confirms the version a commit has made permanent" do
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [], :permanent},
+          {~c"sample", ~c"1.2.2", [], :old}
+        ])
+
+      assert Commands.running("1.2.3", handler) == {:ok, []}
+    end
+
+    test "refuses the permanent version while another one is current" do
+      # Committing 1.2.2 and then installing 1.2.3 leaves 1.2.2 permanent, but
+      # it is 1.2.3 that is running.
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [], :current},
+          {~c"sample", ~c"1.2.2", [], :permanent}
+        ])
+
+      assert Commands.running("1.2.2", handler) ==
+               {:error, "1.2.2 is not the running release. 1.2.3 is."}
+    end
+
+    test "refuses a version left unpacked by a continuation that rolled back" do
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [], :unpacked},
+          {~c"sample", ~c"1.2.2", [], :permanent}
+        ])
+
+      assert Commands.running("1.2.3", handler) ==
+               {:error, "1.2.3 is not the running release. 1.2.2 is."}
+    end
+
+    test "refuses a version that is only tmp_current, before the restart" do
+      # release_handler writes the target as tmp_current and then reboots. The
+      # upgrade has not happened yet, and may still roll back.
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [], :tmp_current},
+          {~c"sample", ~c"1.2.2", [], :permanent}
+        ])
+
+      assert Commands.running("1.2.3", handler) ==
+               {:error, "1.2.3 is not the running release. 1.2.2 is."}
+    end
+
+    test "refuses a version the system has never heard of" do
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.2", [], :permanent}])
+
+      assert Commands.running("9.9.9", handler) ==
+               {:error, "9.9.9 is not the running release. 1.2.2 is."}
+    end
+
+    test "refuses everything when nothing is running" do
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :unpacked}])
+
+      assert Commands.running("1.2.3", handler) ==
+               {:error, "1.2.3 is not the running release. No release is running."}
+    end
+  end
+
   describe "commit/2" do
     test "reports what committing means" do
       handler = Stub.stub(:make_permanent, :ok)

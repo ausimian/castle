@@ -151,6 +151,45 @@ defmodule Castle.Commands do
   end
 
   @doc """
+  Confirms that `vsn` is the release the system is running.
+
+  What `install_release/1` replies says only that the upgrade was accepted. A
+  transition that restarts the emulator is replied to and *then* rebooted, and
+  for an emulator upgrade the instructions run on the way back up, where they
+  can still fail and roll back - so completion has to be observed rather than
+  inferred, and the reply does not say which kind of transition it was. This is
+  what a caller polls to observe it.
+
+  The running release is the one whose status is `:current` if there is one,
+  and the `:permanent` one otherwise: `install` leaves its target `:current`,
+  `commit` promotes it to `:permanent`, and both are running. No other status
+  is - notably `:unpacked`, which is what a rolled-back continuation leaves the
+  target as, and `:tmp_current`, which is written before the reboot a restart
+  transition has yet to make.
+  """
+  @spec running(String.t(), module()) :: result()
+  def running(vsn, handler \\ :release_handler) do
+    case running_release(handler) do
+      ^vsn -> {:ok, []}
+      nil -> {:error, "#{vsn} is not the running release. No release is running."}
+      other -> {:error, "#{vsn} is not the running release. #{other} is."}
+    end
+  end
+
+  defp running_release(handler) do
+    releases = for {_, vsn, _, status} <- handler.which_releases(), do: {to_string(vsn), status}
+
+    case with_status(releases, :current) do
+      nil -> with_status(releases, :permanent)
+      vsn -> vsn
+    end
+  end
+
+  defp with_status(releases, wanted) do
+    Enum.find_value(releases, fn {vsn, status} -> if status == wanted, do: vsn end)
+  end
+
+  @doc """
   Makes `vsn` permanent, so that it is the version a restart boots into.
   """
   @spec commit(String.t(), module()) :: result()

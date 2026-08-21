@@ -31,5 +31,17 @@ defmodule CastleTest do
     test "prints what a successful operation has to report" do
       assert capture_io(&Castle.releases/0) =~ ~r/^\S+\s+permanent$/m
     end
+
+    test "confirms the release that is running, silently" do
+      [{_, vsn, _, _}] = :release_handler.which_releases(:permanent)
+
+      assert capture_io(fn -> assert Castle.running(to_string(vsn)) == :ok end) == ""
+    end
+
+    test "raises when asked about a version that is not the one running" do
+      assert_raise Castle.Error, ~r/^9\.9\.9 is not the running release\./, fn ->
+        Castle.running("9.9.9")
+      end
+    end
   end
 end

@@ -10,6 +10,7 @@ defmodule Castle.MixProject do
       description: "Runtime Hot-Code Upgrade support for Elixir",
       version: System.get_env("VERSION_OVERRIDE", @version),
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -31,6 +32,11 @@ defmodule Castle.MixProject do
       preferred_envs: [precommit: :test]
     ]
   end
+
+  # The stubs the unit tests stand in front of :release_handler and the config
+  # providers live in test/support.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do

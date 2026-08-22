@@ -437,6 +437,17 @@ Castle's job is configuration and release management on a running node.
   `RELEASES` file names at least `kernel` and `stdlib`. The remedy the message
   names is a restart, because that is the only thing that changes the answer.
 
+  **A restart is necessary and, in one of the two cases, not sufficient — and the
+  message has to say which.** The record is synthesised when `RELEASES` was
+  missing *or* could not be read, and Forecastle's `env.sh` creates it only when
+  it is **absent** (`[ ! -f ... ]`). So a file that is present and unreadable is
+  stepped over on every start: the node comes back on a freshly synthesised
+  record, the refusal repeats, and an operator following a message that named
+  only the restart would loop forever. The message therefore splits the remedy —
+  restart if the file is absent, make it readable or remove it *first* if it is
+  present. Do not collapse that back into "restart the system": the diagnosis
+  already admits both causes, so a single remedy is wrong for one of them.
+
   It has to be asked of the node rather than of the filesystem — a file that
   appeared *after* the boot that looked for it passes a shell test and still
   leaves the node on the synthesised record — and it has to be asked *in the call

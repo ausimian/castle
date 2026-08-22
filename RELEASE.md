@@ -150,6 +150,15 @@
 
 ### Fixed
 
+- The refusal for a system running from a synthesised release record now names a
+  remedy that works in both of the cases it diagnoses. It said to restart, and a
+  restart is enough only when `releases/RELEASES` was *absent*: the release
+  creates that file when it is missing, so a file that is present but unreadable
+  is stepped over on every start and the system comes back on another synthesised
+  record. An operator following the old message would have restarted
+  indefinitely. It now says to make the file readable or remove it first in that
+  case.
+
 - A release built with `include_erts: false` is now refused, by name and with
   the reason, rather than quietly managing the Erlang installation it happens to
   be running on. Such a release ships no emulator, so it runs the system one, and

@@ -44,20 +44,39 @@
   This is how every release is configured now, and the only way: the path that
   read a `build.config` is gone, along with the build-time interception that
   produced one — see *Removed* below.
-- `Castle.upgradable/0`, which succeeds when the release the system is running
-  can be upgraded from, and fails when it cannot. `:release_handler` reads
-  `releases/RELEASES` once, as it starts, and when the file is not there it makes
-  a release record up out of the boot script's name and version — a record that
-  names no applications at all. Upgrading a system in that state is worse than
-  being stopped: the install reports success, and every application whose version
-  changed but whose code the upgrade does not explicitly load goes on running its
-  old code out of the directory of the release that was just replaced, until a
-  later `remove` deletes it. Nothing can repair the running system afterwards,
-  because creating the file changes no record the node holds — so what the
-  failure says is to restart the system before upgrading it, which is the one
-  thing that does. The question is asked of the node's own records rather than of
-  the filesystem, which is the only way to see the case where the file exists but
-  the boot that went looking for it was earlier.
+- `Castle.unpack/1` and `Castle.install/1` now refuse a system that cannot be
+  upgraded from, and refuse it in the same call that would otherwise have done
+  the work. `:release_handler` reads `releases/RELEASES` once, as it starts, and
+  when the file is not there it makes a release record up out of the boot
+  script's name and version — a record that names no applications at all.
+  Upgrading a system in that state is worse than being stopped: the install
+  reports success, and every application whose version changed but whose code the
+  upgrade does not explicitly load goes on running its old code out of the
+  directory of the release that was just replaced, until a later `remove` deletes
+  it. Nothing can repair the running system afterwards, because creating the file
+  changes no record the node holds — so what the refusal says is to restart,
+  which is the one thing that does: the release creates the file before it
+  starts.
+
+  The question is asked of the node's own records rather than of the filesystem,
+  which is the only way to see the case where the file exists but the boot that
+  went looking for it was earlier — and it is asked by the operation, rather than
+  of the operator beforehand. A check made in one call and acted on in another is
+  a check about a moment that has passed: the node can restart in between, and
+  the node that comes back makes a fresh record up, so the operation would go
+  ahead on an answer that no longer held.
+
+  Unpacking is refused as well as installing because it is the one other
+  operation that *writes* release records: an unpack on such a node would put the
+  made-up record into `releases/RELEASES`, where the next boot would read it back
+  as though it belonged there — which takes away the restart that is the way out,
+  since the file is only created when it is missing. Committing and removing are
+  unaffected: neither can write that record back, and refusing them could strand
+  a version that was already installed.
+- `Castle.upgradable/0`, which answers the same question on its own, for an
+  operator who wants to know whether a system can be upgraded from without
+  unpacking or installing anything. Nothing has to call it first — the operations
+  that need the answer get it for themselves.
 - `Castle.Error`, the exception raised by a release-management command that did
   not succeed.
 - `Castle.running/1`, which succeeds when the version it is given is the

@@ -81,10 +81,10 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :permanent}])
 
       assert {:error, message} = Commands.upgradable(handler)
-      assert message =~ "1.2.3 is running from a release record OTP built from the boot script"
+      assert message =~ "This system cannot be upgraded: 1.2.3 is running from a release record"
       assert message =~ "names no applications"
       assert message =~ "running its old code"
-      assert message =~ "Restart the system before upgrading it"
+      assert message =~ "Restart the system: the release creates the file before it starts."
     end
 
     test "asks the release the system is running, and not another one" do
@@ -105,30 +105,54 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :unpacked}])
 
       assert Commands.upgradable(handler) ==
-               {:error, "No release is running, so this system cannot be upgraded."}
+               {:error, "This system cannot be upgraded: no release is running."}
     end
   end
 
   describe "unpack/2" do
     test "reports the version that was unpacked" do
-      handler = Stub.stub(:unpack_release, {:ok, ~c"1.2.3"})
+      handler = real_record(:unpack_release, {:ok, ~c"1.2.3"})
 
       assert Commands.unpack("sample-1.2.3", handler) == {:ok, ["Unpacked 1.2.3 ok"]}
       assert Stub.calls(:unpack_release) == [[~c"sample-1.2.3"]]
     end
 
     test "reports a failure to unpack" do
-      handler = Stub.stub(:unpack_release, {:error, {:no_such_file, ~c"sample-1.2.3.tar.gz"}})
+      handler = real_record(:unpack_release, {:error, {:no_such_file, ~c"sample-1.2.3.tar.gz"}})
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
       assert message =~ "Failed to unpack sample-1.2.3."
       assert message =~ "no_such_file"
     end
+
+    test "refuses a system running on a record OTP synthesised, without unpacking" do
+      # The handler is ready to unpack and must not be asked: unpack_release/1
+      # ends in write_releases/3, so an unpack here would put the synthesised
+      # record into RELEASES, and the next boot would read it back - which takes
+      # away the restart the refusal names as the remedy, because
+      # make_releases/2 does nothing once the file exists.
+      handler = synthesised_record(:unpack_release, {:ok, ~c"1.2.3"})
+
+      assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
+      assert message =~ "Cannot unpack sample-1.2.3: 1.2.2 is running from a release record"
+      assert message =~ "Restart the system"
+      assert Stub.calls(:unpack_release) == []
+    end
+
+    test "asks the running node, in the call that does the unpacking" do
+      # Which is the whole point: the check cannot be something a caller asks in
+      # a call of its own, because the node that answers and the node that acts
+      # need not be the same one. One call, one record, one decision.
+      handler = real_record(:unpack_release, {:ok, ~c"1.2.3"})
+
+      assert {:ok, _} = Commands.unpack("sample-1.2.3", handler)
+      assert Stub.calls(:which_releases) == [[]]
+    end
   end
 
   describe "install/2" do
     test "reports the version change" do
-      handler = Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert Commands.install("1.2.3", handler) ==
                {:ok, ["Now running 1.2.3 (previously 1.2.2)."]}
@@ -137,14 +161,14 @@ defmodule Castle.CommandsTest do
     end
 
     test "reports a restart of the emulator as the success it is" do
-      handler = Stub.stub(:install_release, {:continue_after_restart, ~c"1.2.2", ~c"upgrade"})
+      handler = real_record(:install_release, {:continue_after_restart, ~c"1.2.2", ~c"upgrade"})
 
       assert {:ok, lines} = Commands.install("1.2.3", handler)
       assert Enum.join(lines, " ") =~ "Restarting to install 1.2.3 (previously 1.2.2)."
     end
 
     test "reports a failure to install" do
-      handler = Stub.stub(:install_release, {:error, {:no_such_release, ~c"1.2.3"}})
+      handler = real_record(:install_release, {:error, {:no_such_release, ~c"1.2.3"}})
 
       assert {:error, message} = Commands.install("1.2.3", handler)
       assert message =~ "Install of 1.2.3 failed."
@@ -152,10 +176,31 @@ defmodule Castle.CommandsTest do
     end
 
     test "reports a result it does not recognise" do
-      handler = Stub.stub(:install_release, {:whatever, ~c"1.2.2"})
+      handler = real_record(:install_release, {:whatever, ~c"1.2.2"})
 
       assert {:error, message} = Commands.install("1.2.3", handler)
       assert message =~ "Install of 1.2.3 returned an unexpected result."
+    end
+
+    test "refuses a system running on a record OTP synthesised, without installing" do
+      # The mutation is install_release/1, and the handler here is ready to
+      # perform it and report success - which is exactly what such an install
+      # would do while leaving applications on their old code. So the refusal has
+      # to come first, and nothing may reach the handler.
+      handler = synthesised_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", handler)
+      assert message =~ "Cannot install 1.2.3: 1.2.2 is running from a release record"
+      assert message =~ "running its old code"
+      assert message =~ "Restart the system"
+      assert Stub.calls(:install_release) == []
+    end
+
+    test "asks the running node, in the call that does the installing" do
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:ok, _} = Commands.install("1.2.3", handler)
+      assert Stub.calls(:which_releases) == [[]]
     end
   end
 
@@ -268,6 +313,18 @@ defmodule Castle.CommandsTest do
       assert Stub.calls(:make_permanent) == [[~c"1.2.3"]]
     end
 
+    test "commits without asking whether the system can be upgraded from" do
+      # Deliberate, and not an omission. make_permanent/1 cannot write the
+      # synthesised record back - do_make_permanent/2 returns early for a release
+      # that is already permanent and errors for every other status - while a
+      # refusal here would strand a version installed while the record was still
+      # good, leaving the previous release to come back at the next restart.
+      handler = synthesised_record(:make_permanent, :ok)
+
+      assert {:ok, _} = Commands.commit("1.2.3", handler)
+      assert Stub.calls(:which_releases) == []
+    end
+
     test "reports a failure to commit" do
       handler = Stub.stub(:make_permanent, {:error, {:bad_status, :unpacked}})
 
@@ -314,6 +371,27 @@ defmodule Castle.CommandsTest do
 
   # What a node reports once its boot script has run to the end.
   defp booted, do: InitStub.stub({:starting, :started})
+
+  # A handler whose running release was read from a RELEASES file, so it names
+  # applications and the check unpack/2 and install/2 make passes, with `fun`
+  # answering `reply`.
+  defp real_record(fun, reply) do
+    Stub.stub(:which_releases, [
+      {~c"sample", ~c"1.2.2", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
+    ])
+
+    Stub.stub(fun, reply)
+  end
+
+  # The same, for a node whose record release_handler synthesised because it
+  # could not read RELEASES: the application list is empty. `fun` is registered
+  # with the reply it would have given, so that asserting it was never called
+  # says something about ordering rather than about an unstubbed function
+  # raising - the handler stands ready to succeed and must not be asked.
+  defp synthesised_record(fun, reply) do
+    Stub.stub(:which_releases, [{~c"sample", ~c"1.2.2", [], :permanent}])
+    Stub.stub(fun, reply)
+  end
 
   # Enough of an unpacked version directory for `materialise/2`: what is in it is
   # the peer's business, and the peer is a stub here. Everything it would look

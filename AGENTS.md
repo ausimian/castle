@@ -284,30 +284,65 @@ Castle's job is configuration and release management on a running node.
   to create a relocatable RELEASES file", in OTP's own words. Passing the root
   would bake this machine's paths into a file whose point is that it can be
   moved, and no end-state test would see it.
-- **`Castle.upgradable/0`** — succeeds when the running release can be upgraded
-  from, and refuses when `:release_handler` is working from the record it
-  synthesises for itself. It reads `RELEASES` once, in `init/1`, and when it
-  cannot it builds a record out of the boot script's name and version with the
-  `libs` field left at `[]`. Nothing can replace that afterwards, and creating
-  the file later does not: the first operation that changes anything writes the
-  in-memory record back over it. Upgrading from it is silently wrong rather than
-  refused — the relup's `point_of_no_return` switches code paths for
-  `get_new_libs(Current, New)`, which folds over the *current* release's
-  applications and so yields nothing at all, leaving any application whose
-  version changed but whose code the relup does not load running from the
+- **The release record check** — `unpack/1` and `install/1` refuse a system whose
+  release record `:release_handler` synthesised for itself, and they refuse it
+  from *inside* the operation. `:release_handler` reads `RELEASES` once, in
+  `init/1`, and when it cannot it builds a record out of the boot script's name
+  and version with the `libs` field left at `[]`. Nothing can replace that
+  afterwards, and creating the file later does not: the first operation that
+  changes anything writes the in-memory record back over it. Upgrading from it is
+  silently wrong rather than refused — the relup's `point_of_no_return` switches
+  code paths for `get_new_libs(Current, New)`, which folds over the *current*
+  release's applications and so yields nothing at all, leaving any application
+  whose version changed but whose code the relup does not load running from the
   directory of the release being replaced. The discriminator is that empty
   application list, and it is exact: `which_releases/0` reports
   `mk_lib_name(Libs)`, `mk_lib_name([]) -> []`, and a record read from a
-  `RELEASES` file names at least `kernel` and `stdlib`. It has to be asked of the
-  node rather than of the filesystem, which is why this is here and not in
-  `bin/castle`: a file that appeared *after* the boot that looked for it passes
-  a shell test for the file and still leaves the node on the synthesised record.
-  The remedy the message names is a restart, because that is the only thing that
-  changes the answer.
+  `RELEASES` file names at least `kernel` and `stdlib`. The remedy the message
+  names is a restart, because that is the only thing that changes the answer.
+
+  It has to be asked of the node rather than of the filesystem — a file that
+  appeared *after* the boot that looked for it passes a shell test and still
+  leaves the node on the synthesised record — and it has to be asked *in the call
+  that acts*. It was a separate rpc from `bin/castle` while #13 was being built,
+  and that was wrong: two rpcs are two moments and possibly two node instances,
+  so a node could pass the check on the record it read at boot, restart onto a
+  synthesised one, and have the unpack or the install arrive afterwards and go
+  ahead on an answer that no longer held. **Do not reintroduce a separate check
+  in front of these operations**, in `bin/castle` or anywhere else. It is
+  `Castle.Commands.ensure_upgradable/2`, and both operations make it themselves
+  before `:release_handler` is asked for anything.
+
+  `install` is checked because that is where the silent damage happens. `unpack`
+  is checked because it is the one other operation that *writes* release records:
+  `do_unpack_release/4` ends in `write_releases/3` over the records the handler
+  holds, so an unpack puts the synthesised record into `RELEASES`, the next boot
+  reads it back as though it had always been there, and `Castle.make_releases/0`
+  does nothing when the file exists — so an unpack allowed through takes away the
+  restart the refusal names. `commit`, `remove` and `releases` are deliberately
+  *not* checked, and that is measured rather than assumed: `do_make_permanent/2`
+  returns early for a release that is already permanent and errors for every
+  other status, `do_remove_release/4` refuses the permanent release outright, and
+  `releases` only reads — none of them can write that record back, while refusing
+  them could strand an upgrade already under way, a version installed and waiting
+  to be committed that the next restart would take back.
+- **`Castle.upgradable/0`** — the same question asked on its own, and nothing
+  more: a diagnostic, not a gate, and nothing has to call it. It stays because
+  the state it reports is otherwise invisible — the file can be present while the
+  record the node works from was synthesised — so an operator needs a way to ask
+  that does not unpack or install anything. Whether it belongs in the documented
+  API surface is [#11](https://github.com/ausimian/castle/issues/11)'s to settle.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
-  ahead of `install` and `commit` so that it exists before the version is
-  booted.
+  ahead of `install` and `commit` so that it exists before the version is booted,
+  and the record check inside `unpack` and `install`. The boundary composes
+  materialise-then-install, so a node that will be refused for its record
+  materialises the target's configuration before it hears so. That is what the
+  check costs by living inside the operation instead of in front of it, and it is
+  only work: materialising writes into the target's version directory, never to
+  the running system and never to a release record, and it is idempotent. Both
+  refusals fall before `install_release/1` is asked for anything, which is the
+  line that matters.
 - **`Castle.running/1`** — succeeds when the version it is given is the release
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
@@ -394,11 +429,24 @@ directory, which is what lets them all run async.
 `test/castle_test.exs` drives the boundary itself against the real
 `:release_handler` — which is running under `mix test`, because castle depends
 on sasl — and the real `:init`, naming releases that do not exist. One test
-there is not about the boundary: `upgradable/0` rests on a claim about OTP's own
-data, that a record read from a `RELEASES` file names applications, so it is
+there is not about the boundary: the record check rests on a claim about OTP's
+own data, that a record read from a `RELEASES` file names applications, so it is
 asserted against the record the real `:release_handler` read from the OTP
 installation's own file rather than against a stub. It fails, loudly and with
-the reason visible, on an installation that has no `releases/RELEASES`.
+the reason visible, on an installation that has no `releases/RELEASES` — and so
+does the boundary's `unpack/1` test, now that `unpack` makes the same check.
+
+The record check's discriminators are about *ordering*, so they are written the
+way `materialise/2`'s are: the stub is given a reply that would have the
+operation succeed, and the assertion is that it was never asked for it —
+`Stub.calls(:unpack_release) == []`, `Stub.calls(:install_release) == []`. An
+end-state test cannot tell a refusal that came first from one that came after,
+because the refusal is the same either way. Two more assert
+`Stub.calls(:which_releases) == [[]]` on the successful path: the check happened
+*in* the call that acted, which is the whole of what this fixed, and a version
+that asked it somewhere else would pass every other assertion here.
+`commit/2`'s regression guard is the mirror image — a synthesised record, and
+`Stub.calls(:which_releases) == []`, because commit must *not* acquire the check.
 
 `test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
 peer would prove nothing about the one thing it exists to do, which is to run a

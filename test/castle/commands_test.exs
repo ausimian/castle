@@ -85,7 +85,7 @@ defmodule Castle.CommandsTest do
       assert message =~ "This system cannot be upgraded: 1.2.3 is running from a release record"
       assert message =~ "names no applications"
       assert message =~ "running its old code"
-      assert message =~ "make sure releases/RELEASES is either absent or readable"
+      assert message =~ "make sure the RELEASES file :release_handler reads is"
 
       # The remedy names the state the file has to be in, not the reason the
       # record was synthesised. A bare "restart" loops forever on a file that is

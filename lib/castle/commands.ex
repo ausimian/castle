@@ -345,10 +345,15 @@ defmodule Castle.Commands do
            "success and leaves any application whose version changed, but whose code the " <>
            "upgrade does not load, running its old code. Creating the file now would not " <>
            "change the record this node works from, so the system has to be restarted. " <>
-           "Before restarting, make sure releases/RELEASES is either absent or readable: " <>
-           "the release creates that file only when it is absent, so an unreadable one " <>
-           "left in place is stepped over on every start and the system comes back on the " <>
-           "same synthesised record. Absent, or readable, is what a restart needs."}
+           "Before restarting, make sure the RELEASES file :release_handler reads is " <>
+           "either readable or absent, because the release creates that file only when it " <>
+           "is absent - an unreadable one left in place is stepped over on every start " <>
+           "and the system comes back on the same synthesised record. Absent, or " <>
+           "readable, is what a restart needs. That file is releases/RELEASES under the " <>
+           "release root unless RELDIR or the sasl releases_dir parameter points " <>
+           "elsewhere; where one of those does, the release creates a file at the root " <>
+           "that the handler will not read, so the one it does read has to be put there " <>
+           "and made readable by hand."}
 
       nil ->
         {:error, "#{refusal}: no release is running."}

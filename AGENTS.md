@@ -457,6 +457,18 @@ Castle's job is configuration and release management on a running node.
   the branch it replaced. Do not turn it back into a case analysis of the cause,
   and do not collapse it into a bare "restart the system" either.
 
+  **And it must not name `releases/RELEASES` unqualified**, because that is the
+  file the *release* creates, not necessarily the one the handler reads — see
+  `Castle.Deployment.root_dir/0` and
+  [#23](https://github.com/ausimian/castle/issues/23). Where `RELDIR` or
+  `{sasl, releases_dir}` points elsewhere the two are different files, and the
+  remedy is then genuinely harder rather than merely differently spelled: the
+  hook creates one at the root that the handler will not read, so "absent" does
+  not get the operator out either, and the file the handler *does* read has to be
+  put there by hand. The message says so. When #23 lands and Castle follows those
+  overrides, this paragraph and that sentence both need revisiting — the
+  divergence is the thing being described, and it is the thing #23 removes.
+
   It has to be asked of the node rather than of the filesystem — a file that
   appeared *after* the boot that looked for it passes a shell test and still
   leaves the node on the synthesised record — and it has to be asked *in the call

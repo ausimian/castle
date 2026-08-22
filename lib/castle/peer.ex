@@ -241,15 +241,18 @@ defmodule Castle.Peer do
     File.rm(peer.scratch)
   end
 
-  # The scratch file is created through `write_like/3`, so it has
-  # `sys.config`'s permissions from before it has any contents - and it holds
-  # the most sensitive thing here, the configuration with every provider's
-  # answer resolved into it. The writes after that leave the mode alone, and the
-  # rename carries it onto `sys.config`.
+  # The scratch file holds the most sensitive thing here - the configuration with
+  # every provider's answer resolved into it - so it is owner-only for the whole
+  # of its working life and takes `sys.config`'s mode only once there is nothing
+  # left to write to it. That has to be the order: the peer writes to this file
+  # too, so applying a read-only mode any earlier would stop the pipeline that is
+  # meant to fill it. The rename then carries the mode onto `sys.config`, and
+  # needs permission on the directory rather than on the file to do it.
   defp expand_into_scratch(peer, base) do
-    with :ok <- write_like(peer.scratch, base.bytes, peer.sys_config),
+    with :ok <- write_private(peer.scratch, base.bytes),
          {:ok, config} <- run(peer),
-         :ok <- write(peer.scratch, [head(base.header), format(config)]) do
+         :ok <- write(peer.scratch, [head(base.header), format(config)]),
+         :ok <- carry_mode(peer.sys_config, peer.scratch) do
       rename(peer.scratch, peer.sys_config)
     end
   end
@@ -567,38 +570,62 @@ defmodule Castle.Peer do
 
   ## Writing a file that holds configuration
   #
-  # There is one way to do it here, and it is `write_like/3`. Every file this
-  # module brings into existence holds a release's configuration - the base, and
-  # the scratch copy the providers are resolved into - so every one of them has
-  # to be no more readable than the `sys.config` it came from or is about to
-  # become. An operator who restricts that file has said something, and it has to
-  # hold for the copies too.
+  # There is one way to bring one into existence here, and it is
+  # `write_private/2`. Every file this module creates holds a release's
+  # configuration - the base, and the scratch copy the providers are resolved
+  # into - so none of them may be readable by anyone the `sys.config` it came
+  # from or is about to become would not let read it. An operator who restricts
+  # that file has said something, and it has to hold for the copies too.
   #
-  # The ordering is the whole of it, and it is inside the primitive rather than
-  # remembered at the call sites, because remembering is what failed: the mode
-  # is set while the file is still empty, so there is no moment at which it holds
-  # a configuration and is wider than it should be. Neither of the obvious ways
-  # round has that property. `File.write/2` creates with the process umask and
-  # never looks at a mode. `File.cp/2` does carry the mode, but it writes the
-  # whole file first and narrows it afterwards
-  # (`:file.copy` then `copy_file_mode/2`), which is the same exposure with a
+  # So the file is created owner-only, filled through that, and given the model's
+  # mode last. Not the other way round, which is the obvious reading of "set the
+  # mode before there is anything to read" and is wrong: a `sys.config` at 0440
+  # is an operator declaring their configuration read-only, and a file chmodded
+  # to 0440 before being filled cannot be filled. `File.write/2` reopens the path
+  # rather than writing through a handle held from creation, so the fill fails
+  # with `:eacces` and the install stops. Do not "simplify" the ordering back.
+  #
+  # 0600 satisfies both constraints at once rather than trading between them. It
+  # grants nothing at all to group or other, so the window cannot expose the
+  # contents to anyone the final mode would not - the transient state is
+  # narrower than the destination rather than merely different from it - and it
+  # leaves the file writable by its owner for as long as there is writing to do.
+  # Which, for the scratch, is until the last of three writes: this module fills
+  # it, the peer's pipeline writes the resolved configuration over it, and this
+  # module writes it again. The model's mode goes on after all of that, as the
+  # last thing done before the file becomes visible under its final name - which
+  # is also why a failure part-way through leaves it narrower than intended
+  # rather than wider.
+  #
+  # Neither of the obvious primitives has any of this. `File.write/2` creates
+  # with the process umask and never looks at a mode. `File.cp/2` does carry the
+  # mode, but it writes the whole file first and narrows it afterwards
+  # (`:file.copy`, then `copy_file_mode/2`), which is the same exposure with a
   # shorter window and was twice mistaken here for a fix.
   #
+  # What is not reproduced is ownership - only the mode bits are. See AGENTS.md.
+  #
   # These are public, along with `publish/2`, because the intermediate states are
-  # the point: a mode that is only ever correct after the content is written
-  # looks exactly like a mode that was correct all along, and a window nothing
-  # can stand in is a window nothing can test.
+  # the point: a mode that is only ever correct once the content is written looks
+  # exactly like a mode that was correct all along, and a window nothing can
+  # stand in is a window nothing can test.
 
   @doc false
   @spec write_like(Path.t(), iodata(), Path.t()) :: :ok | {:error, String.t()}
   def write_like(path, bytes, model) do
-    with :ok <- create_like(path, model), do: write(path, bytes)
+    with :ok <- write_private(path, bytes), do: carry_mode(model, path)
   end
 
   @doc false
-  @spec create_like(Path.t(), Path.t()) :: :ok | {:error, String.t()}
-  def create_like(path, model) do
-    with :ok <- write(path, ""), do: carry_mode(model, path)
+  @spec write_private(Path.t(), iodata()) :: :ok | {:error, String.t()}
+  def write_private(path, bytes) do
+    with :ok <- create_private(path), do: write(path, bytes)
+  end
+
+  @doc false
+  @spec create_private(Path.t()) :: :ok | {:error, String.t()}
+  def create_private(path) do
+    with :ok <- write(path, ""), do: chmod(path, 0o600)
   end
 
   @doc false

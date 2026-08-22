@@ -488,21 +488,19 @@ defmodule Castle.PeerTest do
   # state cannot tell the two apart, which is how the exposure survived being
   # fixed once.
   describe "writing a file that holds configuration" do
-    test "sets the mode before there is anything to read", %{tmp_dir: root} do
-      model = Path.join(root, "sys.config")
-      File.write!(model, "[].\n")
-      File.chmod!(model, 0o600)
-
+    test "is owner-only from the moment it exists", %{tmp_dir: root} do
       path = Path.join(root, "copy")
-      assert Castle.Peer.create_like(path, model) == :ok
+      assert Castle.Peer.create_private(path) == :ok
 
-      # The state the primitive exists to make unobservable-with-contents: the
-      # mode is already the model's, and the file is empty. Anything that got
-      # here first would find nothing worth having.
+      # The state that has to hold for as long as the file is being written:
+      # nothing granted to group or other, so whatever the mode it ends up with,
+      # there is no window in which the contents are readable by anyone that
+      # mode would exclude. Empty here as well, but that is not what carries the
+      # argument - the 0600 is.
       assert mode(path) == 0o600
       assert File.read!(path) == ""
 
-      assert Castle.Peer.write_like(path, "secret", model) == :ok
+      assert Castle.Peer.write_private(path, "secret") == :ok
       assert mode(path) == 0o600
       assert File.read!(path) == "secret"
     end
@@ -515,6 +513,20 @@ defmodule Castle.PeerTest do
       path = Path.join(root, "copy")
       assert Castle.Peer.write_like(path, "not secret", model) == :ok
       assert mode(path) == 0o644
+    end
+
+    test "fills a file whose mode will forbid writing it", %{tmp_dir: root} do
+      # The mode goes on last for this reason. Chmodded to 0440 first, the file
+      # could not be filled at all: File.write/2 reopens the path, so it would
+      # fail with :eacces against a file its own owner had just made read-only.
+      model = Path.join(root, "sys.config")
+      File.write!(model, "[].\n")
+      File.chmod!(model, 0o440)
+
+      path = Path.join(root, "copy")
+      assert Castle.Peer.write_like(path, "read only", model) == :ok
+      assert mode(path) == 0o440
+      assert File.read!(path) == "read only"
     end
 
     test "gives the file the configuration is resolved into sys.config's mode",
@@ -545,6 +557,32 @@ defmodule Castle.PeerTest do
 
       assert String.to_integer(File.read!(recorded), 8) == 0o600
       assert mode(Path.join(vsn_dir, "sys.config")) == 0o600
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
+    end
+
+    test "materialises a version whose configuration is read-only", %{tmp_dir: root} do
+      # An operator declaring their configuration read-only. Every file here is
+      # written before it takes that mode, and the two operations that move one
+      # into place - the link that publishes the base, and the rename that
+      # replaces sys.config - need permission on the directory rather than on the
+      # file, so none of this needs the mode relaxed again.
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      File.chmod!(sys_config, 0o440)
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      assert mode(Path.join(vsn_dir, "sys.config.pristine")) == 0o440
+      assert mode(sys_config) == 0o440
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
+
+      # And again, over a base that is itself read-only now.
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert mode(sys_config) == 0o440
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
     end
   end

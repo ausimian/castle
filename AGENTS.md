@@ -71,13 +71,34 @@ Castle's job is configuration and release management on a running node.
   so it does not try, and nothing reads that name. Do not "tidy up" stray
   `castle-*.pristine` files in code for the same reason.
 
-  **Every file this module creates goes through `Castle.Peer.write_like/3`, and
-  new ones must too.** Each of them holds a release's configuration — the base,
-  and the scratch copy the providers resolve into — so none of them may be more
-  readable than the `sys.config` it came from or is about to become: an operator
-  who restricts that file has said something, and it has to hold for the copies.
-  The primitive sets the mode while the file is still empty, so there is no
-  moment at which it holds a configuration and is wider than it should be.
+  **Every file this module creates comes into existence through
+  `Castle.Peer.write_private/2`, and new ones must too.** Each of them holds a
+  release's configuration — the base, and the scratch copy the providers resolve
+  into — so none of them may be readable by anyone the `sys.config` it came from
+  or is about to become would exclude: an operator who restricts that file has
+  said something, and it has to hold for the copies.
+
+  The file is created owner-only at 0600, filled through that, and given the
+  model's mode **last** — `write_like/3` is the two of those together, for a
+  file written once. Not the other way round, which is the obvious reading and
+  is wrong: a `sys.config` at 0440 is an operator declaring their configuration
+  read-only, and a file chmodded to 0440 before being filled cannot be filled.
+  `File.write/2` reopens the path rather than writing through a handle held from
+  creation, so the fill fails `:eacces` against a file its own owner has just
+  made read-only, and the install stops. Do not "simplify" the ordering back.
+
+  0600 satisfies both constraints at once rather than trading between them: it
+  grants nothing to group or other, so the transient state is *narrower* than
+  the destination rather than merely different from it, and it leaves the file
+  writable by its owner while there is writing to do. For the scratch that is
+  until the last of three writes — this module fills it, the peer's pipeline
+  writes the resolved configuration over it, this module writes it again — so
+  the mode goes on after all of them, immediately before the rename. A failure
+  part-way leaves the file narrower than intended, never wider. The two
+  operations that move one of these files into place, the link that publishes
+  the base and the rename that replaces `sys.config`, need permission on the
+  directory rather than on the file, so a restrictive mode never has to be
+  relaxed again.
 
   The ordering lives inside the primitive rather than at the call sites because
   remembering it at the call sites is what failed, three times. `File.write/2`
@@ -88,6 +109,18 @@ Castle's job is configuration and release management on a running node.
   state is identical either way, which is exactly why no test of the end state
   caught it. Do not add a fourth way to write one of these files; extend the
   primitive.
+
+  **Ownership and group are not reproduced — only the mode bits are.** This is a
+  property of the design, not an oversight. Reproducing them needs `chown`,
+  which needs privileges a release account does not have, and where Castle could
+  chown it is running as root, which is a worse problem than the one being
+  solved. Applying the model's numeric mode is what the operator asked for; that
+  the process's default group differs from the model's is an environmental fact
+  Castle cannot correct. So a deployment that restricts `sys.config` through
+  group ownership — `root:secrets` at 0640, say — needs the release account's
+  default group to be right for the version directory, because the base and the
+  scratch will be created with that group and the mode bits will be honoured
+  against it.
 
   `Castle.Commands.write_sys_config/2`, on the `build.config` path, is the one
   place this rule is not applied: it creates `sys.config` with the process umask
@@ -278,21 +311,24 @@ commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
 
-`Castle.Peer.write_like/3`, `create_like/2` and `publish/2` are public for the
-same kind of reason: what they guarantee is about *intermediate* states, and a
-window nothing can stand in is a window nothing can test. One test takes
-`write_like/3` and `publish/2` one at a time and looks at the destination in
-between — where it finds no file, rather than a partial one — then checks that
-publishing again is refused rather than allowed to replace. Another calls
-`create_like/2` and finds the mode already restricted with the file still empty,
-which is the state that makes the mode window unobservable-with-contents.
+`Castle.Peer.write_like/3`, `write_private/2`, `create_private/1` and
+`publish/2` are public for the same kind of reason: what they guarantee is about
+*intermediate* states, and a window nothing can stand in is a window nothing can
+test. One test takes `write_like/3` and `publish/2` one at a time and looks at
+the destination in between — where it finds no file, rather than a partial one —
+then checks that publishing again is refused rather than allowed to replace.
+Another calls `create_private/1` and finds the file already at 0600, which is the
+state that makes the window harmless whatever mode the file ends up with.
 
-That second one has to be written that way. The mode a file *ends up* with is
-the same whether it was set before or after the content, so a test of the end
-state passes either way — which is how the exposure survived a round of review
-that had already identified the class. The in-peer observation of the scratch
-file's mode is a regression guard on the site that was wrong, not a
-discriminator: it passes against the version that had the window too.
+Those have to be written that way. The mode a file *ends up* with is the same
+whether it was set before or after the content, so a test of the end state
+passes either way — which is how the exposure survived a round of review that had
+already identified the class. The in-peer observation of the scratch file's mode
+is a regression guard on the site that was wrong, not a discriminator: it passes
+against the version that had the window too. What *is* a discriminator, and the
+reason the ordering can no longer be reversed by accident, is the release whose
+`sys.config` is 0440: it materialises twice and both files end at 0440, where
+setting the mode first fails to write the file at all.
 
 Two of these tests would pass for the wrong reason if written carelessly, so
 they are written to fail when what they rest on moves. The compile-environment

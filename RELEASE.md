@@ -1,5 +1,53 @@
 ### Added
 
+- The configuration of the version being installed is now expanded by running
+  *that version's* config providers, in a temporary VM booted from that
+  version's own boot script on its own emulator, rather than by running provider
+  state stashed at build time in the version that happens to be running. A
+  provider module can differ between the two — which is precisely what an
+  upgrade may change — and only the target's own answer is the right one. It
+  also leaves Elixir's `Config.Provider` as the single implementation of the
+  provider pipeline: Castle drives it and no longer keeps a copy of it.
+
+  The temporary VM needs no epmd, no cookie, no node name and no distributed
+  Erlang: it talks to the running node over a socket on the loopback interface,
+  and whatever it prints — a provider explaining what it could not find, say —
+  arrives on the terminal that asked for the install. It is stopped on every way
+  out, including every failing one, and it cannot hold an install open: both its
+  boot and the work it is asked to do have deadlines. Everything that can refuse
+  to go on refuses before the upgrade is applied, so configuration that cannot
+  be expanded leaves an install that did not happen rather than one that
+  half did.
+
+  Each expansion starts from the configuration the release was built with, which
+  the first one copies aside as `sys.config.pristine` and none of them
+  overwrites. Config providers are not obliged to be idempotent, and the
+  familiar ones are not: a `runtime.exs` that sets a key only when an
+  environment variable is present says nothing about that key when it is absent,
+  so expanding over the previous result would leave a value behind after the
+  provider had stopped supplying it — and the version made permanent would be
+  configured differently from the way it goes on to boot. Expanding from the
+  original instead means installing and then committing produce the same answer
+  a boot would, which is the point of expanding at either. That copy is made
+  atomically and with the permissions `sys.config` has, so a partly written one
+  can never be found and read, and restricting `sys.config` — as an operator
+  might, since it holds credentials — restricts this too.
+
+  Among the things that refuse is the check Elixir makes on a configuration
+  before booting into it: that what `Application.compile_env/3` read when the
+  release was compiled is what the resolved configuration says now. A version
+  whose runtime configuration contradicts what it was compiled against is
+  refused here, where refusing costs nothing, rather than accepted and then
+  found to be unbootable — which, for an upgrade that restarts, is found on the
+  way back up with a rollback as the only way out.
+
+  Which way a release is configured is settled by the release itself. One whose
+  configuration was intercepted at build time — every release assembled by the
+  Forecastle this is released alongside, recognisable by the `build.config` in
+  its version directory — is expanded exactly as it was before, so nothing about
+  installing or committing such a release changes. The new path is taken by a
+  release whose ordinary Mix provider pipeline is intact, which is the shape
+  Forecastle stops interfering with in its own next release.
 - `Castle.Error`, the exception raised by a release-management command that did
   not succeed.
 - `Castle.running/1`, which succeeds when the version it is given is the

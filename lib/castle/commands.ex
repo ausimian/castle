@@ -67,6 +67,46 @@ defmodule Castle.Commands do
   end
 
   @doc """
+  Materialises the configuration of the release in `rel_vsn_dir`.
+
+  Two shapes of release reach this, and the presence of `build.config` is what
+  tells them apart. Forecastle used to intercept configuration at assembly time:
+  it stripped the providers out of the release, stashed their initialised state
+  under this application's key, and renamed the `sys.config` Mix had written to
+  `build.config`. The only thing that can expand a release assembled that way is
+  `generate/1`, folding the stashed state over the file it was taken from - and
+  the presence of `build.config` is the test rather than the absence of
+  `sys.config`, because from its first boot onwards such a release has both:
+  writing one beside the other is what `generate/1` does.
+
+  A release Mix configured normally has its providers where Mix put them and its
+  `sys.config` under the name Mix gave it, and nothing has been renamed - so the
+  absence of `build.config` says the pipeline is intact, and the target can be
+  evaluated the way Elixir intends: in a VM of its own, running its own
+  providers, which is what `Castle.Peer` does. That is the only sound way to do
+  it, since a provider module can differ between the version that is running and
+  the version being installed.
+
+  The module is an argument for the same reason `:release_handler` is: so that a
+  test can watch which way the decision went without starting a VM.
+  """
+  @spec materialise(Path.t(), module()) :: result()
+  def materialise(rel_vsn_dir, peer \\ Castle.Peer) do
+    cond do
+      File.exists?(Path.join(rel_vsn_dir, "build.config")) ->
+        generate(rel_vsn_dir)
+
+      File.dir?(rel_vsn_dir) ->
+        peer.materialise(rel_vsn_dir)
+
+      true ->
+        {:error,
+         "Cannot configure #{Path.basename(rel_vsn_dir)}: #{rel_vsn_dir} does not exist. " <>
+           "Unpack the release first."}
+    end
+  end
+
+  @doc """
   Expands the build-time configuration in `rel_vsn_dir` into its `sys.config`.
 
   The directory is the version directory of the release being configured. It is

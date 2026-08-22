@@ -14,13 +14,191 @@ Castle's job is configuration and release management on a running node.
   as that version's `sys.config`. This is the whole reason the pair exists:
   Mix expands runtime configuration once, at boot, from the version it booted;
   Castle re-expands it for the version being upgraded *to*, before the relup
-  runs.
+  runs. It is now the older of two ways to do that — see the next bullet — and
+  goes away with the third step of
+  [#13](https://github.com/ausimian/castle/issues/13).
+- **Materialising the target's configuration**, which `install/1` and `commit/1`
+  do before they hand a version to `:release_handler`. Which way depends on
+  whether `releases/<vsn>/build.config` exists, and that is a sound
+  discriminator because it is Forecastle that creates it: assembling a release
+  today strips the providers out, stashes their initialised state under
+  `:castle`, and renames the `sys.config` Mix wrote to `build.config`. So the
+  file is present exactly when the configuration was intercepted at build time,
+  and `Castle.generate/1` is then the only thing that can expand it. Note that
+  it has to be the *presence of `build.config`* rather than the absence of
+  `sys.config`: once such a release has booted once, it has both.
+
+  When it is absent, Mix's pipeline is intact and `Castle.Peer` materialises the
+  configuration instead: a `:peer` reached over a loopback socket — so no epmd,
+  cookie, node name or distribution; the peer reports `nonode@nohost` and
+  `is_alive() == false` — booted on the target's own `preboot` script and its
+  own emulator, which runs `Config.Provider.boot/1` over the target's own
+  provider modules and hands the resolved configuration back to be written.
+  Castle does not fold providers itself, and must not acquire the ability to:
+  the point of #13 is that Elixir's pipeline stays the only implementation of
+  it. What Castle arranges is that the pipeline *writes* rather than configuring
+  the VM it happens to be in, which is one field of the provider state and a
+  reboot function that does nothing.
+
+  A provider module can differ between the version that is running and the
+  version being installed, which is why this cannot be done on the running
+  node, and is what the peer earns.
+
+  Six things about it are load-bearing.
+
+  Every evaluation starts from the configuration Mix wrote, and never from the
+  result of the last one. Providers are not obliged to be idempotent and the
+  ones people write are not — `if System.get_env("FEATURE"), do: config …` in a
+  `runtime.exs` sets a key on a run where the variable is set and says nothing
+  about it on a run where it is not — so resolving over the previous result
+  would leave that key behind, and the version an operator commits would be
+  configured differently from the way it boots. `sys.config` cannot be the base,
+  because that is the file `:release_handler` reads and so the file the resolved
+  result has to land in; the first materialisation therefore copies it to
+  `sys.config.pristine` and every later one seeds from there.
+
+  That copy is staged under a name of its own, given the mode `sys.config` has,
+  and published by hard link. Not written to its final name, and an exclusive
+  create is not enough either: exclusivity makes *creation* atomic, not
+  publication, so the file exists and is empty between the open and the write —
+  long enough for a racing reader to see something that is not a configuration,
+  and, if the install died there, long enough to leave a truncated base that
+  every later evaluation would prefer to the original still in `sys.config`. A
+  link publishes a file that is already complete, and refuses rather than
+  replaces, so the loser of a race reads what the winner published instead of
+  its own copy. Staging that never gets published is left where it is: an
+  install cannot tell its own leftovers from another install's work in progress,
+  so it does not try, and nothing reads that name. Do not "tidy up" stray
+  `castle-*.pristine` files in code for the same reason.
+
+  **Every file this module creates comes into existence through
+  `Castle.Peer.write_private/2`, and new ones must too.** Each of them holds a
+  release's configuration — the base, and the scratch copy the providers resolve
+  into — so none of them may be readable by anyone the `sys.config` it came from
+  or is about to become would exclude: an operator who restricts that file has
+  said something, and it has to hold for the copies.
+
+  The file is created owner-only at 0600, filled through that, and given the
+  model's mode **last** — `write_like/3` is the two of those together, for a
+  file written once. Not the other way round, which is the obvious reading and
+  is wrong: a `sys.config` at 0440 is an operator declaring their configuration
+  read-only, and a file chmodded to 0440 before being filled cannot be filled.
+  `File.write/2` reopens the path rather than writing through a handle held from
+  creation, so the fill fails `:eacces` against a file its own owner has just
+  made read-only, and the install stops. Do not "simplify" the ordering back.
+
+  0600 satisfies both constraints at once rather than trading between them: it
+  grants nothing to group or other, so the transient state is *narrower* than
+  the destination rather than merely different from it, and it leaves the file
+  writable by its owner while there is writing to do. For the scratch that is
+  until the last of three writes — this module fills it, the peer's pipeline
+  writes the resolved configuration over it, this module writes it again — so
+  the mode goes on after all of them, immediately before the rename. A failure
+  part-way leaves the file narrower than intended, never wider. The two
+  operations that move one of these files into place, the link that publishes
+  the base and the rename that replaces `sys.config`, need permission on the
+  directory rather than on the file, so a restrictive mode never has to be
+  relaxed again.
+
+  The ordering lives inside the primitive rather than at the call sites because
+  remembering it at the call sites is what failed, three times. `File.write/2`
+  creates with the process umask and never looks at a mode. `File.cp/2` *does*
+  carry the mode — and was adopted here for that reason — but it writes the whole
+  file first and narrows it afterwards (`:file.copy`, then `copy_file_mode/2` at
+  `file.ex:1285`), which is the same exposure with a shorter window. The end
+  state is identical either way, which is exactly why no test of the end state
+  caught it. Do not add a fourth way to write one of these files; extend the
+  primitive.
+
+  **Ownership and group are not reproduced — only the mode bits are.** This is a
+  property of the design, not an oversight. Reproducing them needs `chown`,
+  which needs privileges a release account does not have, and where Castle could
+  chown it is running as root, which is a worse problem than the one being
+  solved. Applying the model's numeric mode is what the operator asked for; that
+  the process's default group differs from the model's is an environmental fact
+  Castle cannot correct. So a deployment that restricts `sys.config` through
+  group ownership — `root:secrets` at 0640, say — needs the release account's
+  default group to be right for the version directory, because the base and the
+  scratch will be created with that group and the mode bits will be honoured
+  against it.
+
+  `Castle.Commands.write_sys_config/2`, on the `build.config` path, is the one
+  place this rule is not applied: it creates `sys.config` with the process umask
+  when the file does not exist yet. There is no transient exposure there — the
+  mode it is granted is the mode it keeps — and that path is deleted in step 3,
+  while "nothing observable changes for a release assembled by today's
+  Forecastle" pins its behaviour until then. It is a real gap, recorded rather
+  than fixed here.
+
+  A base that cannot be read as a configuration is refused, naming the remedy,
+  rather than resolved from: it is preferred to `sys.config` by definition, so
+  failing loudly is the only safe thing left.
+
+  This is permanent design: the `build.config` path has always had a pristine
+  base —
+  `build.config` *is* one — and this is what carries that property forward when
+  step 3 deletes it. It is deliberately not called `build.config`, since that
+  name is the discriminator and would send the release back down the path being
+  removed. `sys.config` gains a `CASTLE_MATERIALISED` comment line, which makes
+  the invariant checkable: written by Castle, so a base must exist. A version
+  that says that and has no base beside it is refused, with the remedy (unpack
+  it again) named, rather than having a once-resolved configuration captured as
+  though it were the original.
+
+  With a pristine base, materialising at `commit` is not merely harmless but
+  right: it produces what a boot at commit time would produce, which is the
+  point of doing it there.
+
+  The peer is started linked and stopped on every path out, including the
+  failing ones; `wait_boot` and the call both have deadlines, so a peer that
+  never answers cannot hold an install open. Everything that can refuse — a
+  missing boot script, an emulator that is not there, a provider that raises, a
+  compile environment that does not agree — refuses before `install_release/1`
+  is called. The resolved configuration is assembled in a copy beside
+  `sys.config` and renamed onto it, so a version never holds half a
+  configuration.
+
+  The control connection is a socket rather than `connection: :standard_io`,
+  which is what the issue suggested. Standard IO multiplexes the peer's console
+  output with the frames carrying the call over one byte stream and reserves
+  sixteen byte values for the framing, every one of them a UTF-8 lead byte — so
+  a provider, or a NIF under it, writing an accented character straight to a
+  file descriptor fails the frame's checksum and takes the control process down,
+  refusing an install that was about to succeed. Nothing outside `:peer` can
+  harden that; the shared stream *is* the mechanism. The socket costs the
+  diagnosis of a peer that cannot boot: a detached peer says nothing on its way
+  down and the origin holds no handle on it, so a failed boot is noticed when
+  the deadline expires rather than at once and with the emulator's reason. That
+  was the trade, and it went the way it did because a broken release is broken
+  either way while a working one must not be refused.
+
+  Because a detached peer's descriptors are the null device, its standard error
+  is relayed through its `user` process — which is what makes Elixir's account
+  of a provider that raised reach the operator at all. A raw write still goes
+  nowhere, which is the safe direction.
+
+  `Castle.Peer.resolve/1` is called *in the target release*, so
+  `{Castle.Peer, :resolve, 1}` is a contract between one version of Castle and
+  the next. A target too old to have it fails the call and the install is
+  refused.
+
+  Finally, `Castle.Peer` makes the compile-environment check Elixir would have
+  made, with Elixir's own validator. Elixir makes it in the branch that
+  *applies* a resolved configuration, and again on the boot that follows the
+  branch that *writes* one; this drives the writing branch and nothing boots
+  afterwards, so without it a release Elixir considers unbootable would be
+  installed and the problem found on the way up, where the only way out is a
+  rollback. Do not weaken it into something that skips when it does not
+  recognise what it was given: it refuses instead, because a check that silently
+  passes everything looks exactly like a check that works.
+
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
   can manage its own upgrades.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
-  over `:release_handler`, with `generate/1` called ahead of `install` and
-  `commit` so the target version's configuration exists before it is booted.
+  over `:release_handler`, with the target version's configuration materialised
+  ahead of `install` and `commit` so that it exists before the version is
+  booted.
 - **`Castle.running/1`** — succeeds when the version it is given is the release
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
@@ -77,8 +255,9 @@ into this module.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
+| `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
-| `test/support/` | Stubs for `:release_handler`, `:init` and a config provider |
+| `test/support/` | Stubs for `:release_handler`, `:init`, the peer and config providers, plus the release-shaped tree a real peer is booted on |
 
 ## Working on this project
 
@@ -97,14 +276,68 @@ into this module.
 
 ## Tests
 
-`mix test` covers `Castle.Commands` as units. `:release_handler` and `:init` are
-reached through module arguments that default to them, so the tests hand them
-`Castle.ReleaseHandlerStub` and `Castle.InitStub` instead; `generate/1` takes
-the version directory it writes to, so the tests give it a `tmp_dir` holding a
-synthetic `build.config`. `test/castle_test.exs` drives the boundary itself
-against the real `:release_handler` — which is running under `mix test`, because
-castle depends on sasl — and the real `:init`, naming releases that do not
-exist.
+`mix test` covers `Castle.Commands` as units. `:release_handler`, `:init` and
+`Castle.Peer` are reached through module arguments that default to them, so the
+tests hand them `Castle.ReleaseHandlerStub`, `Castle.InitStub` and
+`Castle.PeerStub` instead; `generate/1` and `materialise/2` take the version
+directory they work on, so the tests give them a `tmp_dir`.
+`test/castle_test.exs` drives the boundary itself against the real
+`:release_handler` — which is running under `mix test`, because castle depends
+on sasl — and the real `:init`, naming releases that do not exist.
+
+`test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
+peer would prove nothing about the one thing it exists to do, which is to run a
+release's *own* code. `Castle.SyntheticRelease` lays out a directory tree with
+everything `Castle.Peer` needs — an emulator launcher under `erts-<vsn>/bin`,
+applications under `lib/<app>-<vsn>`, a `systools` boot script over them, a
+release file and a `sys.config` — so a peer boots on the same kind of script a
+release ships, without a `mix release`. The test that matters most compiles two
+versions of one provider module, loads one into the node running the tests and
+puts the other on the peer's code path, and asserts that the answer came from
+the peer's. Peer cleanup is asserted from outside: a provider records the
+operating system pid of the VM it ran in, and the test waits for it to go.
+
+`Castle.Peer.materialise/2` takes `:boot_timeout` and `:resolve_timeout` for the
+same reason `Castle.Commands` takes the module to talk to — a deadline nothing
+can shorten is a deadline no test can show is enforced. Two tests give it a
+second and assert that the refusal names it, which is what keeps the deadlines
+from being a claim in a comment.
+
+Idempotence is asserted against a control rather than against a hard-coded
+expectation: two versions of the same release are built in one root, sharing a
+`runtime.exs` so that the state the providers carry is identical, one is
+materialised twice with the environment changing in between — install, then
+commit — and the other once with the environment as it ended up. The two
+`sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
+its symlinks idempotently: a root has to be able to hold two versions.
+
+`Castle.Peer.write_like/3`, `write_private/2`, `create_private/1` and
+`publish/2` are public for the same kind of reason: what they guarantee is about
+*intermediate* states, and a window nothing can stand in is a window nothing can
+test. One test takes `write_like/3` and `publish/2` one at a time and looks at
+the destination in between — where it finds no file, rather than a partial one —
+then checks that publishing again is refused rather than allowed to replace.
+Another calls `create_private/1` and finds the file already at 0600, which is the
+state that makes the window harmless whatever mode the file ends up with.
+
+Those have to be written that way. The mode a file *ends up* with is the same
+whether it was set before or after the content, so a test of the end state
+passes either way — which is how the exposure survived a round of review that had
+already identified the class. The in-peer observation of the scratch file's mode
+is a regression guard on the site that was wrong, not a discriminator: it passes
+against the version that had the window too. What *is* a discriminator, and the
+reason the ordering can no longer be reversed by accident, is the release whose
+`sys.config` is 0440: it materialises twice and both files end at 0440, where
+setting the mode first fails to write the file at all.
+
+Two of these tests would pass for the wrong reason if written carelessly, so
+they are written to fail when what they rest on moves. The compile-environment
+test asserts the *refusal*, over provider state built by
+`Config.Provider.init/3`: if Elixir stops representing that check as a list of
+triples, `init/3` stops producing one, no refusal happens, and the test fails.
+It is paired with a release whose check is satisfied, so that "refuses
+everything" cannot pass for "checks correctly", and with one carrying a shape
+Elixir does not produce, which has to be refused rather than skipped.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -119,10 +352,21 @@ each command prints. Those strings — `Unpacked <vsn> ok`,
 - **Concurrent boots race on `sys.config`.** `generate/1` writes into the
   version directory, so simultaneous `start`/`daemon`/`eval` invocations with
   differing environments overwrite each other's configuration. Do not fix this
-  by letting callers choose where the configuration is written: it goes away
-  with [#13](https://github.com/ausimian/castle/issues/13), which materialises
-  the target release's configuration in a `:peer` running its own config
-  providers, and takes `Castle.generate/1` with it.
+  by letting callers choose where the configuration is written: it goes with
+  `generate/1` itself, once
+  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) has stopped
+  intercepting configuration at build time and the third step of
+  [#13](https://github.com/ausimian/castle/issues/13) has deleted the path that
+  reads `build.config`. The peer path does not have it — nothing boots to
+  configure a target — but a boot still goes through `generate/1` until then.
+- **How the materialised `sys.config` and a later cold boot of the same version
+  interact is not verified yet.** Both write the same file. Materialisation
+  resolves from `sys.config.pristine` and leaves no `config_provider_booted`
+  marker behind, so a cold boot re-runs the providers over the materialised
+  result — which is what the issue expects, and what the header Mix wrote is
+  preserved for. It only becomes reachable with
+  [forecastle#6](https://github.com/ausimian/forecastle/issues/6), and belongs
+  there.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

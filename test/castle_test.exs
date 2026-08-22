@@ -24,8 +24,20 @@ defmodule CastleTest do
       assert_raise Castle.Error, ~r/9\.9\.9\/build\.config/, fn -> Castle.generate("9.9.9") end
     end
 
-    test "does not install a version whose configuration could not be generated" do
-      assert_raise Castle.Error, ~r/9\.9\.9\/build\.config/, fn -> Castle.install("9.9.9") end
+    # The configuration of the target has to exist before the target is handed
+    # to :release_handler, so materialising it comes first and a failure to
+    # materialise it stops there. What is raised says so: it is the refusal to
+    # configure a version that was never unpacked, not the refusal to install
+    # one, which is what install_release/1 would have answered had it been
+    # asked.
+    test "does not install a version whose configuration could not be materialised" do
+      for command <- [&Castle.install/1, &Castle.commit/1] do
+        assert_raise Castle.Error,
+                     ~r/^Cannot configure 9\.9\.9: .*Unpack the release first\.$/,
+                     fn ->
+                       command.("9.9.9")
+                     end
+      end
     end
 
     test "prints what a successful operation has to report" do

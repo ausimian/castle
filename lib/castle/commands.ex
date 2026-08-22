@@ -111,25 +111,47 @@ defmodule Castle.Commands do
 
   The running release is selected the way `running/3` selects it: the `current`
   one if there is one, and the `permanent` one otherwise.
+
+  This is the question on its own, for an operator who wants it answered without
+  acting on the answer. It is not what protects an upgrade: `unpack/2` and
+  `install/2` ask it themselves, from inside the operation, because an answer
+  given to one caller and acted on by another is an answer about a moment that
+  has passed - the node can restart in between, and the node that comes back
+  synthesises the record afresh. Nothing has to call this first, and putting it
+  back in front of them would not make them safer.
   """
   @spec upgradable(module()) :: result()
   def upgradable(handler \\ :release_handler) do
+    case ensure_upgradable("This system cannot be upgraded", handler) do
+      :ok -> {:ok, []}
+      refusal -> refusal
+    end
+  end
+
+  # The check `unpack/2` and `install/2` make before they touch
+  # `:release_handler`, and what `upgradable/1` answers on its own.
+  #
+  # `refusal` is what the message leads with, and it names the operation rather
+  # than the state: this is not a precondition an operator forgot to ask about,
+  # it is the unpack or the install refusing, and what they need told is that it
+  # did not happen.
+  defp ensure_upgradable(refusal, handler) do
     case running_release(handler) do
       {_vsn, [_ | _]} ->
-        {:ok, []}
+        :ok
 
       {vsn, []} ->
         {:error,
-         "#{vsn} is running from a release record OTP built from the boot script, which " <>
-           "names no applications: releases/RELEASES was missing, or could not be read, " <>
-           "when the system booted. An upgrade from it reports success and leaves any " <>
-           "application whose version changed, but whose code the upgrade does not load, " <>
-           "running its old code. Creating the file now would not change the record this " <>
-           "node works from. Restart the system before upgrading it: the release creates " <>
-           "the file before it starts."}
+         "#{refusal}: #{vsn} is running from a release record OTP built from the boot " <>
+           "script, which names no applications - releases/RELEASES was missing, or could " <>
+           "not be read, when the system booted. An upgrade from that record reports " <>
+           "success and leaves any application whose version changed, but whose code the " <>
+           "upgrade does not load, running its old code. Creating the file now would not " <>
+           "change the record this node works from. Restart the system: the release " <>
+           "creates the file before it starts."}
 
       nil ->
-        {:error, "No release is running, so this system cannot be upgraded."}
+        {:error, "#{refusal}: no release is running."}
     end
   end
 
@@ -172,39 +194,80 @@ defmodule Castle.Commands do
 
   @doc """
   Unpacks the named release tarball.
+
+  Refuses a system running from the record `:release_handler` synthesised for
+  itself - see `upgradable/1` for what that record is and why an upgrade from it
+  is worse than being stopped - and refuses it here, in the same call that would
+  have done the unpacking, rather than leaving a caller to ask first. Two calls
+  are two moments and possibly two node instances: a node can pass the question
+  on the strength of a record it read at boot and restart, onto a synthesised
+  one, before the second call arrives. The answer is only good for the call that
+  acts on it.
+
+  Unpacking is checked as well as installing, and not because `unpack_release/1`
+  compares release records - it does not, and an unpack cannot switch a code
+  path. It is because it is the one other operation that *writes* them:
+  `do_unpack_release/4` ends in `write_releases/3` over the records the handler
+  holds, so unpacking on such a node puts the synthesised record - the one that
+  names no applications - into `RELEASES`, where the next boot reads it back as
+  though it had always been there. The remedy the refusal names is a restart,
+  and a restart only works while the file is absent, because
+  `Castle.make_releases/0` does nothing when it is there. An unpack allowed
+  through would take that remedy away and leave the system with no way back.
   """
   @spec unpack(String.t(), module()) :: result()
   def unpack(name, handler \\ :release_handler) do
-    case handler.unpack_release(to_charlist(name)) do
-      {:ok, vsn} -> {:ok, ["Unpacked #{vsn} ok"]}
-      {:error, reason} -> {:error, "Failed to unpack #{name}. #{inspect(reason)}"}
+    with :ok <- ensure_upgradable("Cannot unpack #{name}", handler) do
+      case handler.unpack_release(to_charlist(name)) do
+        {:ok, vsn} -> {:ok, ["Unpacked #{vsn} ok"]}
+        {:error, reason} -> {:error, "Failed to unpack #{name}. #{inspect(reason)}"}
+      end
     end
   end
 
   @doc """
   Installs `vsn` and makes it the version that is running now.
+
+  Refuses, before `install_release/1` is asked for anything, a system running
+  from the record `:release_handler` synthesised for itself - see `upgradable/1`
+  for what such an install would silently leave behind. This is the operation the
+  check exists for, and it is made here, in the same call, for the reason
+  `unpack/2` makes it: a check a caller makes in a call of its own is a statement
+  about the node that answered it, and the node that acts may be a later one that
+  has restarted onto a synthesised record.
+
+  `commit/2`, `remove/2` and `releases/1` are not checked, and that is not an
+  omission. None of them can write the synthesised record back:
+  `do_make_permanent/2` returns early for a release that is already permanent
+  and errors for every other status, `do_remove_release/4` refuses the permanent
+  release outright, and `releases/1` only reads. What checking them could do is
+  refuse an upgrade that is already under way - a version installed and waiting
+  to be committed, which a refusal would strand until the next restart put the
+  previous release back.
   """
   @spec install(String.t(), module()) :: result()
   def install(vsn, handler \\ :release_handler) do
-    case handler.install_release(to_charlist(vsn)) do
-      {:ok, other_vsn, _descr} ->
-        {:ok, ["Now running #{vsn} (previously #{other_vsn})."]}
+    with :ok <- ensure_upgradable("Cannot install #{vsn}", handler) do
+      case handler.install_release(to_charlist(vsn)) do
+        {:ok, other_vsn, _descr} ->
+          {:ok, ["Now running #{vsn} (previously #{other_vsn})."]}
 
-      # The emulator, or one of kernel, stdlib and sasl, is being replaced, so
-      # the node reboots and the upgrade instructions run after it comes back.
-      # Nothing has failed.
-      {:continue_after_restart, other_vsn, _descr} ->
-        {:ok,
-         [
-           "Restarting to install #{vsn} (previously #{other_vsn}).",
-           "The upgrade continues once the emulator has restarted."
-         ]}
+        # The emulator, or one of kernel, stdlib and sasl, is being replaced, so
+        # the node reboots and the upgrade instructions run after it comes back.
+        # Nothing has failed.
+        {:continue_after_restart, other_vsn, _descr} ->
+          {:ok,
+           [
+             "Restarting to install #{vsn} (previously #{other_vsn}).",
+             "The upgrade continues once the emulator has restarted."
+           ]}
 
-      {:error, reason} ->
-        {:error, "Install of #{vsn} failed. #{inspect(reason)}"}
+        {:error, reason} ->
+          {:error, "Install of #{vsn} failed. #{inspect(reason)}"}
 
-      other ->
-        {:error, "Install of #{vsn} returned an unexpected result. #{inspect(other)}"}
+        other ->
+          {:error, "Install of #{vsn} returned an unexpected result. #{inspect(other)}"}
+      end
     end
   end
 

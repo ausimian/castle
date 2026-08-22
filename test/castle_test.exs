@@ -20,11 +20,14 @@ defmodule CastleTest do
       end
     end
 
-    # The gate rests on a claim about OTP's own data: a release record read from
+    # The check rests on a claim about OTP's own data: a release record read from
     # a RELEASES file names applications, and only the record release_handler
     # synthesises when it cannot read one names none. The release_handler running
     # here read the OTP installation's own RELEASES file, so what this checks is
-    # that claim, against a real record rather than a stub.
+    # that claim, against a real record rather than a stub. The unpack above
+    # depends on it too, now that unpack/1 makes the same check for itself: on an
+    # installation with no releases/RELEASES it would be refused for the record
+    # instead of for the release that does not exist, and this test says why.
     test "confirms a system whose record came from a RELEASES file, silently" do
       assert [{_, _, [_ | _], _} | _] = :release_handler.which_releases()
       assert capture_io(&Castle.upgradable/0) == ""

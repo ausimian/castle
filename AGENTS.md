@@ -97,14 +97,33 @@ Castle's job is configuration and release management on a running node.
   and removing it if it is not. `plan/2` is the one place the two file paths are
   decided, and it puts both inside that directory under the names they will have
   when they leave. Each is created **exclusively**, so a name already at the
-  path is refused rather than followed or truncated.
+  path is refused rather than followed or truncated, and each is **written
+  through the handle that exclusive open returned**.
 
-  **The rule is create, narrow, then verify.** The verification is not
-  decoration and it is not defence in depth: it is there because five successive
-  attempts to reason about whether a window was harmless were all wrong, and a
-  sixth judgement of the same kind is worth nothing. Do not remove it on the
-  grounds that you can see why the window is safe. That is precisely the
-  sentence that preceded each of the previous five findings.
+  **Never reopen a name to place content.** The exclusive open's whole value is
+  that it establishes the name did not exist; closing the handle and reopening
+  the same name by path throws that away, and anything able to create the name
+  in between is handed the configuration. `write_private/2` therefore creates
+  and fills in one movement — there is deliberately no way here to bring one of
+  these files into existence without also placing its content, because
+  separating the two is what let a reopen back in.
+
+  The `chmod` is the one step that still goes by path, because OTP has nothing
+  that sets a mode on an open file: `:file.change_mode/2` and
+  `:file.write_file_info/2` take a name and reject a handle (`:badarg` and
+  `:function_clause`). That is an accepted asymmetry rather than an oversight.
+  By the time it runs the content is already committed to the inode the open
+  created, so a name swapped underneath it does not receive the configuration —
+  it gets narrowed, which is Castle setting some other file to 0600 inside a
+  directory it verified empty and made 0700. A nuisance, not a disclosure.
+
+  **The rule is create, narrow, then verify — and write through the handle you
+  created.** The verification is not decoration and it is not defence in depth:
+  it is there because five successive attempts to reason about whether a window
+  was harmless were all wrong, and a sixth judgement of the same kind is worth
+  nothing. Do not remove it on the grounds that you can see why the window is
+  safe. That is precisely the sentence that preceded each of the previous five
+  findings.
 
   The particular argument it replaced, so nobody reconstructs it: an empty
   directory has nothing behind the window, and permission to traverse a
@@ -145,30 +164,34 @@ Castle's job is configuration and release management on a running node.
   `mkdir` and ignored the `chmod`, where none of this can be honoured and the
   operator's own mode on `sys.config` would not be either.
 
-  Inside the directory the file is still created owner-only at 0600, filled
-  through that, and given the model's mode **last** — `write_like/3` is the two
-  of those together, for a file written once. Not the other way round, which is
-  the obvious reading and is wrong: a `sys.config` at 0440 is an operator
-  declaring their configuration read-only, and a file chmodded to 0440 before
-  being filled cannot be filled. `File.write/2` reopens the path rather than
-  writing through a handle held from creation, so the fill fails `:eacces`
-  against a file its own owner has just made read-only, and the install stops.
-  Do not "simplify" the ordering back.
+  The file is given 0600 on creation and the model's mode **last** —
+  `write_like/3` is `write_private/2` plus that, for a file written once. The
+  ordering matters for the writes that come *after*, not for the first one: a
+  `sys.config` at 0440 is an operator declaring their configuration read-only,
+  and the scratch is written twice more after Castle creates it — the peer's
+  pipeline writes the resolved configuration over it, then this module writes it
+  again — with both of those reopening the name, and a file at 0440 cannot be
+  reopened for writing. So the model's mode goes on last of all, immediately
+  before the rename, and a failure part-way leaves the file narrower than
+  intended rather than wider. Do not "simplify" the ordering back.
 
-  0600 satisfies both constraints at once rather than trading between them: it
-  grants nothing to group or other, so every transient state is *narrower* than
-  the destination rather than merely different from it, and it leaves the file
-  writable by its owner while there is writing to do. For the scratch that is
-  until the last of three writes — this module fills it, the peer's pipeline
-  writes the resolved configuration over it, this module writes it again — so
-  the mode goes on after all of them, immediately before the rename. A failure
-  part-way leaves the file narrower than intended, never wider. It is no longer
-  the 0600 that closes the window — the directory is — so treat it as the belt to
-  that braces, and keep it. The two operations that move one of these files into
-  place, the link that publishes the base and the rename that replaces
-  `sys.config`, need permission on the directories rather than on the file, so a
-  restrictive mode never has to be relaxed again; nor does removing what is left
-  in the working directory afterwards.
+  **The scratch's later writes rest on the directory, not on the handle.** One of
+  them is `Config.Provider.write_config!`, which is `File.write/2` in Elixir's
+  own code, in the peer's VM — driving Elixir's pipeline is what this module is
+  for, so that is not ours to change and must not be worked around. Nor may the
+  creation handle be held open across the peer's run to cover them: the peer
+  writes by name in a VM of its own, and a handle kept here would go on pointing
+  at whichever inode the name had when it was opened. Elixir truncates the same
+  inode today; one that wrote a temporary file and renamed it would leave the
+  handle on an orphan and the configuration written through it would silently be
+  nobody's. What protects those writes is that the directory was verified empty,
+  is 0700, and holds only names Castle created.
+
+  The two operations that move one of these files into place, the link that
+  publishes the base and the rename that replaces `sys.config`, need permission
+  on the directories rather than on the file, so a restrictive mode never has to
+  be relaxed again; nor does removing what is left in the working directory
+  afterwards.
 
   `File.write/2` creates with the process umask and never looks at a mode.
   `File.cp/2` *does* carry the mode — and was adopted here for that reason — but
@@ -380,13 +403,23 @@ commit — and the other once with the environment as it ended up. The two
 its symlinks idempotently: a root has to be able to hold two versions.
 
 `Castle.Peer.work_dir/1`, `secure_dir/1`, `write_like/3`, `write_private/2`,
-`create_private/1` and `publish/2` are public for the same kind of reason: what
-they guarantee is about *intermediate* states, and a window nothing can stand in
-is a window nothing can test. One test takes `work_dir/1`, `write_like/3` and
-`publish/2` one at a time and looks at the destination in between — where it finds
-no file, rather than a partial one — then checks that publishing again is refused
-rather than allowed to replace. Another calls `work_dir/1` and finds the
-directory at 0700 and still empty.
+`create_exclusive/1`, `fill/3` and `publish/2` are public for the same kind of
+reason: what they guarantee is about *intermediate* states, and a window nothing
+can stand in is a window nothing can test. One test takes `work_dir/1`,
+`write_like/3` and `publish/2` one at a time and looks at the destination in
+between — where it finds no file, rather than a partial one — then checks that
+publishing again is refused rather than allowed to replace. Another calls
+`work_dir/1` and finds the directory at 0700 and still empty. Call sites use
+`write_private/2`; `create_exclusive/1` and `fill/3` are public only so that the
+window between them can be stood in, and never to be called in sequence by
+anything else.
+
+`fill/3` being separable is what lets a test swap the name between the exclusive
+open and the write, and assert that the content reached the inode that was
+created while the file the name now points at never saw it — with that same test
+asserting the acknowledged cost, that the by-path `chmod` does land on the
+swapped name. With the name left alone the two behaviours are identical, so
+there is no other way to tell them apart.
 
 `secure_dir/1` is public so that the `mkdir`-to-`chmod` window can be stood in:
 a test creates a directory at 0777, plants a `sys.config` symlink inside it, and

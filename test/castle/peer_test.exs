@@ -588,13 +588,48 @@ defmodule Castle.PeerTest do
       # existence.
       taken = Path.join(work, "taken")
       File.write!(taken, "already here")
-      assert {:error, _} = Castle.Peer.create_private(taken)
+      assert {:error, _} = Castle.Peer.write_private(taken, "the configuration")
       assert File.read!(taken) == "already here"
 
       dangling = Path.join(work, "dangling")
       File.ln_s!(Path.join(root, "nowhere"), dangling)
-      assert {:error, _} = Castle.Peer.create_private(dangling)
+      assert {:error, _} = Castle.Peer.write_private(dangling, "the configuration")
       refute File.exists?(Path.join(root, "nowhere"))
+    end
+
+    test "writes through the handle it created, never through the name again",
+         %{tmp_dir: root} do
+      # What the exclusive open establishes is that the name was free. Closing the
+      # handle and reopening the same name to place the content gives that back:
+      # anything able to create the name in between is handed the configuration.
+      # So the two steps are taken here one at a time, and the name is swapped in
+      # between - the only way to tell content that went to the inode from content
+      # that went to the name, since with the name left alone the two are
+      # identical.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "sys.config")
+
+      assert {:ok, handle} = Castle.Peer.create_exclusive(path)
+
+      decoy = Path.join(root, "decoy")
+      File.write!(decoy, "the interloper's own file")
+      File.chmod!(decoy, 0o644)
+      File.rm!(path)
+      File.ln_s!(decoy, path)
+
+      assert Castle.Peer.fill(handle, path, "the configuration") == :ok
+
+      # The configuration went to the inode the exclusive open created, and the
+      # file the name now points at never saw it. That is the whole claim.
+      assert File.read!(decoy) == "the interloper's own file"
+
+      # The mode did go by path, because OTP has nothing that sets a mode on an
+      # open file. So the decoy has been narrowed to 0600 - Castle setting the
+      # permissions of a file that is not its own, which is the acknowledged cost
+      # of that asymmetry and is a nuisance rather than a disclosure: the content
+      # is what an onlooker wanted, and the content never came this way.
+      assert mode(decoy) == 0o600
+      assert File.read!(decoy) == "the interloper's own file"
     end
 
     test "refuses to create one where anyone else could reach it", %{tmp_dir: root} do
@@ -613,23 +648,22 @@ defmodule Castle.PeerTest do
       refute File.exists?(path)
     end
 
-    test "is owner-only from the moment it exists", %{tmp_dir: root} do
+    test "is owner-only once it exists", %{tmp_dir: root} do
       assert {:ok, work} = Castle.Peer.work_dir(root)
 
-      # Belt to the directory's braces: the file's own mode is never the umask's
-      # choice either, so every state it passes through is narrower than the one
-      # it ends in rather than merely unreachable. Empty here as well, but that
-      # is not what carries the argument - the 0600 is.
-      created = Path.join(work, "created")
-      assert Castle.Peer.create_private(created) == :ok
-      assert mode(created) == 0o600
-      assert File.read!(created) == ""
-
-      # And filled through that, so the content is never held by a wider file
-      # than the one it ends up in.
+      # Belt to the directory's braces: the file's own mode is not left as the
+      # umask's choice. It is the directory that makes the content unreachable
+      # while it is being written - the mode cannot, since there is no way to ask
+      # for one before the file exists and none to set one on the open handle it
+      # is written through.
       filled = Path.join(work, "filled")
       assert Castle.Peer.write_private(filled, "secret") == :ok
       assert mode(filled) == 0o600
+      assert File.read!(filled) == "secret"
+
+      # And once is all it can be written: the name is taken, and a second call
+      # will not reopen it.
+      assert {:error, _} = Castle.Peer.write_private(filled, "again")
       assert File.read!(filled) == "secret"
     end
 

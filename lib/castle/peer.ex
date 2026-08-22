@@ -658,27 +658,44 @@ defmodule Castle.Peer do
   # the `mkdir` and ignored the `chmod`, where nothing here can be honoured and
   # the operator's mode on `sys.config` would not be honoured either.
   #
-  # Inside the directory the file is still created owner-only, filled through
-  # that, and given the model's mode last. Not the other way round, which is the
-  # obvious reading of "set the mode before there is anything to read" and is
-  # wrong: a `sys.config` at 0440 is an operator declaring their configuration
-  # read-only, and a file chmodded to 0440 before being filled cannot be filled.
-  # `File.write/2` reopens the path rather than writing through a handle held
-  # from creation, so the fill fails with `:eacces` and the install stops. Do not
-  # "simplify" the ordering back.
+  # Inside the directory the bytes go through the handle the exclusive open
+  # returned, and the name is never reopened to place content. That is the point
+  # of opening `:exclusive` rather than a refinement of it: the exclusive open
+  # *establishes* that the name did not exist, and closing the handle to reopen
+  # the same name by path throws that proof away - whatever can create the name
+  # in between is handed the content. Written through the handle, the content can
+  # only ever reach the inode this call created, whatever becomes of the name
+  # afterwards.
   #
-  # 0600 satisfies both constraints at once rather than trading between them. It
-  # grants nothing at all to group or other, so every intermediate state is
-  # narrower than the destination rather than merely different from it, and it
-  # leaves the file writable by its owner for as long as there is writing to do.
-  # Which, for the scratch, is until the last of three writes: this module fills
-  # it, the peer's pipeline writes the resolved configuration over it, and this
-  # module writes it again. The model's mode goes on after all of that, as the
-  # last thing done before the file leaves the working directory under its final
-  # name - which is also why a failure part-way through leaves it narrower than
-  # intended rather than wider. It is no longer the 0600 that closes the window,
-  # the directory is; what it buys now is that a file's own mode is never the
-  # umask's choice, at the cost of one `chmod`.
+  # The mode still goes on by path, because OTP has nothing that sets a mode on
+  # an open file: `:file.change_mode/2` and `:file.write_file_info/2` take a name
+  # and reject a handle - `:badarg` and `:function_clause` respectively. That
+  # asymmetry is deliberate, and it is cheap. By the time the `chmod` runs the
+  # content is already committed to this call's inode, so a name swapped
+  # underneath it does not receive the configuration; it gets narrowed. The worst
+  # it buys is that Castle sets somebody else's file to 0600, inside a directory
+  # it verified empty and made 0700. A nuisance, not a disclosure.
+  #
+  # The mode goes on *after* the content rather than before, and that ordering is
+  # about the writes which come later rather than this one. A `sys.config` at
+  # 0440 is an operator declaring their configuration read-only, and the scratch
+  # is written twice more after this: the peer's pipeline writes the resolved
+  # configuration over it, and this module writes it again. Both of those reopen
+  # the name - `Config.Provider.write_config!` is a `File.write/2` in Elixir's
+  # own code, and Elixir's pipeline is what this module exists to drive - and a
+  # file at 0440 cannot be reopened for writing. So the model's mode goes on last
+  # of all, immediately before the file leaves under its final name, which is
+  # also why a failure part-way through leaves it narrower than intended rather
+  # than wider. Do not "simplify" the ordering back.
+  #
+  # Holding this handle open across the peer's run would not extend the
+  # guarantee to those two writes, and must not be tried. The peer writes in a VM
+  # of its own and by name, while a handle kept here would go on pointing at
+  # whichever inode the name had when it was opened: today Elixir truncates the
+  # same one, but an Elixir that wrote a temporary file and renamed it would
+  # leave this pointing at an orphan, and the configuration written through it
+  # would silently be nobody's. What those two writes rest on is the directory -
+  # verified empty, 0700, and holding only names this call created.
   #
   # Neither of the obvious primitives has any of this. `File.write/2` creates
   # with the process umask and never looks at a mode. `File.cp/2` does carry the
@@ -688,12 +705,16 @@ defmodule Castle.Peer do
   #
   # What is not reproduced is ownership - only the mode bits are. See AGENTS.md.
   #
-  # `work_dir/1` is public along with `write_like/3`, `write_private/2`,
-  # `create_private/1` and `publish/2`, because the intermediate states are the
-  # point: a mode that is only ever correct once the content is written looks
-  # exactly like a mode that was correct all along, a directory that was secured
-  # after it was filled looks exactly like one secured before, and a window
-  # nothing can stand in is a window nothing can test.
+  # `work_dir/1` is public along with `secure_dir/1`, `write_like/3`,
+  # `write_private/2`, `create_exclusive/1`, `fill/3` and `publish/2`, because the
+  # intermediate states are the point: a mode that is only ever correct once the
+  # content is written looks exactly like a mode that was correct all along, a
+  # directory that was secured after it was filled looks exactly like one secured
+  # before, content that went to a reopened name looks exactly like content that
+  # went to the handle it was created with, and a window nothing can stand in is a
+  # window nothing can test. `write_private/2` is what call sites use; the two it
+  # is made of are public so that the window between them can be stood in, and
+  # for no other reason.
 
   # Created rather than ensured: a name that is already there is not adopted, and
   # `File.mkdir/1` is what refuses it - measured against a directory, a regular
@@ -758,12 +779,15 @@ defmodule Castle.Peer do
     with :ok <- write_private(path, bytes), do: carry_mode(model, path)
   end
 
+  # Created and filled in one movement, because separating the two is what put a
+  # reopened name between them. There is no way to bring one of these files into
+  # existence here without also placing its content.
   @doc false
   @spec write_private(Path.t(), iodata()) :: :ok | {:error, String.t()}
   def write_private(path, bytes) do
     with :ok <- private_dir(Path.dirname(path)),
-         :ok <- create_private(path) do
-      write(path, bytes)
+         {:ok, handle} <- create_exclusive(path) do
+      fill(handle, path, bytes)
     end
   end
 
@@ -771,30 +795,43 @@ defmodule Castle.Peer do
   # followed or truncated. `File.write/2` here would do neither safely: pointed at
   # a symlink it truncates what the link points at, chmods *that* to 0600, and
   # fills it with the configuration - and creates the target outright if the link
-  # dangles. All three measured. The mode still goes on afterwards, because there
-  # is still no way to ask for it at creation.
+  # dangles. All three measured. What the open returns is the handle the content
+  # goes through, and the caller's obligation is to `fill/3` it: that is what
+  # keeps the proof this open just established.
   @doc false
-  @spec create_private(Path.t()) :: :ok | {:error, String.t()}
-  def create_private(path) do
-    with :ok <- create_exclusive(path), do: chmod(path, 0o600)
-  end
-
-  defp create_exclusive(path) do
+  @spec create_exclusive(Path.t()) :: {:ok, File.io_device()} | {:error, String.t()}
+  def create_exclusive(path) do
     case File.open(path, [:write, :exclusive, :raw]) do
-      {:ok, handle} -> close(path, handle)
+      {:ok, handle} -> {:ok, handle}
       {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
     end
   end
 
-  # Closed rather than written through, because what is written to these files is
-  # written more than once and by more than this module - the peer's own pipeline
-  # writes the scratch too - so no handle could serve all of it. Nothing can reach
-  # the path between the close and the write: the directory holding it has been
-  # verified private.
-  defp close(path, handle) do
+  # The content through the handle, the mode by path, and the handle closed
+  # whichever way the write went. A write error is reported ahead of a close
+  # error, being the one that says what actually happened, and the mode is set
+  # only once both have succeeded - so a file that was not written in full is
+  # never given the mode that says it was.
+  @doc false
+  @spec fill(File.io_device(), Path.t(), iodata()) :: :ok | {:error, String.t()}
+  def fill(handle, path, bytes) do
+    written = written(handle, path, bytes)
+    closed = closed(handle, path)
+
+    with :ok <- written, :ok <- closed, do: chmod(path, 0o600)
+  end
+
+  defp written(handle, path, bytes) do
+    case IO.binwrite(handle, bytes) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  defp closed(handle, path) do
     case File.close(handle) do
       :ok -> :ok
-      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
     end
   end
 

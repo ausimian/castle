@@ -272,18 +272,154 @@ Castle's job is configuration and release management on a running node.
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
   can manage its own upgrades. The directory is derived from `code:root_dir()`,
-  which is the root `:release_handler` resolves *its* relative paths against
+  which no caller has to change directory to reach and none should: the working
+  directory was only ever visible to the `File.exists?/1` guard, which is what
+  let the file this looked for and the file OTP wrote be different ones.
+
+  **That derivation is right for the default Mix configuration and only for it.**
+  `:release_handler` resolves its relative paths against `code:root_dir()`
   (`consult/2` is `file:consult(root_dir_relative_path(File))`, and
-  `do_write_release/3` the same), so no caller has to change directory and none
-  should: the working directory was only ever visible to the `File.exists?/1`
-  guard, which is what let the file this looked for and the file OTP wrote be
-  different ones. It calls **`create_RELEASES/3`**, never `/4` with the root
+  `do_write_release/3` the same), but the *releases directory* is not one of
+  them: `init/1` takes it from `{sasl, releases_dir}`, then `RELDIR`, and only
+  then `init:get_argument(root)`. Mix sets neither, so on a Mix release the two
+  coincide — but a deployment that sets either has Castle writing `RELEASES`
+  where the handler will not read it, and then the record check refuses with a
+  message naming a restart as the remedy, which a restart does not fix. That is
+  [#23](https://github.com/ausimian/castle/issues/23), not something to leave
+  implied here: the claim that this directory is "the one OTP writes" is true by
+  default and false under configuration OTP documents.
+
+  It calls **`create_RELEASES/3`**, never `/4` with the root
   supplied: `/3` is `create_RELEASES("", RelDir, RelFile, LibDirs)`, and
   `check_rel_data/4` stores library directories as `lib/<app>-<vsn>` when the
   root is empty and as absolute paths under it when it is not — "to make it easy
   to create a relocatable RELEASES file", in OTP's own words. Passing the root
   would bake this machine's paths into a file whose point is that it can be
   moved, and no end-state test would see it.
+- **The ERTS guard** — `include_erts: false` is fundamentally incompatible with
+  `release_handler`-based hot upgrades in a Mix release, and Castle refuses such
+  a deployment rather than serving it. `Castle.Commands.ensure_own_erts/2` is the
+  reference account; this is the shape of it.
+
+  `Mix.Release.copy_erts/1` has a clause for `%{erts_source: nil}` that copies
+  nothing, and only the other clause writes the `erl` shim that rewrites
+  `ROOTDIR` to the release root. `include_erts: false` is what sets `erts_source`
+  to nil, and `releases/<vsn>/elixir` keeps its `ERTS_BIN="$ERTS_BIN"` line
+  unrewritten, so the launcher runs whichever `erl` is on the path and
+  `code:root_dir()` is the shared Erlang installation rather than the deployment.
+
+  **The root is not Castle's to choose differently, and deriving it from
+  `RELEASE_ROOT` would be worse rather than better.** It is `release_handler`'s
+  own anchor: `root_dir_relative_path/1` is
+  `filename:join(code:root_dir(), Pathname)`, and `create_RELEASES/3` stores
+  library directories *relatively* — `filename:join("lib", LibName)`, so the file
+  stays relocatable — so every `lib/<app>-<vsn>` the handler reads, writes or
+  deletes resolves there, as does the `extract_tar(Root, Tar)` an unpack goes
+  through and the `erts-<vsn>` a removal deletes. So a Castle that wrote to
+  `$RELEASE_ROOT` would put the configuration where the handler never looks, and
+  an upgrade would go on using applications under the installation — a silent
+  divergence in place of a loud failure. Do not "fix" the guard that way.
+
+  **The release records are the exception, and saying otherwise is the mistake
+  this file made first.** `releases/RELEASES` and `releases/<vsn>/…` are *not*
+  anchored to the root: `init/1` takes the releases directory from
+  `{sasl, releases_dir}`, then `RELDIR`, and only then `init:get_argument(root)`.
+  Mix sets neither, so on a Mix release they land under the root by default — but
+  "by default" and "necessarily" are different claims, and the second one is
+  false. It changes nothing about the guard, because the handler keeps the root
+  and the releases directory as separate state and only the second follows
+  `RELDIR`: relocating the records moves the bookkeeping and leaves the
+  applications being extracted into, resolved against and deleted out of the
+  root. That is why `RELDIR` is not a way out, and why the refusal says so.
+
+  The question is asked of the node, and there is exactly one implementation of
+  it. **The shell-side gate in Forecastle's `env.sh` was considered and
+  refused.** It would have saved the deployment a preboot VM and a refusal on
+  every start — `RELEASES` never appears in the deployment, so the hook's local
+  absence check invokes it again every time — and that cost is accepted
+  deliberately, because a shell test can only approximate what the node knows,
+  which is the class of bug #13's third step removed (*"It has to be asked of the
+  node rather than of the filesystem"*), and a second implementation of the rule
+  can drift from the first. Do not add it later thinking it was an oversight.
+
+  The evidence is that every launcher `mix release` generates exports
+  `RELEASE_ROOT` from its own location before it sources `env.sh`, so a set
+  `RELEASE_ROOT` naming a directory other than `code:root_dir()` is exact and
+  needs no globbing. Nothing else sets the variable, so outside a release — under
+  `mix test`, in a VM started by hand — there is nothing to compare and the guard
+  is inert, which is what makes it safe in front of every mutating operation. The
+  two are the same string on an ordinary release, both being `pwd -P` output in
+  scripts Mix generates, so `Path.expand/1` settles it; a `stat` on device and
+  inode is the fallback, because refusing a deployment that *does* bring its own
+  ERTS — one spelled through a `current` symlink, say — is the one failure here
+  an operator cannot work around.
+
+  **What it detects is the divergence, not the missing ERTS, and the message
+  asserts no cause at all.** `include_erts: false` is the cause in almost every
+  case but it is not the only one: the `erl` shim Mix writes is
+  `ROOTDIR="${ERL_ROOTDIR:-…}"`, so an `ERL_ROOTDIR` in the environment diverges
+  the two on a release that *did* bring its ERTS. Two directories are the whole
+  of the evidence, and nothing here can tell those apart or knows that they
+  exhaust the possibilities, so both are offered as examples. This message has
+  now been wrong twice in the same way — first asserting the missing ERTS, then
+  asserting `ERL_ROOTDIR` as the only alternative — so state the divergence and
+  stop. A cause stated confidently from two directories is how a correct refusal
+  comes to be read as a bug in the guard, and it sends an operator to rebuild
+  something that was not the problem. `Castle.Peer.emulator/2` is the one that
+  may still speak of ERTS in particular, because it looked for the emulator and
+  it was not there.
+
+  **Do not say that everything `:release_handler` touches resolves under the
+  emulator's root — the release records alone do not.** `init/1` takes its
+  releases directory from `{sasl, releases_dir}`, then `RELDIR`, and only then
+  `init:get_argument(root)`, so those two genuinely relocate it, and a message
+  claiming otherwise is false. It does not rescue such a deployment, which is
+  why the guard is still right: the handler holds the root and the releases
+  directory as *separate* state and only the second follows `RELDIR`.
+  `do_unpack_release/4` extracts through `extract_tar(Root, Tar)`,
+  `check_rel_data/4` records library directories as `lib/<app>-<vsn>` for
+  resolution against `code:root_dir()`, and `do_remove_release/4` deletes
+  `filename:join(Root, "erts-" ++ EVsn)`. Relocating the records moves the
+  bookkeeping and leaves the applications themselves being extracted into, read
+  from and deleted out of the emulator's root.
+
+  **The comparison has three answers, not two.** `compare_dirs/2` is
+  `Path.expand/1` on both and then a `stat` on device and inode, and it returns
+  `:same`, `:different` or `{:indeterminate, why}`. The third is the one to keep:
+  by the time the `stat` runs the two have already failed to match as strings, so
+  a catch-all folding every unusable result into `:different` puts an `:eacces`
+  on a parent, an `:enoent`, an `:eloop` and a filesystem with no inode numbers
+  into the same branch as two directories that genuinely differ — and then the
+  message asserts a difference that was never established. Both answers still
+  refuse, so this changes no outcome; it changes what the operator is told, which
+  is the part they act on. Do not fold them back together, and note that
+  fixtures feel it: a test pointing `RELEASE_ROOT` at a path nothing created
+  exercises the *indeterminate* refusal, not this one, so the directories in
+  these tests have to exist.
+
+  It gates `make_releases/0` — before the `File.exists?` check, not after,
+  because an Erlang installation built by OTP has a `releases/RELEASES` of its
+  own and looking first would find it, report success and never say anything —
+  and `unpack/1`, `install/1`, `commit/1` and `remove/1`, `remove` most of all,
+  since `remove_release` *deletes* paths resolved against `code:root_dir()`. It
+  gates `materialise/3` too, which is what `install/1` and `commit/1` do first,
+  or the operator's first news would be that some version directory inside the
+  Erlang installation holds nothing to configure. `upgradable/0` and `releases/0`
+  are deliberately outside it, for the reason `commit`/`remove`/`releases` are
+  outside the release-record check and one of its own: they only read, and an
+  operator has to be able to ask what the node thinks it is running in order to
+  make sense of the refusal. Gating a diagnostic on the condition it diagnoses
+  leaves nothing to ask.
+
+  Unlike the record check, `commit` and `remove` *do* carry this one, and that is
+  not an inconsistency: the record check could strand an upgrade already under
+  way, while this says the deployment could never have been upgraded at all, so
+  there is nothing to strand.
+
+  `Castle.Peer.emulator/2`'s refusal stays, and points here rather than
+  restating any of it. It is reached more narrowly — a release whose own release
+  file names an ERTS that is not under the root it was unpacked into — and it is
+  what is left if the guard is ever reached with `RELEASE_ROOT` unset.
 - **The release record check** — `unpack/1` and `install/1` refuse a system whose
   release record `:release_handler` synthesised for itself, and they refuse it
   from *inside* the operation. `:release_handler` reads `RELEASES` once, in
@@ -335,7 +471,8 @@ Castle's job is configuration and release management on a running node.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
   ahead of `install` and `commit` so that it exists before the version is booted,
-  and the record check inside `unpack` and `install`. The boundary composes
+  the record check inside `unpack` and `install`, and the ERTS guard inside all
+  of them but `releases/0`. The boundary composes
   materialise-then-install, so a node that will be refused for its record
   materialises the target's configuration before it hears so. That is what the
   check costs by living inside the operation instead of in front of it, and it is
@@ -398,9 +535,10 @@ module.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
+| `lib/castle/deployment.ex` | The two environment facts the ERTS guard rests on, and nothing else |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
-| `test/support/` | Stubs for `:release_handler`, `:init`, the peer and config providers, plus the release-shaped tree a real peer is booted on |
+| `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
 
 ## Working on this project
 
@@ -419,13 +557,21 @@ module.
 
 ## Tests
 
-`mix test` covers `Castle.Commands` as units. `:release_handler`, `:init` and
-`Castle.Peer` are reached through module arguments that default to them, so the
-tests hand them `Castle.ReleaseHandlerStub`, `Castle.InitStub` and
-`Castle.PeerStub` instead; `materialise/2` takes the version directory it works
-on and `make_releases/2` the releases directory, so the tests give them a
-`tmp_dir` — and neither the commands nor their tests touch the working
-directory, which is what lets them all run async.
+`mix test` covers `Castle.Commands` as units. `:release_handler`, `:init`,
+`Castle.Peer` and `Castle.Deployment` are reached through module arguments that
+default to them, so the tests hand them `Castle.ReleaseHandlerStub`,
+`Castle.InitStub`, `Castle.PeerStub` and `Castle.DeploymentStub` instead;
+`materialise/3` takes the version directory it works on and `make_releases/3` the
+releases directory, so the tests give them a `tmp_dir` — and neither the commands
+nor their tests touch the working directory, which is what lets them all run
+async.
+
+Only the cases *about* a synthetic root pass `Castle.DeploymentStub`. Every case
+that predates the guard omits the argument and so runs against the real
+`Castle.Deployment` — which is worth knowing rather than tidying, because under
+`mix test` there is no `RELEASE_ROOT` and that is exactly the inert state: those
+cases are the standing evidence that the guard lets an ordinary caller through,
+and they would fail if it stopped being inert.
 `test/castle_test.exs` drives the boundary itself against the real
 `:release_handler` — which is running under `mix test`, because castle depends
 on sasl — and the real `:init`, naming releases that do not exist. One test
@@ -437,7 +583,7 @@ the reason visible, on an installation that has no `releases/RELEASES` — and s
 does the boundary's `unpack/1` test, now that `unpack` makes the same check.
 
 The record check's discriminators are about *ordering*, so they are written the
-way `materialise/2`'s are: the stub is given a reply that would have the
+way `materialise/3`'s are: the stub is given a reply that would have the
 operation succeed, and the assertion is that it was never asked for it —
 `Stub.calls(:unpack_release) == []`, `Stub.calls(:install_release) == []`. An
 end-state test cannot tell a refusal that came first from one that came after,
@@ -445,8 +591,53 @@ because the refusal is the same either way. Two more assert
 `Stub.calls(:which_releases) == [[]]` on the successful path: the check happened
 *in* the call that acted, which is the whole of what this fixed, and a version
 that asked it somewhere else would pass every other assertion here.
-`commit/2`'s regression guard is the mirror image — a synthesised record, and
+`commit/3`'s regression guard is the mirror image — a synthesised record, and
 `Stub.calls(:which_releases) == []`, because commit must *not* acquire the check.
+
+The ERTS guard's tests are written the same way, and they have the same
+difficulty in a sharper form: the guard is inert without a `RELEASE_ROOT`, and
+`mix test` starts with none — so the state it exists to refuse has to be arranged
+deliberately, either by substituting the roots or, in the boundary suite, by
+putting the variable in the environment. `Castle.DeploymentStub` answers the two
+roots and the `stat` and nothing else — the comparison, the normalisation and the
+message stay in `Castle.Commands` and run for real — which is the same division
+as stubbing `which_releases/0` and letting the record rule run.
+
+The `stat` is stubbed for one reason: two of the three answers cannot be produced
+by a fixture. An `:eacces` needs a mode that root and some filesystems ignore,
+and a zero inode needs a filesystem reporting no inode numbers. A fixture that
+only sometimes produces its state is a test that only sometimes tests anything,
+and the first attempt here proved it — it built a 0000 parent, branched on
+whether the refusal mentioned `:eacces`, and so passed by printing "skipped" on
+any runner where the mode did not bite, including against the regression it
+named. Unstubbed, `stat/1` is the real one, so a test that only cares about the
+roots does not have to describe the filesystem.
+Each gated operation is given a handler primed to succeed and asserted never to
+have been asked (`Stub.calls(:remove_release) == []`), and `unpack` and `install`
+also assert `Stub.calls(:which_releases) == []`, because on such a deployment the
+record check is asking about the Erlang installation and would have nothing to
+say: the refusal has to name the reason that is true. `make_releases/3` has a
+test of its own for the ordering against `File.exists?`, since an Erlang
+installation has a `releases/RELEASES` and looking first would report success.
+
+`test/castle/erts_guard_test.exs` is the other half, and it is `async: false`
+because it puts `RELEASE_ROOT` in the environment and the environment is the
+node's. It drives the boundary through the real `Castle.Deployment`, so what it
+establishes is that the shipping module reads that variable — not that a launcher
+exports it, which is a fact about the script `mix release` generates and is not
+something a `System.put_env/2` can witness. Every gated command raises,
+`upgradable/0` and `releases/0` still answer, and with `RELEASE_ROOT` set to
+`code:root_dir()` — or absent — `remove/1` reaches the real `:release_handler`
+and is refused for the release not existing, which is how the inert case is told
+from the gated one.
+
+One test there asserts the refusal's **entire text** rather than fragments of it.
+That is deliberate and it should stay that way: the defect being guarded is a
+*categorical claim* about the cause, and no set of refutations forbids one —
+"This is caused by include_erts: false" refutes clean against every phrasing this
+message has previously been wrong in, while keeping every word a fragment-based
+test would require. Only the whole string pins it, and rewording the message on
+purpose should mean editing that assertion on purpose.
 
 `test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
 peer would prove nothing about the one thing it exists to do, which is to run a

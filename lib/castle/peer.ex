@@ -430,10 +430,17 @@ defmodule Castle.Peer do
   end
 
   # The emulator named by the target's own release file, resolved against the
-  # release root. `include_erts: false` puts no emulator there, and Castle
-  # cannot serve such a release anyway: the release root is derived from
-  # `:code.root_dir()`, which for a release without its own ERTS is the system's
-  # OTP installation rather than the release.
+  # release root.
+  #
+  # A release built with `include_erts: false` has no emulator under its root,
+  # and this refusal is reached for it - but the reason such a release cannot be
+  # upgraded at all is `Castle.Commands.ensure_own_erts/2`'s to explain, and it
+  # does, at length. `Castle.install/1` and `Castle.commit/1` refuse there
+  # first, so this is the narrower case: a release whose own release file names
+  # an ERTS that is not under the root it was unpacked into. Keep both. This one
+  # is about the target being configured, which the guard says nothing about,
+  # and it is the last thing standing if the guard is ever reached with
+  # `RELEASE_ROOT` unset.
   defp emulator(root, rel_vsn_dir) do
     with {:ok, erts_vsn} <- erts_vsn(rel_vsn_dir) do
       erl = Path.join([root, "erts-#{erts_vsn}", "bin", "erl"])

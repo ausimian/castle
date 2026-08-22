@@ -89,7 +89,7 @@
   that repeats the question until it is answered - which is what Forecastle's
   `bin/castle install` does, from its own 1.0.0 - can tell an upgrade that took
   effect from one that did not. Castle supplies the answer; it does not do the
-  asking, and the Forecastle this release is built against does not yet ask.
+  asking.
 
   Confirmation needs two things: the version is the release the system is
   running - the one
@@ -121,10 +121,11 @@
 
 - Raised the minimum Elixir requirement to 1.18.
 - `make_releases/0` no longer depends on the working directory. It looks for
-  `releases/RELEASES` under the root of the release - `code:root_dir()`, which is
-  the root `:release_handler` resolves its own relative paths against - so the
-  file it looks for is necessarily the file OTP writes, and a caller that used to
-  change directory before calling it no longer has to.
+  `releases/RELEASES` under the root of the release - `code:root_dir()` - so a
+  caller that used to change directory before calling it no longer has to. On a
+  release built by Mix that is the file OTP writes; a deployment that sets
+  `RELDIR` or the `sasl` `releases_dir` parameter moves the release records
+  elsewhere, and Castle does not yet follow them.
 - `unpack/1`, `install/1`, `commit/1`, `remove/1` and
   `make_releases/0` now fail when the operation fails, instead of printing the
   reason and returning normally. These are invoked over `bin/castle`, which
@@ -149,6 +150,60 @@
 
 ### Fixed
 
+- A release built with `include_erts: false` is now refused, by name and with
+  the reason, rather than quietly managing the Erlang installation it happens to
+  be running on. Such a release ships no emulator, so it runs the system one, and
+  `code:root_dir()` — the directory `:release_handler` extracts applications
+  into, resolves every `lib/<app>-<vsn>` against, and deletes `erts-<vsn>` from —
+  is then the shared Erlang installation rather than the deployment. Left to itself, `make_releases/0` created that installation's
+  `releases/RELEASES`, which usually fails for want of permission and, where it
+  succeeds, puts the release records of unrelated deployments in one file;
+  `unpack/1`, `install/1` and `commit/1` wrote into the installation, and
+  `remove/1` deleted out of it. Each of those now fails instead, with a message
+  naming both directories and saying that the deployment cannot be upgraded by
+  Castle. The same refusal covers a release that *did* bring its ERTS but is run
+  with `ERL_ROOTDIR` set, which the release's own `erl` honours ahead of its
+  location: what makes an upgrade unsafe is that the two directories differ, so
+  the message reports that and offers the causes as examples rather than
+  asserting one.
+
+  Relocating the release records with `RELDIR` or the `sasl` `releases_dir`
+  parameter does not make such a deployment upgradable, and the refusal says so.
+  Those really do move the records — `release_handler` reads them ahead of the
+  emulator's root — but they move only the bookkeeping: applications are still
+  extracted into, resolved against and deleted out of the emulator's root, which
+  the handler keeps as separate state.
+
+  The remedy is to make the two directories the same one — most often by
+  building the release with its ERTS included, and where `ERL_ROOTDIR` is what
+  moved them apart, by unsetting it. There is no third option in which Castle is
+  pointed somewhere else instead: `:release_handler` resolves the applications
+  themselves against the emulator's root, so records kept anywhere else describe
+  applications the handler is not using. A refusal that says so is better than a
+  divergence that does not.
+
+  Where the two directories cannot be compared at all — a `stat` refused by a
+  mode on a parent, a path that is not there, a filesystem reporting no inode
+  numbers — the refusal says *that*, naming what stopped the lookup, rather than
+  reporting a difference it did not establish. It still refuses, because a
+  comparison that could not be made is no licence to write release records into a
+  tree that has not been shown to be the right one.
+
+  `upgradable/0` and `releases/0` are deliberately unaffected. They only read,
+  and they are what an operator needs working in order to make sense of the
+  refusal.
+
+  Note that this reaches the launcher's preboot step, which is where
+  `make_releases/0` is called, so such a deployment meets the refusal on every
+  start rather than once: the file the step looks for never appears, so the step
+  runs again each time.
+
+  What that costs a start is Forecastle's to decide, not Castle's — Castle
+  reports the failure and the `env.sh` fragment chooses what to do with it. Under
+  Forecastle 1.0.0 the fragment warns and carries on, so an affected deployment
+  still starts, at the price of a warning and a short-lived VM per boot. Pair
+  Castle 1.0.0 with Forecastle 1.0.0; an older fragment treats a failure of that
+  step as fatal and would stop such a deployment starting at all.
 - `install/1` reports the emulator restart that an upgrade to a new emulator,
   or to a new kernel, stdlib or sasl, needs - rather than failing with a
   `CaseClauseError` while the upgrade proceeds.

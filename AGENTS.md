@@ -14,13 +14,58 @@ Castle's job is configuration and release management on a running node.
   as that version's `sys.config`. This is the whole reason the pair exists:
   Mix expands runtime configuration once, at boot, from the version it booted;
   Castle re-expands it for the version being upgraded *to*, before the relup
-  runs.
+  runs. It is now the older of two ways to do that — see the next bullet — and
+  goes away with the third step of
+  [#13](https://github.com/ausimian/castle/issues/13).
+- **Materialising the target's configuration**, which `install/1` and `commit/1`
+  do before they hand a version to `:release_handler`. Which way depends on
+  whether `releases/<vsn>/build.config` exists, and that is a sound
+  discriminator because it is Forecastle that creates it: assembling a release
+  today strips the providers out, stashes their initialised state under
+  `:castle`, and renames the `sys.config` Mix wrote to `build.config`. So the
+  file is present exactly when the configuration was intercepted at build time,
+  and `Castle.generate/1` is then the only thing that can expand it. Note that
+  it has to be the *presence of `build.config`* rather than the absence of
+  `sys.config`: once such a release has booted once, it has both.
+
+  When it is absent, Mix's pipeline is intact and `Castle.Peer` materialises the
+  configuration instead: a `:peer` with `connection: :standard_io` — so no
+  epmd, cookie, node name or distribution — booted on the target's own
+  `preboot` script and its own emulator, which runs `Config.Provider.boot/1`
+  over the target's own provider modules and hands the resolved configuration
+  back to be written. Castle does not fold providers itself, and must not
+  acquire the ability to: the point of #13 is that Elixir's pipeline stays the
+  only implementation of it. What Castle arranges is that the pipeline *writes*
+  rather than configuring the VM it happens to be in, which is one field of the
+  provider state and a reboot function that does nothing.
+
+  A provider module can differ between the version that is running and the
+  version being installed, which is why this cannot be done on the running
+  node, and is what the peer earns.
+
+  Four things about it are load-bearing. The peer is started linked and stopped
+  on every path out, including the failing ones; `wait_boot` and the call both
+  have deadlines, so a peer that never answers cannot hold an install open.
+  Everything that can refuse — a missing boot script, an emulator that is not
+  there, a provider that raises — refuses before `install_release/1` is called.
+  The resolved configuration is assembled in a copy beside `sys.config` and
+  renamed onto it, so a version never holds half a configuration. And the peer's
+  standard error is relayed through its `user` process, because a `standard_io`
+  connection multiplexes console output with its own framing and reserves byte
+  values that are UTF-8 lead bytes — an accented character written straight out
+  would take the channel down and fail an install that was about to succeed.
+
+  `Castle.Peer.resolve/1` is called *in the target release*, so
+  `{Castle.Peer, :resolve, 1}` is a contract between one version of Castle and
+  the next. A target too old to have it fails the call and the install is
+  refused.
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
   can manage its own upgrades.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
-  over `:release_handler`, with `generate/1` called ahead of `install` and
-  `commit` so the target version's configuration exists before it is booted.
+  over `:release_handler`, with the target version's configuration materialised
+  ahead of `install` and `commit` so that it exists before the version is
+  booted.
 - **`Castle.running/1`** — succeeds when the version it is given is the release
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
@@ -77,8 +122,9 @@ into this module.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
+| `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
-| `test/support/` | Stubs for `:release_handler`, `:init` and a config provider |
+| `test/support/` | Stubs for `:release_handler`, `:init`, the peer and config providers, plus the release-shaped tree a real peer is booted on |
 
 ## Working on this project
 
@@ -97,14 +143,30 @@ into this module.
 
 ## Tests
 
-`mix test` covers `Castle.Commands` as units. `:release_handler` and `:init` are
-reached through module arguments that default to them, so the tests hand them
-`Castle.ReleaseHandlerStub` and `Castle.InitStub` instead; `generate/1` takes
-the version directory it writes to, so the tests give it a `tmp_dir` holding a
-synthetic `build.config`. `test/castle_test.exs` drives the boundary itself
-against the real `:release_handler` — which is running under `mix test`, because
-castle depends on sasl — and the real `:init`, naming releases that do not
-exist.
+`mix test` covers `Castle.Commands` as units. `:release_handler`, `:init` and
+`Castle.Peer` are reached through module arguments that default to them, so the
+tests hand them `Castle.ReleaseHandlerStub`, `Castle.InitStub` and
+`Castle.PeerStub` instead; `generate/1` and `materialise/2` take the version
+directory they work on, so the tests give them a `tmp_dir`.
+`test/castle_test.exs` drives the boundary itself against the real
+`:release_handler` — which is running under `mix test`, because castle depends
+on sasl — and the real `:init`, naming releases that do not exist.
+
+`test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
+peer would prove nothing about the one thing it exists to do, which is to run a
+release's *own* code. `Castle.SyntheticRelease` lays out a directory tree with
+everything `Castle.Peer` needs — an emulator launcher under `erts-<vsn>/bin`,
+applications under `lib/<app>-<vsn>`, a `systools` boot script over them, a
+release file and a `sys.config` — so a peer boots on the same kind of script a
+release ships, without a `mix release`. The test that matters most compiles two
+versions of one provider module, loads one into the node running the tests and
+puts the other on the peer's code path, and asserts that the answer came from
+the peer's. Peer cleanup is asserted from outside: a provider records the
+operating system pid of the VM it ran in, and the test waits for it to go.
+
+What is not covered is the boot timeouts, which are fixed rather than injected;
+what stands behind them is that `wait_boot` and the call deadline are both there
+to be read.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -119,10 +181,22 @@ each command prints. Those strings — `Unpacked <vsn> ok`,
 - **Concurrent boots race on `sys.config`.** `generate/1` writes into the
   version directory, so simultaneous `start`/`daemon`/`eval` invocations with
   differing environments overwrite each other's configuration. Do not fix this
-  by letting callers choose where the configuration is written: it goes away
-  with [#13](https://github.com/ausimian/castle/issues/13), which materialises
-  the target release's configuration in a `:peer` running its own config
-  providers, and takes `Castle.generate/1` with it.
+  by letting callers choose where the configuration is written: it goes with
+  `generate/1` itself, once
+  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) has stopped
+  intercepting configuration at build time and the third step of
+  [#13](https://github.com/ausimian/castle/issues/13) has deleted the path that
+  reads `build.config`. The peer path does not have it — nothing boots to
+  configure a target — but a boot still goes through `generate/1` until then.
+- **The materialised configuration is the next base.** The peer writes the
+  resolved configuration over the target's `sys.config`, because that is the
+  file `:release_handler` reads, so a second `install` or a `commit` of the same
+  version resolves the providers over what the first one wrote rather than over
+  what Mix wrote. For providers that set what they care about — which is what
+  `Config.Reader` over a `runtime.exs` does — that is the same answer. A value a
+  provider sets only conditionally would linger. The interaction between this
+  file and a later cold boot of the same version becomes reachable with
+  forecastle#6 and is to be verified there.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

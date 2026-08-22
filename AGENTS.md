@@ -437,16 +437,25 @@ Castle's job is configuration and release management on a running node.
   `RELEASES` file names at least `kernel` and `stdlib`. The remedy the message
   names is a restart, because that is the only thing that changes the answer.
 
-  **A restart is necessary and, in one of the two cases, not sufficient — and the
-  message has to say which.** The record is synthesised when `RELEASES` was
-  missing *or* could not be read, and Forecastle's `env.sh` creates it only when
-  it is **absent** (`[ ! -f ... ]`). So a file that is present and unreadable is
-  stepped over on every start: the node comes back on a freshly synthesised
-  record, the refusal repeats, and an operator following a message that named
-  only the restart would loop forever. The message therefore splits the remedy —
-  restart if the file is absent, make it readable or remove it *first* if it is
-  present. Do not collapse that back into "restart the system": the diagnosis
-  already admits both causes, so a single remedy is wrong for one of them.
+  **A restart is necessary and not always sufficient, so the message names the
+  state the file has to be in rather than just saying "restart".** The record is
+  synthesised when `RELEASES` was missing *or* could not be read, and Forecastle's
+  `env.sh` creates it only when it is **absent** (`[ ! -f ... ]`). So a file that
+  is present and unreadable is stepped over on every start: the node comes back on
+  a freshly synthesised record, the refusal repeats, and an operator following a
+  message that named only the restart would loop forever.
+
+  **State the required condition, not the boot-time cause.** The obvious
+  correction — branch the advice on why the record was synthesised, absent versus
+  unreadable — is wrong in a third case, and that was the first attempt here. The
+  file can have been absent at boot and been created, readably, since: the node
+  keeps its synthesised record either way, so the refusal still fires, and an
+  operator told to check whether the file is "absent" or "present and unreadable"
+  finds it is neither and has no applicable advice. A plain restart is exactly
+  right for them. So the message asks for `releases/RELEASES` to be *absent or
+  readable* before the restart, which covers all three states and is shorter than
+  the branch it replaced. Do not turn it back into a case analysis of the cause,
+  and do not collapse it into a bare "restart the system" either.
 
   It has to be asked of the node rather than of the filesystem — a file that
   appeared *after* the boot that looked for it passes a shell test and still

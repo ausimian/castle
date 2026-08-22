@@ -344,13 +344,11 @@ defmodule Castle.Commands do
            "not be read, when the system booted. An upgrade from that record reports " <>
            "success and leaves any application whose version changed, but whose code the " <>
            "upgrade does not load, running its old code. Creating the file now would not " <>
-           "change the record this node works from, so the system has to be restarted - " <>
-           "but check the file first, because which of the two happened decides whether a " <>
-           "restart is enough. If releases/RELEASES is absent, restart: the release " <>
-           "creates it before it starts. If it is present and could not be read, make it " <>
-           "readable or remove it before restarting - the release only creates that file " <>
-           "when it is absent, so a restart on its own will step over the unreadable one " <>
-           "and come back on the same synthesised record."}
+           "change the record this node works from, so the system has to be restarted. " <>
+           "Before restarting, make sure releases/RELEASES is either absent or readable: " <>
+           "the release creates that file only when it is absent, so an unreadable one " <>
+           "left in place is stepped over on every start and the system comes back on the " <>
+           "same synthesised record. Absent, or readable, is what a restart needs."}
 
       nil ->
         {:error, "#{refusal}: no release is running."}

@@ -85,13 +85,15 @@ defmodule Castle.CommandsTest do
       assert message =~ "This system cannot be upgraded: 1.2.3 is running from a release record"
       assert message =~ "names no applications"
       assert message =~ "running its old code"
-      assert message =~ "If releases/RELEASES is absent, restart: the release creates it"
+      assert message =~ "make sure releases/RELEASES is either absent or readable"
 
-      # The other branch of the remedy, which a restart alone does not reach: the
-      # hook that creates the file is guarded on its absence, so an unreadable
-      # file is stepped over on every start and the node comes back on the same
-      # synthesised record. A refusal naming only the restart would loop forever.
-      assert message =~ "make it readable or remove it before restarting"
+      # The remedy names the state the file has to be in, not the reason the
+      # record was synthesised. A bare "restart" loops forever on a file that is
+      # present and unreadable, because the hook that creates it is guarded on its
+      # absence - and a case analysis of the cause, which is what this said first,
+      # has no advice at all for a file that was absent at boot and has been
+      # created readably since, where a plain restart is all that is needed.
+      assert message =~ "Absent, or readable, is what a restart needs."
     end
 
     test "asks the release the system is running, and not another one" do

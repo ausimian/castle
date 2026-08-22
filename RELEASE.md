@@ -152,11 +152,20 @@
 
 - The refusal for a system running from a synthesised release record now names a
   remedy that works. It said to restart, and a restart alone is enough only when
-  `releases/RELEASES` is absent or readable: the release creates that file when it
-  is missing, so a file that is present but unreadable is stepped over on every
-  start and the system comes back on another synthesised record. An operator
-  following the old message would have restarted indefinitely. It now asks for the
-  file to be absent or readable before the restart.
+  the `RELEASES` file `:release_handler` reads is absent or readable: the release
+  creates that file when it is missing, so one that is present but unreadable is
+  stepped over on every start and the system comes back on another synthesised
+  record. An operator following the old message would have restarted
+  indefinitely.
+
+  The refusal now asks for that file to be absent or readable before the restart,
+  and identifies it rather than assuming: `releases/RELEASES` under the release
+  root, unless `RELDIR` or the `sasl` `releases_dir` parameter points elsewhere.
+  Where one of those does, the two are different files and a restart cannot fix it
+  on its own — the release creates the one at the root, which the handler will not
+  read — so the file the handler *does* read has to be put there by hand. Castle
+  following those overrides itself is
+  [#23](https://github.com/ausimian/castle/issues/23).
 
 - A release built with `include_erts: false` is now refused, by name and with
   the reason, rather than quietly managing the Erlang installation it happens to

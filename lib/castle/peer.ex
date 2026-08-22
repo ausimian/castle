@@ -114,9 +114,21 @@ defmodule Castle.Peer do
   # be it, because `sys.config` is what `release_handler` reads and therefore
   # what has to hold the resolved result. So the first materialisation of a
   # version copies it to `sys.config.pristine` and every one after that seeds
-  # from there. The copy is made once, with an exclusive create, so that two
-  # installs racing cannot make it twice and neither can capture anything but
-  # the original.
+  # from there.
+  #
+  # The copy is staged under a name of its own, given the mode `sys.config` has,
+  # and published by hard link - `stage/3` then `publish/2`. A link is atomic and
+  # refuses rather than replaces, so what appears at that name is a file that was
+  # already complete, and of two installs racing the loser is told the name is
+  # taken and reads what the winner published rather than its own copy. Writing
+  # the name directly would not do, even exclusively: an exclusive create makes
+  # *creation* atomic, not publication, so the file exists and is empty between
+  # the open and the write - long enough for a reader to see something that is
+  # not a configuration, and, if the install died there, long enough to leave a
+  # truncated base that every later evaluation would prefer to the original
+  # still sitting in `sys.config`. Staging that never gets published is left
+  # behind under its own name, where nothing reads it: an install cannot tell its
+  # own leftovers from another install's work in progress, so it does not try.
   #
   # This is permanent, not a step in the migration. The `build.config` path this
   # sits beside has always had a pristine base - `build.config` *is* one, and
@@ -383,6 +395,7 @@ defmodule Castle.Peer do
          erl: erl,
          sys_config: sys_config,
          pristine: Path.join(rel_vsn_dir, @pristine),
+         staging: Path.join(rel_vsn_dir, "castle-#{System.pid()}-#{unique()}.pristine"),
          scratch: scratch,
          boot_timeout: Keyword.get(opts, :boot_timeout, @boot_timeout),
          resolve_timeout: Keyword.get(opts, :resolve_timeout, @resolve_timeout)
@@ -470,7 +483,25 @@ defmodule Castle.Peer do
   # the first time - which is the only time `sys.config` is known to hold what
   # Mix wrote.
   defp base(peer) do
-    if File.regular?(peer.pristine), do: read_base(peer.pristine), else: first_base(peer)
+    if File.regular?(peer.pristine), do: published_base(peer), else: first_base(peer)
+  end
+
+  # A base that cannot be read is refused, and the way out of it is named. It is
+  # not repairable from here: `sys.config` is the only other copy, and whether
+  # that is still the original is exactly what is not known once this file is
+  # unreadable.
+  defp published_base(peer) do
+    case read_base(peer.pristine) do
+      {:ok, base} ->
+        {:ok, base}
+
+      {:error, message} ->
+        {:error,
+         message <>
+           " It is the configuration #{peer.vsn} was built with, kept so that every " <>
+           "evaluation starts from the same place. Remove it, and unpack #{peer.vsn} again " <>
+           "as well if #{peer.sys_config} has been resolved since."}
+    end
   end
 
   defp first_base(peer) do
@@ -507,14 +538,65 @@ defmodule Castle.Peer do
     end
   end
 
-  # Exclusively, so that of two installs racing neither can overwrite what the
-  # other captured, and whichever loses reads what the winner wrote rather than
-  # a `sys.config` that may already have been resolved.
+  # Staged under a name of its own and then published, rather than written to
+  # the name it will have. An exclusive create makes *creation* atomic, not
+  # publication: the file exists and is empty between the open and the write, so
+  # a reader could see a base that is not a configuration, and an install that
+  # died in that window would leave a truncated one that every later evaluation
+  # would prefer to the original still sitting in `sys.config`. A link cannot do
+  # that. It publishes a file that is already complete, in one step that either
+  # happens or does not, and refuses rather than replaces if the name is taken.
+  #
+  # Whichever install loses reads the published file, never its own staging
+  # copy: the winner's is the one every later evaluation will see, so it is the
+  # one this evaluation has to use too.
   defp keep(peer, base) do
-    case File.write(peer.pristine, base.bytes, [:exclusive]) do
-      :ok -> {:ok, base}
-      {:error, :eexist} -> read_base(peer.pristine)
-      {:error, reason} -> {:error, "Cannot write #{peer.pristine}. #{format_error(reason)}"}
+    stage_and_publish(peer, base)
+  after
+    File.rm(peer.staging)
+  end
+
+  defp stage_and_publish(peer, base) do
+    with :ok <- stage(peer.staging, base.bytes, peer.sys_config) do
+      case publish(peer.staging, peer.pristine) do
+        :ok -> {:ok, base}
+        :taken -> published_base(peer)
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  # These two are public, alone among the file handling here, because the window
+  # between them is what makes a concurrent install safe and a window nothing
+  # can stand in is a window nothing can test.
+  @doc false
+  @spec stage(Path.t(), iodata(), Path.t()) :: :ok | {:error, String.t()}
+  def stage(staging, bytes, mode_from) do
+    # Emptied, given its mode, and only then filled: the base holds the
+    # configuration and the initialised provider state the release was built
+    # with, which is as much reason to restrict it as `sys.config` has, and an
+    # operator who has restricted `sys.config` means it about both. Between
+    # creating the file and setting its mode there is nothing in it to read.
+    with :ok <- write(staging, ""),
+         :ok <- carry_mode(mode_from, staging) do
+      write(staging, bytes)
+    end
+  end
+
+  @doc false
+  @spec publish(Path.t(), Path.t()) :: :ok | :taken | {:error, String.t()}
+  def publish(staging, path) do
+    case File.ln(staging, path) do
+      :ok -> :ok
+      {:error, :eexist} -> :taken
+      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  defp carry_mode(from, to) do
+    case File.stat(from) do
+      {:ok, %File.Stat{mode: mode}} -> chmod(to, Bitwise.band(mode, 0o7777))
+      {:error, reason} -> {:error, "Cannot read #{from}. #{format_error(reason)}"}
     end
   end
 
@@ -705,6 +787,13 @@ defmodule Castle.Peer do
     case File.write(path, contents) do
       :ok -> :ok
       {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  defp chmod(path, mode) do
+    case File.chmod(path, mode) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Cannot set the mode of #{path}. #{format_error(reason)}"}
     end
   end
 

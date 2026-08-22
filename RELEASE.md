@@ -28,7 +28,10 @@
   provider had stopped supplying it — and the version made permanent would be
   configured differently from the way it goes on to boot. Expanding from the
   original instead means installing and then committing produce the same answer
-  a boot would, which is the point of expanding at either.
+  a boot would, which is the point of expanding at either. That copy is made
+  atomically and with the permissions `sys.config` has, so a partly written one
+  can never be found and read, and restricting `sys.config` — as an operator
+  might, since it holds credentials — restricts this too.
 
   Among the things that refuse is the check Elixir makes on a configuration
   before booting into it: that what `Application.compile_env/3` read when the

@@ -358,6 +358,104 @@ defmodule Castle.PeerTest do
       refute File.exists?(Path.join(vsn_dir, "sys.config.pristine"))
     end
 
+    test "publishes a base nothing can read before it is complete", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
+      sys_config = Path.join(vsn_dir, "sys.config")
+      pristine = Path.join(vsn_dir, "sys.config.pristine")
+      staging = Path.join(vsn_dir, "castle-staged.pristine")
+      bytes = File.read!(sys_config)
+
+      # The two steps materialisation takes, taken here one at a time, which is
+      # the only way to stand between them and look.
+      assert Castle.Peer.stage(staging, bytes, sys_config) == :ok
+      assert File.read!(staging) == bytes
+
+      # A reader looking for the base while it is being staged. Not a partial
+      # base: no base. The name is brought into existence by the link below and
+      # by nothing else, and the file it names is complete before it has a name.
+      refute File.exists?(pristine)
+      assert File.read(pristine) == {:error, :enoent}
+
+      assert Castle.Peer.publish(staging, pristine) == :ok
+      assert File.read!(pristine) == bytes
+
+      # Publication is a second name for the one file, which is why removing the
+      # staging name afterwards leaves the base behind.
+      assert File.stat!(pristine).inode == File.stat!(staging).inode
+      File.rm!(staging)
+      assert File.read!(pristine) == bytes
+      assert File.stat!(pristine).links == 1
+
+      # Refuses rather than replaces, which is what makes the loser of a race
+      # safe: it is told the name is taken, and goes on to read what is at that
+      # name instead of publishing its own copy.
+      loser = Path.join(vsn_dir, "castle-staged-later.pristine")
+      assert Castle.Peer.stage(loser, "not what was published", sys_config) == :ok
+      assert Castle.Peer.publish(loser, pristine) == :taken
+      assert File.read!(pristine) == bytes
+    end
+
+    test "does not adopt a base that was never published", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      pristine = Path.join(vsn_dir, "sys.config.pristine")
+      original = File.read!(sys_config)
+
+      # What an install interrupted between staging and publication leaves: a
+      # staged copy, under its own name, that never became the base. Truncated,
+      # since being interrupted is how it got there.
+      orphan = Path.join(vsn_dir, "castle-99999-1.pristine")
+      File.write!(orphan, "")
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      # Resolved from sys.config, which is still the original, and published
+      # from that - not from the orphan, which is neither read nor removed,
+      # because an install cannot tell its own leftovers from another install's
+      # work in progress.
+      assert File.read!(pristine) == original
+      assert File.read!(orphan) == ""
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
+    end
+
+    test "gives the base the permissions sys.config has", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      # An operator restricting sys.config means it about the configuration, and
+      # the base holds the same configuration and the same provider state.
+      sys_config = Path.join(vsn_dir, "sys.config")
+      File.chmod!(sys_config, 0o600)
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      assert mode(Path.join(vsn_dir, "sys.config.pristine")) == 0o600
+      assert mode(sys_config) == 0o600
+    end
+
+    test "refuses a base it cannot read", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      # What a Castle that published its base by writing to the name could
+      # leave: a base that is not a configuration. It is preferred to
+      # sys.config, being the base, so it has to be refused loudly rather than
+      # resolved from.
+      File.write!(Path.join(vsn_dir, "sys.config.pristine"), "")
+
+      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert message =~ "sys.config.pristine"
+      assert message =~ "Remove it, and unpack 1.0.0 again as well if"
+    end
+
     test "refuses a version whose original configuration is gone", %{tmp_dir: root} do
       vsn_dir =
         SyntheticRelease.build(root,
@@ -510,6 +608,8 @@ defmodule Castle.PeerTest do
     end
     """
   end
+
+  defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
 
   defp read_sys_config(vsn_dir) do
     assert {:ok, [config]} = :file.consult(to_charlist(Path.join(vsn_dir, "sys.config")))

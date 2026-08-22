@@ -55,9 +55,31 @@ Castle's job is configuration and release management on a running node.
   configured differently from the way it boots. `sys.config` cannot be the base,
   because that is the file `:release_handler` reads and so the file the resolved
   result has to land in; the first materialisation therefore copies it to
-  `sys.config.pristine`, with an exclusive create so two racing installs cannot
-  capture anything but the original, and every later one seeds from there. This
-  is permanent design: the `build.config` path has always had a pristine base —
+  `sys.config.pristine` and every later one seeds from there.
+
+  That copy is staged under a name of its own, given the mode `sys.config` has,
+  and published by hard link. Not written to its final name, and an exclusive
+  create is not enough either: exclusivity makes *creation* atomic, not
+  publication, so the file exists and is empty between the open and the write —
+  long enough for a racing reader to see something that is not a configuration,
+  and, if the install died there, long enough to leave a truncated base that
+  every later evaluation would prefer to the original still in `sys.config`. A
+  link publishes a file that is already complete, and refuses rather than
+  replaces, so the loser of a race reads what the winner published instead of
+  its own copy. Staging that never gets published is left where it is: an
+  install cannot tell its own leftovers from another install's work in progress,
+  so it does not try, and nothing reads that name. Do not "tidy up" stray
+  `castle-*.pristine` files in code for the same reason. The mode is carried
+  because the base holds the configuration and the serialised provider state Mix
+  shipped, which is as much reason to restrict it as `sys.config` has — and an
+  operator who has restricted `sys.config` means it about both.
+
+  A base that cannot be read as a configuration is refused, naming the remedy,
+  rather than resolved from: it is preferred to `sys.config` by definition, so
+  failing loudly is the only safe thing left.
+
+  This is permanent design: the `build.config` path has always had a pristine
+  base —
   `build.config` *is* one — and this is what carries that property forward when
   step 3 deletes it. It is deliberately not called `build.config`, since that
   name is the discriminator and would send the release back down the path being
@@ -232,6 +254,13 @@ materialised twice with the environment changing in between — install, then
 commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
+
+`Castle.Peer.stage/3` and `publish/2` are public for the same kind of reason: the
+window between them is what makes a concurrent install safe, and a window
+nothing can stand in is a window nothing can test. One test takes the two steps
+one at a time and looks at the destination in between — where it finds no file,
+rather than a partial one — then checks that publishing again is refused rather
+than allowed to replace.
 
 Two of these tests would pass for the wrong reason if written carelessly, so
 they are written to fail when what they rest on moves. The compile-environment

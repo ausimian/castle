@@ -18,7 +18,9 @@ defmodule Castle.PeerProviderStub do
   #   * `sleep:` a number of milliseconds or `:infinity`, to take longer than it
   #     is allowed to,
   #   * `mode_of:` a glob and `mode_to:` a path, to record the permissions of the
-  #     one file the glob matches, and
+  #     one file the glob matches,
+  #   * `snapshot_of:` a glob and `snapshot_to:` a path, to record every path the
+  #     glob matches - with its type and permissions - as a consultable term, and
   #   * `raise:` a message, to fail the way a provider that cannot find what it
   #     needs fails.
 
@@ -41,6 +43,10 @@ defmodule Castle.PeerProviderStub do
       record_mode(glob, opts[:mode_to])
     end
 
+    if snapshot = opts[:snapshot_of] do
+      record_snapshot(snapshot, opts[:snapshot_to])
+    end
+
     if wait = opts[:sleep] do
       Process.sleep(wait)
     end
@@ -59,6 +65,21 @@ defmodule Castle.PeerProviderStub do
   defp record_mode(glob, to) do
     [path] = Path.wildcard(glob)
     File.write!(to, Integer.to_string(Bitwise.band(File.stat!(path).mode, 0o777), 8))
+  end
+
+  # What is there while the pipeline is running, written where the test can read
+  # it: one `{path, type, permissions}` triple per match, as a term
+  # `:file.consult/1` will read back. Taken from inside the peer for the same
+  # reason the mode above is - it is the only moment at which the files being
+  # written exist at all.
+  defp record_snapshot(glob, to) do
+    entries =
+      for path <- Enum.sort(Path.wildcard(glob)) do
+        stat = File.stat!(path)
+        {to_charlist(path), stat.type, Bitwise.band(stat.mode, 0o777)}
+      end
+
+    File.write!(to, :io_lib.format(~c"~tp.~n", [entries]))
   end
 
   defp write_outside_the_io_system(text) do

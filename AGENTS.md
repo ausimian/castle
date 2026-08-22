@@ -57,58 +57,100 @@ Castle's job is configuration and release management on a running node.
   result has to land in; the first materialisation therefore copies it to
   `sys.config.pristine` and every later one seeds from there.
 
-  That copy is staged under a name of its own, given the mode `sys.config` has,
-  and published by hard link. Not written to its final name, and an exclusive
-  create is not enough either: exclusivity makes *creation* atomic, not
-  publication, so the file exists and is empty between the open and the write —
-  long enough for a racing reader to see something that is not a configuration,
-  and, if the install died there, long enough to leave a truncated base that
-  every later evaluation would prefer to the original still in `sys.config`. A
-  link publishes a file that is already complete, and refuses rather than
-  replaces, so the loser of a race reads what the winner published instead of
-  its own copy. Staging that never gets published is left where it is: an
-  install cannot tell its own leftovers from another install's work in progress,
-  so it does not try, and nothing reads that name. Do not "tidy up" stray
-  `castle-*.pristine` files in code for the same reason.
+  That copy is staged in the working directory below, given the mode
+  `sys.config` has, and published by hard link. Not written to its final name,
+  and an exclusive create is not enough either: exclusivity makes *creation*
+  atomic, not publication, so the file exists and is empty between the open and
+  the write — long enough for a racing reader to see something that is not a
+  configuration, and, if the install died there, long enough to leave a truncated
+  base that every later evaluation would prefer to the original still in
+  `sys.config`. A link publishes a file that is already complete, and refuses
+  rather than replaces, so the loser of a race reads what the winner published
+  instead of its own copy. Staging that never gets published is left where it is:
+  an install cannot tell its own leftovers from another install's work in
+  progress, so it does not try, and nothing reads that name. Do not "tidy up"
+  stray `castle-*` names — files or directories — in code for the same reason.
+  `Castle.Peer` removes the working directory *it* made, on every way out, and
+  nothing else.
 
-  **Every file this module creates comes into existence through
-  `Castle.Peer.write_private/2`, and new ones must too.** Each of them holds a
+  **Both files this module creates are made inside an owner-only working
+  directory and moved out of it, and a new one must be too.** Each holds a
   release's configuration — the base, and the scratch copy the providers resolve
-  into — so none of them may be readable by anyone the `sys.config` it came from
-  or is about to become would exclude: an operator who restricts that file has
-  said something, and it has to hold for the copies.
+  into — so none may be readable by anyone the `sys.config` it came from or is
+  about to become would exclude: an operator who restricts that file has said
+  something, and it has to hold for the copies.
 
-  The file is created owner-only at 0600, filled through that, and given the
-  model's mode **last** — `write_like/3` is the two of those together, for a
-  file written once. Not the other way round, which is the obvious reading and
-  is wrong: a `sys.config` at 0440 is an operator declaring their configuration
-  read-only, and a file chmodded to 0440 before being filled cannot be filled.
-  `File.write/2` reopens the path rather than writing through a handle held from
-  creation, so the fill fails `:eacces` against a file its own owner has just
-  made read-only, and the install stops. Do not "simplify" the ordering back.
+  **The protection is the directory, not the file's own mode, and it has to be:
+  OTP cannot create a file with a mode.** `:file.open/2`'s modes say how a file
+  is to be read and written and nothing about the permissions it is created
+  with — kernel's `mode()` type is the whole list — and an unrecognised option is
+  ignored rather than refused, so `{:mode, 0o600}` is *accepted* and does
+  nothing. The inode is created 0666 against the umask whichever way in you
+  take. So a mode can only be applied to a file that already exists, and `chmod`
+  does not revoke a descriptor somebody already holds: a reader who opened the
+  path while it was 0644 goes on reading everything written afterwards. That is
+  a standing read channel, not a blink, and no amount of care at the call site
+  closes it. Do not go looking for an atomic create-with-mode; there isn't one.
+
+  What works is `Castle.Peer.work_dir/1`: `mkdir` a directory in the version
+  directory and chmod it 0700 **while it is still empty**. `mkdir` takes no mode
+  either, so the directory is narrowed after the fact exactly as a file would
+  be — but an empty directory has nothing behind the window, and permission to
+  traverse a directory is checked on every lookup rather than captured at open
+  the way permission to read a file is, so a descriptor taken on it during that
+  window grants nothing once the chmod has happened. That asymmetry is the whole
+  reason this works on a directory and could not be made to work on the file.
+  `plan/2` is the one place the two paths are decided, and it puts both inside
+  the working directory under the names they will have when they leave.
+
+  It does not defend a version directory other accounts can write to: whoever
+  can create a name there can replace `sys.config` itself, so that release is
+  compromised before Castle is asked to configure it. The case defended is the
+  ordinary one, a version directory anyone may traverse and read.
+
+  `write_private/2` **refuses** to create a file in a directory that grants
+  anything to group or other, rather than trusting the caller to have picked a
+  path inside the working directory — the invariant is in the primitive because
+  remembering it at the call sites is what failed, four times over. It is a
+  guard against the next call site and not against an attacker (a directory can
+  be chmodded between the check and the create), and it also catches a
+  filesystem that took the `mkdir` and ignored the `chmod`, where none of this
+  can be honoured and the operator's own mode on `sys.config` would not be
+  either.
+
+  Inside the directory the file is still created owner-only at 0600, filled
+  through that, and given the model's mode **last** — `write_like/3` is the two
+  of those together, for a file written once. Not the other way round, which is
+  the obvious reading and is wrong: a `sys.config` at 0440 is an operator
+  declaring their configuration read-only, and a file chmodded to 0440 before
+  being filled cannot be filled. `File.write/2` reopens the path rather than
+  writing through a handle held from creation, so the fill fails `:eacces`
+  against a file its own owner has just made read-only, and the install stops.
+  Do not "simplify" the ordering back.
 
   0600 satisfies both constraints at once rather than trading between them: it
-  grants nothing to group or other, so the transient state is *narrower* than
+  grants nothing to group or other, so every transient state is *narrower* than
   the destination rather than merely different from it, and it leaves the file
   writable by its owner while there is writing to do. For the scratch that is
   until the last of three writes — this module fills it, the peer's pipeline
   writes the resolved configuration over it, this module writes it again — so
   the mode goes on after all of them, immediately before the rename. A failure
-  part-way leaves the file narrower than intended, never wider. The two
-  operations that move one of these files into place, the link that publishes
-  the base and the rename that replaces `sys.config`, need permission on the
-  directory rather than on the file, so a restrictive mode never has to be
-  relaxed again.
+  part-way leaves the file narrower than intended, never wider. It is no longer
+  the 0600 that closes the window — the directory is — so treat it as the belt to
+  that braces, and keep it. The two operations that move one of these files into
+  place, the link that publishes the base and the rename that replaces
+  `sys.config`, need permission on the directories rather than on the file, so a
+  restrictive mode never has to be relaxed again; nor does removing what is left
+  in the working directory afterwards.
 
-  The ordering lives inside the primitive rather than at the call sites because
-  remembering it at the call sites is what failed, three times. `File.write/2`
-  creates with the process umask and never looks at a mode. `File.cp/2` *does*
-  carry the mode — and was adopted here for that reason — but it writes the whole
-  file first and narrows it afterwards (`:file.copy`, then `copy_file_mode/2` at
-  `file.ex:1285`), which is the same exposure with a shorter window. The end
-  state is identical either way, which is exactly why no test of the end state
-  caught it. Do not add a fourth way to write one of these files; extend the
-  primitive.
+  `File.write/2` creates with the process umask and never looks at a mode.
+  `File.cp/2` *does* carry the mode — and was adopted here for that reason — but
+  it writes the whole file first and narrows it afterwards (`:file.copy`, then
+  `copy_file_mode/2` at `file.ex:1285`), which is the same exposure with a
+  shorter window. The end state is identical either way, which is exactly why no
+  test of the end state caught any of it. Do not add another way to write one of
+  these files, and do not create one next to `sys.config` however carefully;
+  extend the primitive, and put the file in the working directory.
 
   **Ownership and group are not reproduced — only the mode bits are.** This is a
   property of the design, not an oversight. Reproducing them needs `chown`,
@@ -154,9 +196,8 @@ Castle's job is configuration and release management on a running node.
   never answers cannot hold an install open. Everything that can refuse — a
   missing boot script, an emulator that is not there, a provider that raises, a
   compile environment that does not agree — refuses before `install_release/1`
-  is called. The resolved configuration is assembled in a copy beside
-  `sys.config` and renamed onto it, so a version never holds half a
-  configuration.
+  is called. The resolved configuration is assembled in the working directory
+  and renamed onto `sys.config`, so a version never holds half a configuration.
 
   The control connection is a socket rather than `connection: :standard_io`,
   which is what the issue suggested. Standard IO multiplexes the peer's console
@@ -311,24 +352,35 @@ commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
 
-`Castle.Peer.write_like/3`, `write_private/2`, `create_private/1` and
-`publish/2` are public for the same kind of reason: what they guarantee is about
-*intermediate* states, and a window nothing can stand in is a window nothing can
-test. One test takes `write_like/3` and `publish/2` one at a time and looks at
-the destination in between — where it finds no file, rather than a partial one —
-then checks that publishing again is refused rather than allowed to replace.
-Another calls `create_private/1` and finds the file already at 0600, which is the
-state that makes the window harmless whatever mode the file ends up with.
+`Castle.Peer.work_dir/1`, `write_like/3`, `write_private/2`, `create_private/1`
+and `publish/2` are public for the same kind of reason: what they guarantee is
+about *intermediate* states, and a window nothing can stand in is a window
+nothing can test. One test takes `work_dir/1`, `write_like/3` and `publish/2` one
+at a time and looks at the destination in between — where it finds no file, rather
+than a partial one — then checks that publishing again is refused rather than
+allowed to replace. Another calls `work_dir/1` and finds the directory already at
+0700 **and still empty**, which is the pair of facts that makes its own window
+harmless. A third calls `write_private/2` with a path in a directory the host can
+traverse and gets a refusal.
 
 Those have to be written that way. The mode a file *ends up* with is the same
 whether it was set before or after the content, so a test of the end state
-passes either way — which is how the exposure survived a round of review that had
-already identified the class. The in-peer observation of the scratch file's mode
-is a regression guard on the site that was wrong, not a discriminator: it passes
-against the version that had the window too. What *is* a discriminator, and the
-reason the ordering can no longer be reversed by accident, is the release whose
-`sys.config` is 0440: it materialises twice and both files end at 0440, where
-setting the mode first fails to write the file at all.
+passes either way — which is how the exposure survived two rounds of review that
+had already identified the class. The in-peer observation of the scratch file's
+mode is a regression guard on the site that was wrong, not a discriminator: it
+passes against a version that had the window too.
+
+What *is* a discriminator, and what makes the exposure unreachable rather than
+merely narrow, is the in-peer walk of the version directory taken while both
+files exist and both hold configuration: the only thing Castle has put there is
+one directory at 0700, every configuration-bearing file it made is inside that,
+and the version directory itself holds nothing of Castle's but the two names it
+publishes. Against the version that created those files next to `sys.config`
+there is no such directory at all, so the assertion cannot pass by accident.
+The other discriminator, and the reason the mode ordering cannot be reversed by
+accident either, is the release whose `sys.config` is 0440: it materialises twice
+and both files end at 0440, where setting the mode first fails to write the file
+at all.
 
 Two of these tests would pass for the wrong reason if written carelessly, so
 they are written to fail when what they rest on moves. The compile-environment

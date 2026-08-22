@@ -116,19 +116,20 @@ defmodule Castle.Peer do
   # version copies it to `sys.config.pristine` and every one after that seeds
   # from there.
   #
-  # The copy is staged under a name of its own, given the mode `sys.config` has,
-  # and published by hard link - `write_like/3` then `publish/2`. A link is atomic and
-  # refuses rather than replaces, so what appears at that name is a file that was
-  # already complete, and of two installs racing the loser is told the name is
-  # taken and reads what the winner published rather than its own copy. Writing
-  # the name directly would not do, even exclusively: an exclusive create makes
-  # *creation* atomic, not publication, so the file exists and is empty between
-  # the open and the write - long enough for a reader to see something that is
-  # not a configuration, and, if the install died there, long enough to leave a
-  # truncated base that every later evaluation would prefer to the original
-  # still sitting in `sys.config`. Staging that never gets published is left
-  # behind under its own name, where nothing reads it: an install cannot tell its
-  # own leftovers from another install's work in progress, so it does not try.
+  # The copy is staged in the working directory, given the mode `sys.config`
+  # has, and published by hard link - `write_like/3` then `publish/2`. A link is
+  # atomic and refuses rather than replaces, so what appears at that name is a
+  # file that was already complete, and of two installs racing the loser is told
+  # the name is taken and reads what the winner published rather than its own
+  # copy. Writing the name directly would not do, even exclusively: an exclusive
+  # create makes *creation* atomic, not publication, so the file exists and is
+  # empty between the open and the write - long enough for a reader to see
+  # something that is not a configuration, and, if the install died there, long
+  # enough to leave a truncated base that every later evaluation would prefer to
+  # the original still sitting in `sys.config`. Staging that never gets
+  # published is left behind in the working directory it was made in, where
+  # nothing reads it: an install cannot tell its own leftovers from another
+  # install's work in progress, so it does not try.
   #
   # This is permanent, not a step in the migration. The `build.config` path this
   # sits beside has always had a pristine base - `build.config` *is* one, and
@@ -214,14 +215,25 @@ defmodule Castle.Peer do
   """
   @spec materialise(Path.t(), keyword()) :: result()
   def materialise(rel_vsn_dir, opts \\ []) do
-    with {:ok, peer} <- plan(rel_vsn_dir, opts),
-         {:ok, base} <- base(peer) do
+    with {:ok, peer} <- plan(rel_vsn_dir, opts), do: in_working_dir(peer)
+  end
+
+  # Everything that writes anything happens with the working directory in place,
+  # and the directory goes on the way out - on the failing paths as much as the
+  # succeeding one. Nothing in it needs to survive: what it holds has either been
+  # moved out under its final name or belongs to a materialisation that did not
+  # finish. Removing *another* install's is a different question, and the answer
+  # is no; see `discard/1`.
+  defp in_working_dir(peer) do
+    with {:ok, base} <- base(peer) do
       # A release with no providers has nothing to resolve: what Mix wrote is
       # already its final configuration, and `sys.config` is left exactly as it
       # is rather than rewritten with the same contents. No base is kept for it
       # either - there is nothing that could change it.
       if declares_providers?(base.config), do: expand(peer, base), else: {:ok, []}
     end
+  after
+    discard(peer.work)
   end
 
   defp declares_providers?(config) do
@@ -231,24 +243,20 @@ defmodule Castle.Peer do
     end)
   end
 
-  # The resolved configuration is assembled beside `sys.config` and then moved
-  # onto it, so that the release is never left holding half a configuration: the
-  # scratch file is what the peer reads and writes, and the rename is the only
-  # moment `sys.config` changes.
+  # The resolved configuration is assembled in the working directory and then
+  # moved onto `sys.config`, so that the release is never left holding half a
+  # configuration: the scratch file is what the peer reads and writes, and the
+  # rename is the only moment `sys.config` changes.
+  #
+  # The scratch holds the most sensitive thing here - the configuration with
+  # every provider's answer resolved into it - so it never exists anywhere the
+  # working directory does not cover, is owner-only for the whole of its working
+  # life, and takes `sys.config`'s mode only once there is nothing left to write
+  # to it. That has to be the order: the peer writes to this file too, so
+  # applying a read-only mode any earlier would stop the pipeline that is meant
+  # to fill it. The rename then carries the mode onto `sys.config`, and needs
+  # permission on the two directories rather than on the file to do it.
   defp expand(peer, base) do
-    expand_into_scratch(peer, base)
-  after
-    File.rm(peer.scratch)
-  end
-
-  # The scratch file holds the most sensitive thing here - the configuration with
-  # every provider's answer resolved into it - so it is owner-only for the whole
-  # of its working life and takes `sys.config`'s mode only once there is nothing
-  # left to write to it. That has to be the order: the peer writes to this file
-  # too, so applying a read-only mode any earlier would stop the pipeline that is
-  # meant to fill it. The rename then carries the mode onto `sys.config`, and
-  # needs permission on the directory rather than on the file to do it.
-  defp expand_into_scratch(peer, base) do
     with :ok <- write_private(peer.scratch, base.bytes),
          {:ok, config} <- run(peer),
          :ok <- write(peer.scratch, [head(base.header), format(config)]),
@@ -379,16 +387,22 @@ defmodule Castle.Peer do
   # `install_release/1`: a target that cannot be evaluated has to be refused
   # while refusing is still free.
 
+  # The working directory is made last, once nothing is left that could refuse:
+  # a plan that succeeds is a plan whose caller owes it a `discard/1`, and one
+  # that fails has left nothing to discard. It is also the one place the paths of
+  # the two files are decided, which is what keeps them inside it - there is no
+  # second place to get that wrong. They are given the names they will have when
+  # they leave.
   defp plan(rel_vsn_dir, opts) do
     root = Path.expand("../..", rel_vsn_dir)
     boot = Path.join(rel_vsn_dir, @boot_script)
     sys_config = Path.join(rel_vsn_dir, @sys_config)
     vsn = Path.basename(rel_vsn_dir)
-    scratch = Path.join(rel_vsn_dir, "castle-#{System.pid()}-#{unique()}.config")
 
     with :ok <- regular(sys_config, "#{vsn} has neither a sys.config nor a build.config."),
          :ok <- regular(boot <> ".boot", "Its configuration is evaluated on that script."),
-         {:ok, erl} <- emulator(root, rel_vsn_dir) do
+         {:ok, erl} <- emulator(root, rel_vsn_dir),
+         {:ok, work} <- work_dir(rel_vsn_dir) do
       {:ok,
        %{
          vsn: vsn,
@@ -397,8 +411,9 @@ defmodule Castle.Peer do
          erl: erl,
          sys_config: sys_config,
          pristine: Path.join(rel_vsn_dir, @pristine),
-         staging: Path.join(rel_vsn_dir, "castle-#{System.pid()}-#{unique()}.pristine"),
-         scratch: scratch,
+         work: work,
+         staging: Path.join(work, @pristine),
+         scratch: Path.join(work, @sys_config),
          boot_timeout: Keyword.get(opts, :boot_timeout, @boot_timeout),
          resolve_timeout: Keyword.get(opts, :resolve_timeout, @resolve_timeout)
        }}
@@ -540,7 +555,7 @@ defmodule Castle.Peer do
     end
   end
 
-  # Staged under a name of its own and then published, rather than written to
+  # Staged in the working directory and then published, rather than written to
   # the name it will have. An exclusive create makes *creation* atomic, not
   # publication: the file exists and is empty between the open and the write, so
   # a reader could see a base that is not a configuration, and an install that
@@ -553,12 +568,6 @@ defmodule Castle.Peer do
   # copy: the winner's is the one every later evaluation will see, so it is the
   # one this evaluation has to use too.
   defp keep(peer, base) do
-    stage_and_publish(peer, base)
-  after
-    File.rm(peer.staging)
-  end
-
-  defp stage_and_publish(peer, base) do
     with :ok <- write_like(peer.staging, base.bytes, peer.sys_config) do
       case publish(peer.staging, peer.pristine) do
         :ok -> {:ok, base}
@@ -570,32 +579,74 @@ defmodule Castle.Peer do
 
   ## Writing a file that holds configuration
   #
-  # There is one way to bring one into existence here, and it is
-  # `write_private/2`. Every file this module creates holds a release's
-  # configuration - the base, and the scratch copy the providers are resolved
-  # into - so none of them may be readable by anyone the `sys.config` it came
-  # from or is about to become would not let read it. An operator who restricts
-  # that file has said something, and it has to hold for the copies too.
+  # Every file this module creates holds a release's configuration - the base,
+  # and the scratch copy the providers are resolved into - so none of them may be
+  # readable by anyone the `sys.config` it came from or is about to become would
+  # not let read it. An operator who restricts that file has said something, and
+  # it has to hold for the copies too.
   #
-  # So the file is created owner-only, filled through that, and given the model's
-  # mode last. Not the other way round, which is the obvious reading of "set the
-  # mode before there is anything to read" and is wrong: a `sys.config` at 0440
-  # is an operator declaring their configuration read-only, and a file chmodded
-  # to 0440 before being filled cannot be filled. `File.write/2` reopens the path
-  # rather than writing through a handle held from creation, so the fill fails
-  # with `:eacces` and the install stops. Do not "simplify" the ordering back.
+  # What protects them is the *directory* they are made in, and it has to be,
+  # because OTP cannot create a file with a mode. `:file.open/2`'s modes say how
+  # a file is to be read and written and nothing about the permissions it comes
+  # into existence with - kernel's own `mode()` type is the list of them - and an
+  # option it does not recognise is ignored rather than refused, so
+  # `{:mode, 0o600}` is accepted and does nothing. Whichever way in is taken the
+  # inode is created 0666 against the process umask, which is 0644 on a typical
+  # one. A mode can therefore only ever be applied to a file that already
+  # exists, and `chmod` does not revoke a descriptor somebody already holds: a
+  # reader who opened the path while it was 0644 goes on reading everything
+  # written to it afterwards, which is a standing read channel rather than a
+  # momentary blink. Narrowing after creation is not a window that can be made
+  # small enough. It has to be a path no one else can reach.
+  #
+  # So `work_dir/1` makes a working directory in the version directory and
+  # chmods it 0700 *while it is still empty*, and both files are created inside
+  # it and moved out. `mkdir` takes no mode either, so the directory is created
+  # against the umask and narrowed just as a file would be - but an empty
+  # directory exposes nothing to see, and permission to traverse a directory is
+  # checked on every lookup rather than captured in a descriptor, so a handle
+  # taken on it during that window grants nothing once the chmod has happened.
+  # That is the whole difference between doing this to a directory and doing it
+  # to a file, and it is why the file-level version of this could not be made
+  # airtight however carefully it was written.
+  #
+  # What it does not defend is a version directory other accounts can write to:
+  # whoever can create a name there can replace `sys.config` itself, so such a
+  # release is compromised before Castle is asked to configure it. The case being
+  # defended is the ordinary one, a version directory anyone may traverse and
+  # read.
+  #
+  # `write_private/2` is the one way to bring one of these files into existence,
+  # and it refuses to create one in a directory that grants anything to group or
+  # other rather than trusting its caller to have picked a path inside the
+  # working directory. The invariant belongs in the primitive because remembering
+  # it at the call sites is what failed, four times over. It is a guard against
+  # the next call site and not against an attacker - a directory can be chmodded
+  # between the check and the create - and it also catches a filesystem that took
+  # the `mkdir` and ignored the `chmod`, where nothing here can be honoured and
+  # the operator's mode on `sys.config` would not be honoured either.
+  #
+  # Inside the directory the file is still created owner-only, filled through
+  # that, and given the model's mode last. Not the other way round, which is the
+  # obvious reading of "set the mode before there is anything to read" and is
+  # wrong: a `sys.config` at 0440 is an operator declaring their configuration
+  # read-only, and a file chmodded to 0440 before being filled cannot be filled.
+  # `File.write/2` reopens the path rather than writing through a handle held
+  # from creation, so the fill fails with `:eacces` and the install stops. Do not
+  # "simplify" the ordering back.
   #
   # 0600 satisfies both constraints at once rather than trading between them. It
-  # grants nothing at all to group or other, so the window cannot expose the
-  # contents to anyone the final mode would not - the transient state is
-  # narrower than the destination rather than merely different from it - and it
+  # grants nothing at all to group or other, so every intermediate state is
+  # narrower than the destination rather than merely different from it, and it
   # leaves the file writable by its owner for as long as there is writing to do.
   # Which, for the scratch, is until the last of three writes: this module fills
   # it, the peer's pipeline writes the resolved configuration over it, and this
   # module writes it again. The model's mode goes on after all of that, as the
-  # last thing done before the file becomes visible under its final name - which
-  # is also why a failure part-way through leaves it narrower than intended
-  # rather than wider.
+  # last thing done before the file leaves the working directory under its final
+  # name - which is also why a failure part-way through leaves it narrower than
+  # intended rather than wider. It is no longer the 0600 that closes the window,
+  # the directory is; what it buys now is that a file's own mode is never the
+  # umask's choice, at the cost of one `chmod`.
   #
   # Neither of the obvious primitives has any of this. `File.write/2` creates
   # with the process umask and never looks at a mode. `File.cp/2` does carry the
@@ -605,10 +656,38 @@ defmodule Castle.Peer do
   #
   # What is not reproduced is ownership - only the mode bits are. See AGENTS.md.
   #
-  # These are public, along with `publish/2`, because the intermediate states are
-  # the point: a mode that is only ever correct once the content is written looks
-  # exactly like a mode that was correct all along, and a window nothing can
-  # stand in is a window nothing can test.
+  # `work_dir/1` is public along with `write_like/3`, `write_private/2`,
+  # `create_private/1` and `publish/2`, because the intermediate states are the
+  # point: a mode that is only ever correct once the content is written looks
+  # exactly like a mode that was correct all along, a directory that was secured
+  # after it was filled looks exactly like one secured before, and a window
+  # nothing can stand in is a window nothing can test.
+
+  # Created rather than ensured: a name that is already there is not adopted,
+  # whether it is a directory, a file or a symlink to somewhere else - `mkdir`
+  # refuses all three, and the name carries this process's pid and a number no
+  # other call in it will use again. Chmodded straight afterwards, while the only
+  # thing an interloper could reach through it is the fact that it is empty.
+  #
+  # A directory that could not be secured is removed again rather than used: it
+  # is this call's own, made an instant ago and with nothing in it, so removing it
+  # cannot take anybody else's work with it.
+  @doc false
+  @spec work_dir(Path.t()) :: {:ok, Path.t()} | {:error, String.t()}
+  def work_dir(dir) do
+    path = Path.join(dir, "castle-#{System.pid()}-#{unique()}.work")
+
+    with :ok <- mkdir(path) do
+      case chmod(path, 0o700) do
+        :ok ->
+          {:ok, path}
+
+        {:error, _reason} = error ->
+          discard(path)
+          error
+      end
+    end
+  end
 
   @doc false
   @spec write_like(Path.t(), iodata(), Path.t()) :: :ok | {:error, String.t()}
@@ -619,7 +698,10 @@ defmodule Castle.Peer do
   @doc false
   @spec write_private(Path.t(), iodata()) :: :ok | {:error, String.t()}
   def write_private(path, bytes) do
-    with :ok <- create_private(path), do: write(path, bytes)
+    with :ok <- private_dir(Path.dirname(path)),
+         :ok <- create_private(path) do
+      write(path, bytes)
+    end
   end
 
   @doc false
@@ -800,6 +882,45 @@ defmodule Castle.Peer do
   end
 
   ## Files
+
+  # Whether a file holding configuration may be created here at all: nothing
+  # granted to group or other, so there is no path through this directory for
+  # anyone else to open what is inside it by. Checked on every creation rather
+  # than assumed of the working directory, because assuming it at the call sites
+  # is the mistake this whole arrangement exists to make impossible.
+  defp private_dir(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{mode: mode}} -> private_mode(path, Bitwise.band(mode, 0o7777))
+      {:error, reason} -> {:error, "Cannot read #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  defp private_mode(path, mode) do
+    if Bitwise.band(mode, 0o077) == 0 do
+      :ok
+    else
+      {:error,
+       "Cannot write in #{path}, whose mode is 0#{Integer.to_string(mode, 8)}. A file holding " <>
+         "a release's configuration is only ever created in a directory Castle has made " <>
+         "owner-only, so that nothing can open it while it is being written. Castle chmods " <>
+         "that directory to 0700 as it creates it, and a wider mode than that means the " <>
+         "filesystem holding the release did not take it."}
+    end
+  end
+
+  defp mkdir(path) do
+    case File.mkdir(path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  # A working directory this call made, and only ever that one. Orphans are left
+  # exactly where they are, for the same reason a staged base that was never
+  # published is: an install cannot tell its own leftovers from another install's
+  # work in progress, so it does not try, and nothing reads them. Do not add a
+  # sweep of stray `castle-*` names in the version directory.
+  defp discard(work), do: File.rm_rf(work)
 
   defp read(path) do
     case File.read(path) do

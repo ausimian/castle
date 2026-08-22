@@ -29,36 +29,66 @@ Castle's job is configuration and release management on a running node.
   `sys.config`: once such a release has booted once, it has both.
 
   When it is absent, Mix's pipeline is intact and `Castle.Peer` materialises the
-  configuration instead: a `:peer` with `connection: :standard_io` — so no
-  epmd, cookie, node name or distribution — booted on the target's own
-  `preboot` script and its own emulator, which runs `Config.Provider.boot/1`
-  over the target's own provider modules and hands the resolved configuration
-  back to be written. Castle does not fold providers itself, and must not
-  acquire the ability to: the point of #13 is that Elixir's pipeline stays the
-  only implementation of it. What Castle arranges is that the pipeline *writes*
-  rather than configuring the VM it happens to be in, which is one field of the
-  provider state and a reboot function that does nothing.
+  configuration instead: a `:peer` reached over a loopback socket — so no epmd,
+  cookie, node name or distribution; the peer reports `nonode@nohost` and
+  `is_alive() == false` — booted on the target's own `preboot` script and its
+  own emulator, which runs `Config.Provider.boot/1` over the target's own
+  provider modules and hands the resolved configuration back to be written.
+  Castle does not fold providers itself, and must not acquire the ability to:
+  the point of #13 is that Elixir's pipeline stays the only implementation of
+  it. What Castle arranges is that the pipeline *writes* rather than configuring
+  the VM it happens to be in, which is one field of the provider state and a
+  reboot function that does nothing.
 
   A provider module can differ between the version that is running and the
   version being installed, which is why this cannot be done on the running
   node, and is what the peer earns.
 
-  Four things about it are load-bearing. The peer is started linked and stopped
-  on every path out, including the failing ones; `wait_boot` and the call both
-  have deadlines, so a peer that never answers cannot hold an install open.
-  Everything that can refuse — a missing boot script, an emulator that is not
-  there, a provider that raises — refuses before `install_release/1` is called.
-  The resolved configuration is assembled in a copy beside `sys.config` and
-  renamed onto it, so a version never holds half a configuration. And the peer's
-  standard error is relayed through its `user` process, because a `standard_io`
-  connection multiplexes console output with its own framing and reserves byte
-  values that are UTF-8 lead bytes — an accented character written straight out
-  would take the channel down and fail an install that was about to succeed.
+  Five things about it are load-bearing.
+
+  The peer is started linked and stopped on every path out, including the
+  failing ones; `wait_boot` and the call both have deadlines, so a peer that
+  never answers cannot hold an install open. Everything that can refuse — a
+  missing boot script, an emulator that is not there, a provider that raises, a
+  compile environment that does not agree — refuses before `install_release/1`
+  is called. The resolved configuration is assembled in a copy beside
+  `sys.config` and renamed onto it, so a version never holds half a
+  configuration.
+
+  The control connection is a socket rather than `connection: :standard_io`,
+  which is what the issue suggested. Standard IO multiplexes the peer's console
+  output with the frames carrying the call over one byte stream and reserves
+  sixteen byte values for the framing, every one of them a UTF-8 lead byte — so
+  a provider, or a NIF under it, writing an accented character straight to a
+  file descriptor fails the frame's checksum and takes the control process down,
+  refusing an install that was about to succeed. Nothing outside `:peer` can
+  harden that; the shared stream *is* the mechanism. The socket costs the
+  diagnosis of a peer that cannot boot: a detached peer says nothing on its way
+  down and the origin holds no handle on it, so a failed boot is noticed when
+  the deadline expires rather than at once and with the emulator's reason. That
+  was the trade, and it went the way it did because a broken release is broken
+  either way while a working one must not be refused.
+
+  Because a detached peer's descriptors are the null device, its standard error
+  is relayed through its `user` process — which is what makes Elixir's account
+  of a provider that raised reach the operator at all. A raw write still goes
+  nowhere, which is the safe direction.
 
   `Castle.Peer.resolve/1` is called *in the target release*, so
   `{Castle.Peer, :resolve, 1}` is a contract between one version of Castle and
   the next. A target too old to have it fails the call and the install is
   refused.
+
+  Finally, `Castle.Peer` makes the compile-environment check Elixir would have
+  made, with Elixir's own validator. Elixir makes it in the branch that
+  *applies* a resolved configuration, and again on the boot that follows the
+  branch that *writes* one; this drives the writing branch and nothing boots
+  afterwards, so without it a release Elixir considers unbootable would be
+  installed and the problem found on the way up, where the only way out is a
+  rollback. Do not weaken it into something that skips when it does not
+  recognise what it was given: it refuses instead, because a check that silently
+  passes everything looks exactly like a check that works.
+
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
   can manage its own upgrades.
@@ -164,9 +194,20 @@ puts the other on the peer's code path, and asserts that the answer came from
 the peer's. Peer cleanup is asserted from outside: a provider records the
 operating system pid of the VM it ran in, and the test waits for it to go.
 
-What is not covered is the boot timeouts, which are fixed rather than injected;
-what stands behind them is that `wait_boot` and the call deadline are both there
-to be read.
+`Castle.Peer.materialise/2` takes `:boot_timeout` and `:resolve_timeout` for the
+same reason `Castle.Commands` takes the module to talk to — a deadline nothing
+can shorten is a deadline no test can show is enforced. Two tests give it a
+second and assert that the refusal names it, which is what keeps the deadlines
+from being a claim in a comment.
+
+Two of these tests would pass for the wrong reason if written carelessly, so
+they are written to fail when what they rest on moves. The compile-environment
+test asserts the *refusal*, over provider state built by
+`Config.Provider.init/3`: if Elixir stops representing that check as a list of
+triples, `init/3` stops producing one, no refusal happens, and the test fails.
+It is paired with a release whose check is satisfied, so that "refuses
+everything" cannot pass for "checks correctly", and with one carrying a shape
+Elixir does not produce, which has to be refused rather than skipped.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's

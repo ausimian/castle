@@ -10,7 +10,7 @@
   provider pipeline: Castle drives it and no longer keeps a copy of it.
 
   The temporary VM needs no epmd, no cookie, no node name and no distributed
-  Erlang: it talks to the running node over its own standard input and output,
+  Erlang: it talks to the running node over a socket on the loopback interface,
   and whatever it prints — a provider explaining what it could not find, say —
   arrives on the terminal that asked for the install. It is stopped on every way
   out, including every failing one, and it cannot hold an install open: both its
@@ -18,6 +18,14 @@
   to go on refuses before the upgrade is applied, so configuration that cannot
   be expanded leaves an install that did not happen rather than one that
   half did.
+
+  Among the things that refuse is the check Elixir makes on a configuration
+  before booting into it: that what `Application.compile_env/3` read when the
+  release was compiled is what the resolved configuration says now. A version
+  whose runtime configuration contradicts what it was compiled against is
+  refused here, where refusing costs nothing, rather than accepted and then
+  found to be unbootable — which, for an upgrade that restarts, is found on the
+  way back up with a rollback as the only way out.
 
   Which way a release is configured is settled by the release itself. One whose
   configuration was intercepted at build time — every release assembled by the

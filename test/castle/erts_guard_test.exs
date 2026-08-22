@@ -137,23 +137,35 @@ defmodule Castle.ErtsGuardTest do
 
     @tag :tmp_dir
     test "a directory that cannot be traversed is reported as the reason", %{tmp_dir: dir} do
-      # 0000 on the parent, so the child cannot be looked up at all. Skipped for
-      # root, which is not stopped by a mode and would see this succeed.
+      # 0000 on the parent, so the child cannot be looked up at all.
       parent = Path.join(dir, "sealed")
-      File.mkdir_p!(Path.join(parent, "deployment"))
+      deployment = Path.join(parent, "deployment")
+      File.mkdir_p!(deployment)
       File.chmod!(parent, 0o000)
       on_exit(fn -> File.chmod(parent, 0o700) end)
 
-      System.put_env("RELEASE_ROOT", Path.join(parent, "deployment"))
+      System.put_env("RELEASE_ROOT", deployment)
 
-      message = assert_raise(Castle.Error, &Castle.make_releases/0).message
+      # Whether the fixture actually produced an unreadable path is settled
+      # *here*, by asking the filesystem directly, and never from the message
+      # Castle goes on to produce. Deciding it from that message would make the
+      # test choose its own oracle: a regression collapsing :eacces back into
+      # :different yields a message with no "eacces" in it, which would then be
+      # read as "the fixture did not work" and accepted. It would stay green for
+      # exactly the regression it is here to catch. Root is not stopped by a
+      # mode, and neither are some filesystems, so this skips rather than
+      # asserting something it has not set up.
+      case File.stat(deployment) do
+        {:error, :eacces} ->
+          message = assert_raise(Castle.Error, &Castle.make_releases/0).message
 
-      if message =~ "eacces" do
-        assert message =~ "cannot tell whether the deployment and the emulator's root"
-        refute message =~ "are different directories"
-      else
-        # Running as root, or on a filesystem that does not enforce the mode.
-        assert message =~ "are different directories"
+          assert message =~ "cannot tell whether the deployment and the emulator's root"
+          assert message =~ "could not be read (eacces)"
+          refute message =~ "are different directories"
+
+        {:ok, _} ->
+          # Nothing to assert: the state this test is about does not exist here.
+          IO.puts(:stderr, "skipped: this user or filesystem is not stopped by a 0000 parent")
       end
     end
 

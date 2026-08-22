@@ -89,7 +89,7 @@
   that repeats the question until it is answered - which is what Forecastle's
   `bin/castle install` does, from its own 1.0.0 - can tell an upgrade that took
   effect from one that did not. Castle supplies the answer; it does not do the
-  asking, and the Forecastle this release is built against does not yet ask.
+  asking.
 
   Confirmation needs two things: the version is the release the system is
   running - the one

@@ -57,33 +57,38 @@ defmodule Castle.ErtsGuardTest do
       end
     end
 
-    test "the refusal asserts no cause, and no resolution it cannot deliver" do
-      # Two directories are all the guard observes, so the message may not claim
-      # to know why they differ. This has been got wrong twice - once asserting
-      # a missing ERTS, once asserting ERL_ROOTDIR as the only alternative - and
-      # both read as a bug in the guard rather than as the refusal they were.
-      # Asserted as the absence of the assertions, because that is the defect:
-      # any wording that offers the causes as examples passes, and any wording
-      # that closes the set fails.
+    test "the refusal is exactly the approved wording", %{tmp_dir: dir} do
+      # Asserted whole, not by fragments. Two directories are all the guard
+      # observes, so the message may not claim to know why they differ - and it
+      # has claimed it twice, once asserting a missing ERTS and once asserting
+      # ERL_ROOTDIR as the only alternative. The obvious test, refuting those two
+      # phrasings and requiring the words that ought to be present, does not
+      # actually forbid the defect: "This is caused by include_erts: false"
+      # refutes clean and keeps every required fragment. Since the failure mode
+      # is a *categorical claim* rather than any particular sentence, nothing
+      # short of the full text pins it, and changing the wording deliberately
+      # should mean changing it here too.
+      deployment = Path.join(dir, "deployment")
+      root_dir = to_string(:code.root_dir())
+
       message = assert_raise(Castle.Error, &Castle.make_releases/0).message
 
-      refute message =~ "this release does not bring its own ERTS"
-      refute message =~ "Otherwise ERL_ROOTDIR is set"
-      refute message =~ ~r/Either way/
-
-      # Both are still named, as examples - dropping them would be the other way
-      # to pass this test, and would leave an operator with nothing to check.
-      assert message =~ "include_erts: false"
-      assert message =~ "ERL_ROOTDIR"
-      assert message =~ "there may be others"
-
-      # And it may not promise that relocating the records is a way out. RELDIR
-      # and the sasl releases_dir parameter do move them - `init/1` reads both
-      # ahead of the root - so a message anchoring *everything* to the emulator
-      # would be false. What is anchored there is the applications, which is why
-      # the refusal holds regardless.
-      assert message =~ "RELDIR"
-      assert message =~ "extracts applications"
+      assert message ==
+               "Cannot create #{Path.join(root_dir, "releases/RELEASES")}: the deployment " <>
+                 "and the emulator's root are different directories - the deployment is " <>
+                 "#{deployment} and the emulator runs in #{root_dir}. That is where " <>
+                 ":release_handler extracts applications, resolves every lib/<app>-<vsn> " <>
+                 "it reads, and deletes erts-<vsn> from, because those paths are anchored " <>
+                 "to the emulator's root rather than to the deployment. Pointing Castle at " <>
+                 "the deployment instead would only move the release records away from the " <>
+                 "applications they describe. Relocating the records with RELDIR or the " <>
+                 "sasl releases_dir parameter does not help either, for the same reason: " <>
+                 "it moves the bookkeeping and leaves the applications where they were. " <>
+                 "Common causes are building the release with include_erts: false, which " <>
+                 "ships no emulator of its own, and an ERL_ROOTDIR in the environment, " <>
+                 "which the release's erl honours ahead of its own location; there may be " <>
+                 "others. This deployment cannot be upgraded by Castle until the two " <>
+                 "directories are the same one."
     end
 
     test "the read-only diagnostics answer as they always did" do
@@ -133,40 +138,6 @@ defmodule Castle.ErtsGuardTest do
       # The distinction is the whole point: it must not claim the finding that
       # the version before this one claimed.
       refute message =~ "are different directories"
-    end
-
-    @tag :tmp_dir
-    test "a directory that cannot be traversed is reported as the reason", %{tmp_dir: dir} do
-      # 0000 on the parent, so the child cannot be looked up at all.
-      parent = Path.join(dir, "sealed")
-      deployment = Path.join(parent, "deployment")
-      File.mkdir_p!(deployment)
-      File.chmod!(parent, 0o000)
-      on_exit(fn -> File.chmod(parent, 0o700) end)
-
-      System.put_env("RELEASE_ROOT", deployment)
-
-      # Whether the fixture actually produced an unreadable path is settled
-      # *here*, by asking the filesystem directly, and never from the message
-      # Castle goes on to produce. Deciding it from that message would make the
-      # test choose its own oracle: a regression collapsing :eacces back into
-      # :different yields a message with no "eacces" in it, which would then be
-      # read as "the fixture did not work" and accepted. It would stay green for
-      # exactly the regression it is here to catch. Root is not stopped by a
-      # mode, and neither are some filesystems, so this skips rather than
-      # asserting something it has not set up.
-      case File.stat(deployment) do
-        {:error, :eacces} ->
-          message = assert_raise(Castle.Error, &Castle.make_releases/0).message
-
-          assert message =~ "cannot tell whether the deployment and the emulator's root"
-          assert message =~ "could not be read (eacces)"
-          refute message =~ "are different directories"
-
-        {:ok, _} ->
-          # Nothing to assert: the state this test is about does not exist here.
-          IO.puts(:stderr, "skipped: this user or filesystem is not stopped by a 0000 parent")
-      end
     end
 
     @tag :tmp_dir

@@ -32,4 +32,20 @@ defmodule Castle.Deployment do
   """
   @spec release_root() :: Path.t() | nil
   def release_root, do: System.get_env("RELEASE_ROOT")
+
+  @doc """
+  What the filesystem says about a path, for identifying two of them.
+
+  Here rather than called directly so that the answers the comparison has to
+  handle can be produced on demand. Two of them cannot be arranged reliably from
+  a test: a `stat` that fails with `:eacces` needs a mode that root and some
+  filesystems ignore, and a `%File.Stat{inode: 0}` needs a filesystem that
+  reports no inode numbers, which is not something a test can mount. A fixture
+  that only sometimes produces the state it describes is a test that only
+  sometimes tests anything, and it passes either way - which is exactly how the
+  first attempt at covering `:eacces` came to accept the regression it was
+  written to catch.
+  """
+  @spec stat(Path.t()) :: {:ok, File.Stat.t()} | {:error, File.posix()}
+  def stat(path), do: File.stat(path)
 end

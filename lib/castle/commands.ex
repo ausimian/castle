@@ -152,7 +152,7 @@ defmodule Castle.Commands do
       release_root ->
         root_dir = deployment.root_dir()
 
-        case compare_dirs(release_root, root_dir) do
+        case compare_dirs(release_root, root_dir, deployment) do
           :same -> :ok
           :different -> {:error, refused_root(refusal, release_root, root_dir)}
           {:indeterminate, why} -> {:error, refused_unknown(refusal, why)}
@@ -244,14 +244,14 @@ defmodule Castle.Commands do
   # comparison that cannot be made is no licence to write into a tree that might
   # be the wrong one - but it changes what is *said*, and that is the part an
   # operator acts on. Do not fold these back together.
-  defp compare_dirs(one, other) do
+  defp compare_dirs(one, other, deployment) do
     if Path.expand(one) == Path.expand(other),
       do: :same,
-      else: identify(one, other)
+      else: identify(one, other, deployment)
   end
 
-  defp identify(one, other) do
-    case {File.stat(one), File.stat(other)} do
+  defp identify(one, other, deployment) do
+    case {deployment.stat(one), deployment.stat(other)} do
       {{:ok, one_stat}, {:ok, other_stat}} -> by_inode(one_stat, other_stat)
       {{:error, reason}, _} -> {:indeterminate, "#{one} could not be read (#{reason})"}
       {_, {:error, reason}} -> {:indeterminate, "#{other} could not be read (#{reason})"}

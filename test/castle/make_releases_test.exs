@@ -99,6 +99,69 @@ defmodule Castle.MakeReleasesTest do
     end
   end
 
+  describe "a comparison the filesystem cannot settle" do
+    # The remaining two answers come from the `Castle.Deployment.stat/1` seam
+    # rather than from a fixture, because neither can be arranged reliably: an
+    # `:eacces` needs a mode that root and some filesystems ignore, and a zero
+    # inode needs a filesystem that reports no inode numbers, which is not
+    # something a test can mount. The first attempt at the `:eacces` case built
+    # the mode and then branched on whether the refusal mentioned it, so on a
+    # runner that could traverse the directory it printed "skipped" and passed
+    # having asserted nothing - green on the very regression it named.
+    # Deterministic inputs or nothing.
+    test "a stat refused for permissions is not evidence that the two differ" do
+      deployment = DeploymentStub.stub("/deployment", "/installation")
+
+      DeploymentStub.stub_stat(fn
+        "/deployment" -> {:error, :eacces}
+        path -> File.stat(path)
+      end)
+
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [~c"kernel"], :permanent}])
+
+      assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
+
+      assert message =~ "cannot tell whether the deployment and the emulator's root"
+      assert message =~ "/deployment could not be read (eacces)"
+      refute message =~ "are different directories"
+      assert Stub.calls(:create_RELEASES) == []
+    end
+
+    test "a filesystem reporting no inode numbers is not evidence either" do
+      # Both paths stat cleanly and report the same device, so the only thing
+      # between this and `:same` is the zero - and the only thing between it and
+      # `:different` is that zero being read as an absence of evidence rather
+      # than as a mismatch.
+      deployment = DeploymentStub.stub("/deployment", "/installation")
+      DeploymentStub.stub_stat({:ok, %File.Stat{major_device: 1, inode: 0}})
+
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [~c"kernel"], :permanent}])
+
+      assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
+
+      assert message =~ "cannot tell whether the deployment and the emulator's root"
+      assert message =~ "reports no inode numbers"
+      refute message =~ "are different directories"
+      assert Stub.calls(:create_RELEASES) == []
+    end
+
+    @tag :tmp_dir
+    test "two paths the filesystem says are one directory are accepted", %{tmp_dir: dir} do
+      # The same seam the other way round, and the reason it is worth having:
+      # this is the deployment reached through a symlink, where refusing would
+      # be the failure an operator cannot work around. Identical device and a
+      # non-zero inode, from two paths that do not match as strings.
+      deployment = DeploymentStub.stub("/current", "/releases/1.2.3")
+      DeploymentStub.stub_stat({:ok, %File.Stat{major_device: 1, inode: 42}})
+
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [~c"kernel"], :permanent}])
+      Stub.stub(:create_RELEASES, :ok)
+
+      assert {:ok, _} = Commands.make_releases(rel_dir(dir), handler, deployment)
+      assert [[_, _, _]] = Stub.calls(:create_RELEASES)
+    end
+  end
+
   defp rel_dir(dir) do
     rel_dir = Path.join(dir, "releases")
     File.mkdir_p!(rel_dir)

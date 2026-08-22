@@ -21,8 +21,29 @@ defmodule Castle.DeploymentStub do
     __MODULE__
   end
 
+  @doc """
+  Registers what the filesystem will say about both paths.
+
+  Unregistered, `stat/1` is the real one, so a test that only cares about the
+  roots does not have to describe the filesystem too. Registered, it is how the
+  two answers no fixture can produce on demand - a `stat` refused with `:eacces`,
+  and a filesystem reporting no inode numbers - are reached at all.
+  """
+  def stub_stat(reply) do
+    Process.put({__MODULE__, :stat}, reply)
+    __MODULE__
+  end
+
   def release_root, do: fetch(:release_root)
   def root_dir, do: fetch(:root_dir)
+
+  def stat(path) do
+    case Process.get({__MODULE__, :stat}, :unstubbed) do
+      :unstubbed -> File.stat(path)
+      reply when is_function(reply, 1) -> reply.(path)
+      reply -> reply
+    end
+  end
 
   defp fetch(fact) do
     case Process.get({__MODULE__, fact}, :unstubbed) do

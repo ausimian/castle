@@ -121,10 +121,11 @@
 
 - Raised the minimum Elixir requirement to 1.18.
 - `make_releases/0` no longer depends on the working directory. It looks for
-  `releases/RELEASES` under the root of the release - `code:root_dir()`, which is
-  the root `:release_handler` resolves its own relative paths against - so the
-  file it looks for is necessarily the file OTP writes, and a caller that used to
-  change directory before calling it no longer has to.
+  `releases/RELEASES` under the root of the release - `code:root_dir()` - so a
+  caller that used to change directory before calling it no longer has to. On a
+  release built by Mix that is the file OTP writes; a deployment that sets
+  `RELDIR` or the `sasl` `releases_dir` parameter moves the release records
+  elsewhere, and Castle does not yet follow them.
 - `unpack/1`, `install/1`, `commit/1`, `remove/1` and
   `make_releases/0` now fail when the operation fails, instead of printing the
   reason and returning normally. These are invoked over `bin/castle`, which
@@ -152,9 +153,9 @@
 - A release built with `include_erts: false` is now refused, by name and with
   the reason, rather than quietly managing the Erlang installation it happens to
   be running on. Such a release ships no emulator, so it runs the system one, and
-  `code:root_dir()` — the directory `:release_handler` resolves every path it
-  uses against — is then the shared Erlang installation rather than the
-  deployment. Left to itself, `make_releases/0` created that installation's
+  `code:root_dir()` — the directory `:release_handler` extracts applications
+  into, resolves every `lib/<app>-<vsn>` against, and deletes `erts-<vsn>` from —
+  is then the shared Erlang installation rather than the deployment. Left to itself, `make_releases/0` created that installation's
   `releases/RELEASES`, which usually fails for want of permission and, where it
   succeeds, puts the release records of unrelated deployments in one file;
   `unpack/1`, `install/1` and `commit/1` wrote into the installation, and

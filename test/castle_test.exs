@@ -20,8 +20,14 @@ defmodule CastleTest do
       end
     end
 
-    test "raises when the configuration of the target version cannot be read" do
-      assert_raise Castle.Error, ~r/9\.9\.9\/build\.config/, fn -> Castle.generate("9.9.9") end
+    # The gate rests on a claim about OTP's own data: a release record read from
+    # a RELEASES file names applications, and only the record release_handler
+    # synthesises when it cannot read one names none. The release_handler running
+    # here read the OTP installation's own RELEASES file, so what this checks is
+    # that claim, against a real record rather than a stub.
+    test "confirms a system whose record came from a RELEASES file, silently" do
+      assert [{_, _, [_ | _], _} | _] = :release_handler.which_releases()
+      assert capture_io(&Castle.upgradable/0) == ""
     end
 
     # The configuration of the target has to exist before the target is handed

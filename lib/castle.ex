@@ -7,9 +7,10 @@ defmodule Castle do
 
   # Every function in this module is a command entry point: `bin/castle` sends
   # each one to the running node over `bin/<release> rpc`, and the launcher's
-  # env.sh fragment evaluates generate/1 and make_releases/0 in the preboot VM.
-  # There is no separate CLI layer to carry the process status, so these
-  # functions are the command boundary, and it is here that a failure raises.
+  # env.sh fragment evaluates make_releases/0 in the preboot VM, on the first
+  # start of a deployment. There is no separate CLI layer to carry the process
+  # status, so these functions are the command boundary, and it is here that a
+  # failure raises.
   #
   # Raising, rather than halting or returning: the rpc expression runs on the
   # running release node, so halting there would halt the system under
@@ -22,11 +23,11 @@ defmodule Castle do
   # rather than acting on the process, so that they can be tested.
 
   def make_releases do
-    report!(Commands.make_releases())
+    report!(Commands.make_releases(rel_dir()))
   end
 
-  def generate(vsn) do
-    report!(Commands.generate(rel_vsn_dir(vsn)))
+  def upgradable do
+    report!(Commands.upgradable())
   end
 
   def unpack(name) when is_binary(name) do
@@ -64,12 +65,17 @@ defmodule Castle do
   # may fail without saying that an install happened.
   defp materialise(vsn), do: report!(Commands.materialise(rel_vsn_dir(vsn)))
 
-  # The version directory of the release being operated on, under the root of
-  # the release that is running. Derived, never chosen by the caller: which file
-  # the configuration lands in is a property of the installation, not an
-  # argument. It resolves for any version the running release knows about,
-  # because `:release_handler` unpacks every version into this same root.
-  defp rel_vsn_dir(vsn), do: Path.join([:code.root_dir(), "releases", vsn])
+  # The release directory, and the version directory of the release being
+  # operated on beneath it. Derived, never chosen by the caller: which file the
+  # configuration lands in, and which file the release records go in, are
+  # properties of the installation rather than arguments. `code:root_dir()` is
+  # the root because that is the root `:release_handler` itself resolves
+  # relative paths against, so these name the files it will read, and a caller's
+  # working directory cannot make them name different ones. The version
+  # directory resolves for any version the running release knows about, because
+  # `:release_handler` unpacks every version into this same root.
+  defp rel_dir, do: Path.join(to_string(:code.root_dir()), "releases")
+  defp rel_vsn_dir(vsn), do: Path.join(rel_dir(), vsn)
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)
   defp report!({:error, message}), do: raise(Castle.Error, message)

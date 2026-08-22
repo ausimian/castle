@@ -224,7 +224,7 @@ defmodule Castle.PeerTest do
 
       assert {:error, message} = Castle.Peer.materialise(vsn_dir)
       assert message =~ Path.join(vsn_dir, "sys.config")
-      assert message =~ "neither a sys.config nor a build.config"
+      assert message =~ "has no configuration to evaluate"
     end
 
     test "reports a version directory with no preboot script", %{tmp_dir: root} do

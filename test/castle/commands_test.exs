@@ -2,46 +2,22 @@ defmodule Castle.CommandsTest do
   use ExUnit.Case, async: true
 
   alias Castle.Commands
-  alias Castle.ConfigProviderStub
   alias Castle.InitStub
   alias Castle.PeerStub
   alias Castle.ReleaseHandlerStub, as: Stub
 
   describe "materialise/2" do
     @tag :tmp_dir
-    test "expands build.config, and starts nothing, when there is one", %{tmp_dir: dir} do
-      write_build_config(dir,
-        castle: [config_providers: [{ConfigProviderStub, merge: [sample: [greeting: "runtime"]]}]],
-        sample: [greeting: "build"]
-      )
+    test "hands an unpacked version to the peer", %{tmp_dir: dir} do
+      unpacked(dir)
 
-      # The peer stub has no registered reply, so it raises if it is reached.
-      assert Commands.materialise(dir, PeerStub) == {:ok, []}
-      assert PeerStub.calls() == []
-      assert read_sys_config(dir)[:sample][:greeting] == "runtime"
-    end
-
-    @tag :tmp_dir
-    test "keeps expanding build.config once it has written a sys.config", %{tmp_dir: dir} do
-      # Which is the state every release assembled by today's Forecastle is in
-      # from its first boot onwards, so the discriminator has to be the presence
-      # of build.config and not the absence of sys.config.
-      write_build_config(dir, sample: [greeting: "build"])
-      File.write!(Path.join(dir, "sys.config"), "[].\n")
-
-      assert Commands.materialise(dir, PeerStub) == {:ok, []}
-      assert PeerStub.calls() == []
-      assert read_sys_config(dir) == [sample: [greeting: "build"]]
-    end
-
-    @tag :tmp_dir
-    test "hands a release whose pipeline is intact to the peer", %{tmp_dir: dir} do
       assert Commands.materialise(dir, PeerStub.stub({:ok, []})) == {:ok, []}
       assert PeerStub.calls() == [dir]
     end
 
     @tag :tmp_dir
     test "reports what the peer could not do", %{tmp_dir: dir} do
+      unpacked(dir)
       peer = PeerStub.stub({:error, "DATABASE_URL is not set"})
 
       assert Commands.materialise(dir, peer) == {:error, "DATABASE_URL is not set"}
@@ -53,6 +29,7 @@ defmodule Castle.CommandsTest do
       # ready to accept an install that must not be asked for. Everything able
       # to refuse belongs on this side of the mutation, and a configuration that
       # could not be materialised is the whole of what this adds to that list.
+      unpacked(dir)
       peer = PeerStub.stub({:error, "the compile environment does not agree"})
       Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
@@ -63,79 +40,72 @@ defmodule Castle.CommandsTest do
 
     @tag :tmp_dir
     test "reports a version that has not been unpacked", %{tmp_dir: dir} do
+      # The peer stub has no registered reply, so it raises if it is reached.
       missing = Path.join(dir, "9.9.9")
 
       assert {:error, message} = Commands.materialise(missing, PeerStub)
-      assert message =~ "Cannot configure 9.9.9"
+      assert message =~ "Cannot configure 9.9.9: #{missing} does not exist."
+      assert message =~ "Unpack the release first"
+      assert PeerStub.calls() == []
+    end
+
+    @tag :tmp_dir
+    test "reports a version directory with nothing in it", %{tmp_dir: dir} do
+      # Which is not the same thing as a version that was unpacked and then had
+      # its configuration removed - the peer names the file that is missing for
+      # that - so it does not claim to be, and it does say what to do about it.
+      empty = Path.join(dir, "9.9.9")
+      File.mkdir!(empty)
+
+      assert {:error, message} = Commands.materialise(empty, PeerStub)
+      assert message =~ "Cannot configure 9.9.9: #{empty} is empty."
       assert message =~ "Unpack the release first"
       assert PeerStub.calls() == []
     end
   end
 
-  describe "generate/1" do
-    @tag :tmp_dir
-    test "expands the build configuration through the config providers", %{tmp_dir: dir} do
-      write_build_config(dir,
-        castle: [config_providers: [{ConfigProviderStub, merge: [sample: [greeting: "runtime"]]}]],
-        sample: [greeting: "build", untouched: true]
-      )
+  describe "upgradable/1" do
+    test "confirms a system whose release record was read from RELEASES" do
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
+        ])
 
-      assert Commands.generate(dir) == {:ok, []}
-
-      config = read_sys_config(dir)
-      assert config[:sample][:greeting] == "runtime"
-      assert config[:sample][:untouched] == true
+      assert Commands.upgradable(handler) == {:ok, []}
     end
 
-    @tag :tmp_dir
-    test "writes the build configuration as-is when there are no providers", %{tmp_dir: dir} do
-      write_build_config(dir, sample: [greeting: "build"])
+    test "refuses a system running on a record OTP synthesised" do
+      # release_handler could not read RELEASES when it started, so it built a
+      # record out of the boot script's name and version, whose libs field is
+      # empty - and mk_lib_name([]) is [], which no real record reports.
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :permanent}])
 
-      assert Commands.generate(dir) == {:ok, []}
-      assert read_sys_config(dir) == [sample: [greeting: "build"]]
+      assert {:error, message} = Commands.upgradable(handler)
+      assert message =~ "1.2.3 is running from a release record OTP built from the boot script"
+      assert message =~ "names no applications"
+      assert message =~ "running its old code"
+      assert message =~ "Restart the system before upgrading it"
     end
 
-    @tag :tmp_dir
-    test "reports a missing build configuration", %{tmp_dir: dir} do
-      assert {:error, message} = Commands.generate(dir)
-      assert message =~ Path.join(dir, "build.config")
-      assert message =~ "no such file or directory"
+    test "asks the release the system is running, and not another one" do
+      # The synthesised record is the permanent one, and an install leaves its
+      # target current - so which release is asked has to be the running one,
+      # the way running/3 selects it, or a system that has already upgraded once
+      # would be refused for the state of the record it came from.
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [~c"kernel-10.5"], :current},
+          {~c"sample", ~c"1.2.2", [], :permanent}
+        ])
+
+      assert Commands.upgradable(handler) == {:ok, []}
     end
 
-    @tag :tmp_dir
-    test "reports an unreadable build configuration", %{tmp_dir: dir} do
-      File.write!(Path.join(dir, "build.config"), "]].\n")
+    test "refuses a system with no release running at all" do
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :unpacked}])
 
-      assert {:error, message} = Commands.generate(dir)
-      assert message =~ Path.join(dir, "build.config")
-    end
-
-    @tag :tmp_dir
-    test "reports a build configuration holding more than one term", %{tmp_dir: dir} do
-      File.write!(Path.join(dir, "build.config"), "[].\n[].\n")
-
-      assert {:error, message} = Commands.generate(dir)
-      assert message =~ "expected one term, found 2"
-    end
-
-    @tag :tmp_dir
-    test "reports a sys.config it cannot write", %{tmp_dir: dir} do
-      write_build_config(dir, sample: [greeting: "build"])
-      # Whatever the reason, the operator has to be told which file it was.
-      File.mkdir_p!(Path.join(dir, "sys.config"))
-
-      assert {:error, message} = Commands.generate(dir)
-      assert message =~ Path.join(dir, "sys.config")
-    end
-
-    @tag :tmp_dir
-    test "lets a failing config provider speak for itself", %{tmp_dir: dir} do
-      write_build_config(dir,
-        castle: [config_providers: [{ConfigProviderStub, raise: "DATABASE_URL is not set"}]]
-      )
-
-      assert_raise RuntimeError, "DATABASE_URL is not set", fn -> Commands.generate(dir) end
-      refute File.exists?(Path.join(dir, "sys.config"))
+      assert Commands.upgradable(handler) ==
+               {:error, "No release is running, so this system cannot be upgraded."}
     end
   end
 
@@ -345,15 +315,8 @@ defmodule Castle.CommandsTest do
   # What a node reports once its boot script has run to the end.
   defp booted, do: InitStub.stub({:starting, :started})
 
-  defp write_build_config(dir, config) do
-    File.write!(
-      Path.join(dir, "build.config"),
-      :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [config])
-    )
-  end
-
-  defp read_sys_config(dir) do
-    assert {:ok, [config]} = :file.consult(to_charlist(Path.join(dir, "sys.config")))
-    config
-  end
+  # Enough of an unpacked version directory for `materialise/2`: what is in it is
+  # the peer's business, and the peer is a stub here. Everything it would look
+  # for is covered against a real one in `Castle.PeerTest`.
+  defp unpacked(dir), do: File.write!(Path.join(dir, "sys.config"), "[].\n")
 end

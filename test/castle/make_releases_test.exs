@@ -34,8 +34,8 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases(rel_dir, handler, erts_less())
       assert message =~ "Cannot create #{Path.join(rel_dir, "RELEASES")}"
-      assert message =~ "the deployment and the emulator's root are different directories."
-      assert message =~ "cannot be upgraded by Castle."
+      assert message =~ "the deployment and the emulator's root are different directories"
+      assert message =~ "cannot be upgraded by Castle"
       assert Stub.calls(:create_RELEASES) == []
       assert Stub.calls(:which_releases) == []
     end
@@ -49,7 +49,7 @@ defmodule Castle.MakeReleasesTest do
       File.write!(Path.join(rel_dir, "RELEASES"), "")
 
       assert {:error, message} = Commands.make_releases(rel_dir, Stub, erts_less())
-      assert message =~ "the deployment and the emulator's root are different directories."
+      assert message =~ "the deployment and the emulator's root are different directories"
     end
 
     test "creates it from the release running as permanent", %{tmp_dir: dir} do

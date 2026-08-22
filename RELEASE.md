@@ -162,8 +162,16 @@
   naming both directories and saying that the deployment cannot be upgraded by
   Castle. The same refusal covers a release that *did* bring its ERTS but is run
   with `ERL_ROOTDIR` set, which the release's own `erl` honours ahead of its
-  location: the divergence is what makes an upgrade unsafe, and the message
-  names both causes rather than asserting either.
+  location: what makes an upgrade unsafe is that the two directories differ, so
+  the message reports that and offers the causes as examples rather than
+  asserting one.
+
+  Relocating the release records with `RELDIR` or the `sasl` `releases_dir`
+  parameter does not make such a deployment upgradable, and the refusal says so.
+  Those really do move the records — `release_handler` reads them ahead of the
+  emulator's root — but they move only the bookkeeping: applications are still
+  extracted into, resolved against and deleted out of the emulator's root, which
+  the handler keeps as separate state.
 
   The remedy is to build the release with its ERTS included, because there is no
   other directory Castle could be pointed at: `:release_handler` anchors its own

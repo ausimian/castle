@@ -331,16 +331,34 @@ Castle's job is configuration and release management on a running node.
   ERTS — one spelled through a `current` symlink, say — is the one failure here
   an operator cannot work around.
 
-  **What it detects is the divergence, not the missing ERTS, and the message says
-  so.** `include_erts: false` is the cause in almost every case but it is not the
-  only one: the `erl` shim Mix writes is `ROOTDIR="${ERL_ROOTDIR:-…}"`, so an
-  `ERL_ROOTDIR` in the environment diverges the two on a release that *did* bring
-  its ERTS. The refusal is still correct there — `:release_handler` really would
-  resolve into `ERL_ROOTDIR` — so the message names both levers and asserts
-  neither. Two directories are the whole of the evidence, and a cause stated
-  confidently from them is how a correct refusal comes to be read as a bug in the
-  guard. `Castle.Peer.emulator/2` is the one that may still speak of ERTS in
-  particular, because it looked for the emulator and it was not there.
+  **What it detects is the divergence, not the missing ERTS, and the message
+  asserts no cause at all.** `include_erts: false` is the cause in almost every
+  case but it is not the only one: the `erl` shim Mix writes is
+  `ROOTDIR="${ERL_ROOTDIR:-…}"`, so an `ERL_ROOTDIR` in the environment diverges
+  the two on a release that *did* bring its ERTS. Two directories are the whole
+  of the evidence, and nothing here can tell those apart or knows that they
+  exhaust the possibilities, so both are offered as examples. This message has
+  now been wrong twice in the same way — first asserting the missing ERTS, then
+  asserting `ERL_ROOTDIR` as the only alternative — so state the divergence and
+  stop. A cause stated confidently from two directories is how a correct refusal
+  comes to be read as a bug in the guard, and it sends an operator to rebuild
+  something that was not the problem. `Castle.Peer.emulator/2` is the one that
+  may still speak of ERTS in particular, because it looked for the emulator and
+  it was not there.
+
+  **Do not say that everything `:release_handler` touches resolves under the
+  emulator's root — the release records alone do not.** `init/1` takes its
+  releases directory from `{sasl, releases_dir}`, then `RELDIR`, and only then
+  `init:get_argument(root)`, so those two genuinely relocate it, and a message
+  claiming otherwise is false. It does not rescue such a deployment, which is
+  why the guard is still right: the handler holds the root and the releases
+  directory as *separate* state and only the second follows `RELDIR`.
+  `do_unpack_release/4` extracts through `extract_tar(Root, Tar)`,
+  `check_rel_data/4` records library directories as `lib/<app>-<vsn>` for
+  resolution against `code:root_dir()`, and `do_remove_release/4` deletes
+  `filename:join(Root, "erts-" ++ EVsn)`. Relocating the records moves the
+  bookkeeping and leaves the applications themselves being extracted into, read
+  from and deleted out of the emulator's root.
 
   It gates `make_releases/0` — before the `File.exists?` check, not after,
   because an Erlang installation built by OTP has a `releases/RELEASES` of its

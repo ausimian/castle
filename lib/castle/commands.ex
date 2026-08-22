@@ -154,27 +154,45 @@ defmodule Castle.Commands do
     end
   end
 
-  # What is observed is a divergence, and the message says that rather than
-  # naming a cause. `include_erts: false` is the cause in almost every case, but
-  # it is not the only one that produces this state: the `erl` shim Mix writes is
-  # `ROOTDIR="${ERL_ROOTDIR:-...}"`, so an `ERL_ROOTDIR` set in the environment
-  # diverges the two on a release that *did* bring its ERTS. The refusal is still
-  # right there - `:release_handler` really would resolve into `ERL_ROOTDIR` - so
-  # the message names both levers and asserts neither, which is all the two facts
-  # it has can honestly support. Reporting the wrong cause confidently is how a
-  # correct refusal gets read as a bug in the guard.
+  # Two directories are the whole of the evidence, so the message reports the
+  # divergence and offers causes as examples rather than as a closed set. The
+  # usual one is `include_erts: false`, which ships no emulator; another is an
+  # `ERL_ROOTDIR` in the environment, which the `erl` shim Mix writes honours
+  # ahead of the release's own location (`ROOTDIR="${ERL_ROOTDIR:-...}"`). There
+  # is no way to tell them apart from here, and no reason to think they exhaust
+  # the possibilities. An earlier version of this message asserted the first,
+  # and its replacement asserted the second as the only alternative; both were
+  # wrong in the same way, which is why this one asserts no cause at all.
+  #
+  # It also no longer claims that *everything* `:release_handler` touches
+  # resolves under the emulator's root, because the release records alone do
+  # not: `init/1` takes its releases directory from `{sasl, releases_dir}`, then
+  # `RELDIR`, and only then `init:get_argument(root)`, so those two can relocate
+  # it. What cannot be relocated is what makes the refusal correct anyway. The
+  # handler holds the root and the releases directory as separate state, and
+  # only the second follows `RELDIR`: `do_unpack_release/4` extracts through
+  # `extract_tar(Root, Tar)`, `check_rel_data/4` records library directories as
+  # `lib/<app>-<vsn>` to be resolved against `code:root_dir()`, and
+  # `do_remove_release/4` deletes `filename:join(Root, "erts-" ++ EVsn)`. So
+  # relocating the records moves the bookkeeping and leaves the applications
+  # themselves being extracted into, read from and deleted out of the emulator's
+  # root. Saying so is the difference between a refusal an operator can act on
+  # and one that sends them to rebuild something that was not the problem.
   defp refused_root(refusal, release_root, root_dir) do
     "#{refusal}: the deployment and the emulator's root are different " <>
-      "directories. This system runs the emulator in #{root_dir}, so that - and " <>
-      "not the deployment in #{release_root} - is where :release_handler " <>
-      "resolves releases/RELEASES, releases/<vsn> and every lib/<app>-<vsn> it " <>
-      "reads, writes or deletes. Reading and writing the deployment instead is " <>
-      "not an option: the handler's own paths are anchored to the emulator's " <>
-      "root, so records kept anywhere else would be records it never sees. " <>
-      "Usually this means the release was built with include_erts: false and so " <>
-      "ships no emulator of its own; rebuild it with its ERTS included. " <>
-      "Otherwise ERL_ROOTDIR is set, which the release's own erl honours ahead " <>
-      "of its location. Either way this deployment cannot be upgraded by Castle."
+      "directories - the deployment is #{release_root} and the emulator runs " <>
+      "in #{root_dir}. That is where :release_handler extracts applications, " <>
+      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<vsn> from, " <>
+      "because those paths are anchored to the emulator's root rather than to " <>
+      "the deployment. Pointing Castle at the deployment instead would only " <>
+      "move the release records away from the applications they describe. " <>
+      "Relocating the records with RELDIR or the sasl releases_dir parameter " <>
+      "does not help either, for the same reason: it moves the bookkeeping and " <>
+      "leaves the applications where they were. Common causes are building the " <>
+      "release with include_erts: false, which ships no emulator of its own, " <>
+      "and an ERL_ROOTDIR in the environment, which the release's erl honours " <>
+      "ahead of its own location; there may be others. This deployment cannot " <>
+      "be upgraded by Castle until the two directories are the same one."
   end
 
   # Whether two paths name the same directory. Both of the ones compared here

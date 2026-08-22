@@ -41,10 +41,39 @@ defmodule Castle.ErtsGuardTest do
         assert error.message =~ refusal
 
         assert error.message =~
-                 "the deployment and the emulator's root are different directories."
+                 "the deployment and the emulator's root are different directories"
 
-        assert error.message =~ "cannot be upgraded by Castle."
+        assert error.message =~ "cannot be upgraded by Castle"
       end
+    end
+
+    test "the refusal asserts no cause, and no resolution it cannot deliver" do
+      # Two directories are all the guard observes, so the message may not claim
+      # to know why they differ. This has been got wrong twice - once asserting
+      # a missing ERTS, once asserting ERL_ROOTDIR as the only alternative - and
+      # both read as a bug in the guard rather than as the refusal they were.
+      # Asserted as the absence of the assertions, because that is the defect:
+      # any wording that offers the causes as examples passes, and any wording
+      # that closes the set fails.
+      message = assert_raise(Castle.Error, &Castle.make_releases/0).message
+
+      refute message =~ "this release does not bring its own ERTS"
+      refute message =~ "Otherwise ERL_ROOTDIR is set"
+      refute message =~ ~r/Either way/
+
+      # Both are still named, as examples - dropping them would be the other way
+      # to pass this test, and would leave an operator with nothing to check.
+      assert message =~ "include_erts: false"
+      assert message =~ "ERL_ROOTDIR"
+      assert message =~ "there may be others"
+
+      # And it may not promise that relocating the records is a way out. RELDIR
+      # and the sasl releases_dir parameter do move them - `init/1` reads both
+      # ahead of the root - so a message anchoring *everything* to the emulator
+      # would be false. What is anchored there is the applications, which is why
+      # the refusal holds regardless.
+      assert message =~ "RELDIR"
+      assert message =~ "extracts applications"
     end
 
     test "the read-only diagnostics answer as they always did" do

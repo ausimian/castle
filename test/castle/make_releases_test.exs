@@ -106,7 +106,9 @@ defmodule Castle.MakeReleasesTest do
   end
 
   # A deployment whose launcher exported a root of its own while the emulator's
-  # is elsewhere, which is what `include_erts: false` leaves behind. Neither path
-  # exists, so nothing can make the two look like one directory.
-  defp erts_less, do: DeploymentStub.stub("/opt/app", "/usr/lib/erlang")
+  # is elsewhere, which is what `include_erts: false` leaves behind. Both have to
+  # be directories that exist and differ, or the comparison comes back
+  # indeterminate rather than different and the refusal is the other one.
+  defp erts_less,
+    do: DeploymentStub.stub(System.tmp_dir!(), to_string(:code.root_dir()))
 end

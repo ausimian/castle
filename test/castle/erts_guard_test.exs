@@ -14,11 +14,21 @@ defmodule Castle.ErtsGuardTest do
   end
 
   describe "a deployment whose emulator is not its own" do
-    setup do
+    # The deployment directory has to actually exist for these. Pointing
+    # RELEASE_ROOT at a path that is not there produces the *indeterminate*
+    # refusal rather than this one, since a failed lookup is not evidence that
+    # two directories differ - which is the distinction the tri-state comparison
+    # draws, and which an earlier version of these tests was accidentally
+    # relying on being absent.
+    @describetag :tmp_dir
+
+    setup %{tmp_dir: dir} do
       # What `include_erts: false` leaves: the launcher exported its own
       # location, and the emulator it went on to run belongs to the Erlang
       # installation, which is where :release_handler resolves everything.
-      System.put_env("RELEASE_ROOT", "/opt/castle-erts-guard-test")
+      deployment = Path.join(dir, "deployment")
+      File.mkdir_p!(deployment)
+      System.put_env("RELEASE_ROOT", deployment)
       :ok
     end
 
@@ -102,6 +112,66 @@ defmodule Castle.ErtsGuardTest do
       assert_raise Castle.Error, ~r/^Removal of 9\.9\.9 failed\./, fn ->
         Castle.remove("9.9.9")
       end
+    end
+  end
+
+  describe "a comparison the filesystem cannot settle" do
+    # The paths have already failed to match as strings by the time the `stat`
+    # runs, so anything other than a clean pair of answers used to fall into the
+    # same branch as two directories that really are different - and be reported
+    # as though the difference had been established. These say that an absence of
+    # evidence is reported as one.
+    @tag :tmp_dir
+    test "a path that is not there is not evidence that the two differ", %{tmp_dir: dir} do
+      System.put_env("RELEASE_ROOT", Path.join(dir, "never-created"))
+
+      message = assert_raise(Castle.Error, &Castle.make_releases/0).message
+
+      assert message =~ "cannot tell whether the deployment and the emulator's root"
+      assert message =~ "never-created could not be read (enoent)"
+
+      # The distinction is the whole point: it must not claim the finding that
+      # the version before this one claimed.
+      refute message =~ "are different directories"
+    end
+
+    @tag :tmp_dir
+    test "a directory that cannot be traversed is reported as the reason", %{tmp_dir: dir} do
+      # 0000 on the parent, so the child cannot be looked up at all. Skipped for
+      # root, which is not stopped by a mode and would see this succeed.
+      parent = Path.join(dir, "sealed")
+      File.mkdir_p!(Path.join(parent, "deployment"))
+      File.chmod!(parent, 0o000)
+      on_exit(fn -> File.chmod(parent, 0o700) end)
+
+      System.put_env("RELEASE_ROOT", Path.join(parent, "deployment"))
+
+      message = assert_raise(Castle.Error, &Castle.make_releases/0).message
+
+      if message =~ "eacces" do
+        assert message =~ "cannot tell whether the deployment and the emulator's root"
+        refute message =~ "are different directories"
+      else
+        # Running as root, or on a filesystem that does not enforce the mode.
+        assert message =~ "are different directories"
+      end
+    end
+
+    @tag :tmp_dir
+    test "two directories that both exist and differ are still reported as differing",
+         %{tmp_dir: dir} do
+      # The other half of the tri-state: making the indeterminate case its own
+      # answer must not have cost the definite one. Nothing here is unreadable,
+      # so the comparison is made and it succeeds in saying they differ.
+      deployment = Path.join(dir, "deployment")
+      File.mkdir_p!(deployment)
+
+      System.put_env("RELEASE_ROOT", deployment)
+
+      message = assert_raise(Castle.Error, &Castle.make_releases/0).message
+
+      assert message =~ "are different directories"
+      refute message =~ "cannot tell whether"
     end
   end
 end

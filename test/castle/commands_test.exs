@@ -391,8 +391,10 @@ defmodule Castle.CommandsTest do
       assert message =~
                "Cannot unpack sample-1.2.3: the deployment and the emulator's root are different directories"
 
-      assert message =~ "/opt/app"
-      assert message =~ "/usr/lib/erlang"
+      # Both directories are named, so that the operator can see which two the
+      # guard compared rather than being told only that they differ.
+      assert message =~ System.tmp_dir!()
+      assert message =~ to_string(:code.root_dir())
       assert message =~ "cannot be upgraded by Castle"
       assert Stub.calls(:unpack_release) == []
 
@@ -537,9 +539,14 @@ defmodule Castle.CommandsTest do
   end
 
   # A deployment that did not bring its own ERTS: the launcher exported a root
-  # of its own and the emulator's is elsewhere. Neither path exists, so the
-  # filesystem cannot be made to say they are one directory either.
-  defp erts_less, do: DeploymentStub.stub("/opt/app", "/usr/lib/erlang")
+  # of its own and the emulator's is elsewhere.
+  #
+  # Both have to be directories that exist and differ, so that the comparison is
+  # actually made and comes back `:different`. Two paths that are merely absent
+  # produce the *indeterminate* refusal instead - a failed lookup is not evidence
+  # of a difference - so a fixture built from names nothing has created would
+  # assert the wrong message while looking like it asserted the right one.
+  defp erts_less, do: DeploymentStub.stub(System.tmp_dir!(), to_string(:code.root_dir()))
 
   # Enough of an unpacked version directory for `materialise/3`: what is in it is
   # the peer's business, and the peer is a stub here. Everything it would look

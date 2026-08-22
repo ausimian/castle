@@ -173,25 +173,36 @@
   extracted into, resolved against and deleted out of the emulator's root, which
   the handler keeps as separate state.
 
-  The remedy is to build the release with its ERTS included, because there is no
-  other directory Castle could be pointed at: `:release_handler` anchors its own
-  relative paths to the emulator's root — `releases/RELEASES`, the version
-  directories and every `lib/<app>-<vsn>` among them — so records kept anywhere
-  else are records it never reads, and an upgrade would go on using the
-  installation's regardless. A refusal that says so is better than a divergence
-  that does not.
+  The remedy is to make the two directories the same one — most often by
+  building the release with its ERTS included, and where `ERL_ROOTDIR` is what
+  moved them apart, by unsetting it. There is no third option in which Castle is
+  pointed somewhere else instead: `:release_handler` resolves the applications
+  themselves against the emulator's root, so records kept anywhere else describe
+  applications the handler is not using. A refusal that says so is better than a
+  divergence that does not.
+
+  Where the two directories cannot be compared at all — a `stat` refused by a
+  mode on a parent, a path that is not there, a filesystem reporting no inode
+  numbers — the refusal says *that*, naming what stopped the lookup, rather than
+  reporting a difference it did not establish. It still refuses, because a
+  comparison that could not be made is no licence to write release records into a
+  tree that has not been shown to be the right one.
 
   `upgradable/0` and `releases/0` are deliberately unaffected. They only read,
   and they are what an operator needs working in order to make sense of the
   refusal.
 
   Note that this reaches the launcher's preboot step, which is where
-  `make_releases/0` is called, so such a deployment reports the refusal on every
+  `make_releases/0` is called, so such a deployment meets the refusal on every
   start rather than once: the file the step looks for never appears, so the step
-  runs again each time. The start itself continues - Forecastle's `env.sh` warns
-  and carries on rather than refusing a start - so the cost is a warning and a
-  short-lived VM per boot, on a deployment that could not have been upgraded
-  either way.
+  runs again each time.
+
+  What that costs a start is Forecastle's to decide, not Castle's — Castle
+  reports the failure and the `env.sh` fragment chooses what to do with it. Under
+  Forecastle 1.0.0 the fragment warns and carries on, so an affected deployment
+  still starts, at the price of a warning and a short-lived VM per boot. Pair
+  Castle 1.0.0 with Forecastle 1.0.0; an older fragment treats a failure of that
+  step as fatal and would stop such a deployment starting at all.
 - `install/1` reports the emulator restart that an upgrade to a new emulator,
   or to a new kernel, stdlib or sasl, needs - rather than failing with a
   `CaseClauseError` while the upgrade proceeds.

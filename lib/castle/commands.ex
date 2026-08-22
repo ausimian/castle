@@ -1,6 +1,10 @@
 defmodule Castle.Commands do
   @moduledoc false
 
+  # A filesystem that reports no inode numbers has not said the two directories
+  # differ; it has said nothing, which is a different answer.
+  @no_inode "the filesystem reports no inode numbers, so the two cannot be compared"
+
   # The implementation of each of Castle's commands, held apart from the
   # command boundary in `Castle` so that it can be exercised without a booted
   # release:
@@ -148,9 +152,11 @@ defmodule Castle.Commands do
       release_root ->
         root_dir = deployment.root_dir()
 
-        if same_dir?(release_root, root_dir),
-          do: :ok,
-          else: {:error, refused_root(refusal, release_root, root_dir)}
+        case compare_dirs(release_root, root_dir) do
+          :same -> :ok
+          :different -> {:error, refused_root(refusal, release_root, root_dir)}
+          {:indeterminate, why} -> {:error, refused_unknown(refusal, why)}
+        end
     end
   end
 
@@ -195,34 +201,73 @@ defmodule Castle.Commands do
       "be upgraded by Castle until the two directories are the same one."
   end
 
-  # Whether two paths name the same directory. Both of the ones compared here
-  # are produced by `pwd -P` in scripts Mix generates - `RELEASE_ROOT` in the
-  # launcher, and `ROOTDIR` in the `erl` shim, from a `BINDIR` two levels below
-  # it - so on an ordinary release they are the same string and `Path.expand/1`,
-  # which settles a trailing separator and a relative spelling, is enough.
+  # The refusal for a comparison that could not be made. It says what was not
+  # established rather than what was found, because nothing was found, and it
+  # names the operation and the reason so the remedy is the reason's rather than
+  # this guard's - a mode on a parent directory, a broken link, a path that is
+  # not there. It still refuses: the deployment may well be sound, but writing
+  # release records into a tree that has not been shown to be the right one is
+  # the failure this guard exists to prevent, and it is the one of the two that
+  # cannot be undone by looking again.
+  defp refused_unknown(refusal, why) do
+    "#{refusal}: cannot tell whether the deployment and the emulator's root are " <>
+      "the same directory - #{why}. They are not the same path, so the question " <>
+      "was put to the filesystem, and it did not answer. Castle refuses rather " <>
+      "than assume: if they are two directories then :release_handler resolves " <>
+      "the applications under the emulator's root and not under the deployment, " <>
+      "and release records written on the assumption that they are one would " <>
+      "describe applications somewhere else. Resolve what stopped the lookup " <>
+      "and ask again."
+  end
+
+  # Whether two paths name the same directory: `:same`, `:different`, or
+  # `{:indeterminate, why}`. Both of the ones compared here are produced by
+  # `pwd -P` in scripts Mix generates - `RELEASE_ROOT` in the launcher, and
+  # `ROOTDIR` in the `erl` shim, from a `BINDIR` two levels below it - so on an
+  # ordinary release they are the same string and `Path.expand/1`, which settles
+  # a trailing separator and a relative spelling, is enough.
   #
   # The `stat` is for the deployment where they are not: a launcher that spells
   # one of them through a symlink, which is ordinary enough in a deployment with
   # a `current` link, would otherwise have a release that brings its own ERTS
   # refused. Refusing a working deployment is the one failure of this guard that
-  # cannot be worked around, so it is worth two `stat` calls to avoid. A
-  # filesystem that reports no inode numbers is not evidence of anything, hence
-  # the guard on zero.
-  defp same_dir?(one, other) do
-    Path.expand(one) == Path.expand(other) or same_inode?(one, other)
+  # cannot be worked around, so it is worth two `stat` calls to avoid.
+  #
+  # **The third answer is not decoration.** A `stat` that fails - `:eacces` on a
+  # parent, `:eloop`, `:enoent`, a path that is not there yet - and a filesystem
+  # reporting no inode numbers are both *absence of evidence*, and collapsing
+  # them into `:different` is how an inconclusive comparison comes to be reported
+  # as a fact. The paths have already failed to match as strings by the time this
+  # runs, so that catch-all was the whole of what stood between a transient
+  # `:eacces` and a message telling an operator their two directories differ.
+  # Distinguishing them changes no outcome - both still refuse, because a
+  # comparison that cannot be made is no licence to write into a tree that might
+  # be the wrong one - but it changes what is *said*, and that is the part an
+  # operator acts on. Do not fold these back together.
+  defp compare_dirs(one, other) do
+    if Path.expand(one) == Path.expand(other),
+      do: :same,
+      else: identify(one, other)
   end
 
-  defp same_inode?(one, other) do
+  defp identify(one, other) do
     case {File.stat(one), File.stat(other)} do
-      {{:ok, %File.Stat{major_device: device, inode: inode}},
-       {:ok, %File.Stat{major_device: device, inode: inode}}}
-      when inode != 0 ->
-        true
-
-      _ ->
-        false
+      {{:ok, one_stat}, {:ok, other_stat}} -> by_inode(one_stat, other_stat)
+      {{:error, reason}, _} -> {:indeterminate, "#{one} could not be read (#{reason})"}
+      {_, {:error, reason}} -> {:indeterminate, "#{other} could not be read (#{reason})"}
     end
   end
+
+  defp by_inode(%File.Stat{major_device: device, inode: inode}, %File.Stat{
+         major_device: device,
+         inode: inode
+       })
+       when inode != 0,
+       do: :same
+
+  defp by_inode(%File.Stat{inode: 0}, _), do: {:indeterminate, @no_inode}
+  defp by_inode(_, %File.Stat{inode: 0}), do: {:indeterminate, @no_inode}
+  defp by_inode(_, _), do: :different
 
   @doc """
   Confirms that the running release can be upgraded from.

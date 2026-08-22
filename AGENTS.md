@@ -301,13 +301,25 @@ Castle's job is configuration and release management on a running node.
   own anchor: `root_dir_relative_path/1` is
   `filename:join(code:root_dir(), Pathname)`, and `create_RELEASES/3` stores
   library directories *relatively* — `filename:join("lib", LibName)`, so the file
-  stays relocatable — so `releases/RELEASES`, `releases/<vsn>/…` and every
-  `lib/<app>-<vsn>` the handler reads, writes or deletes resolve there. Mix sets
-  neither `RELDIR` nor `{sasl, releases_dir}`, the two parameters that could
-  redirect the releases directory. So a Castle that wrote to `$RELEASE_ROOT`
-  would put the configuration and the release records somewhere the handler never
-  looks, and an upgrade would go on reading the installation's — a silent
-  divergence in place of a loud failure. Do not "fix" the guard that way.
+  stays relocatable — so every `lib/<app>-<vsn>` the handler reads, writes or
+  deletes resolves there, as does the `extract_tar(Root, Tar)` an unpack goes
+  through and the `erts-<vsn>` a removal deletes. So a Castle that wrote to
+  `$RELEASE_ROOT` would put the configuration and the release records somewhere
+  the handler never looks, and an upgrade would go on reading the installation's
+  — a silent divergence in place of a loud failure. Do not "fix" the guard that
+  way.
+
+  **The release records are the exception, and saying otherwise is the mistake
+  this file made first.** `releases/RELEASES` and `releases/<vsn>/…` are *not*
+  anchored to the root: `init/1` takes the releases directory from
+  `{sasl, releases_dir}`, then `RELDIR`, and only then `init:get_argument(root)`.
+  Mix sets neither, so on a Mix release they land under the root by default — but
+  "by default" and "necessarily" are different claims, and the second one is
+  false. It changes nothing about the guard, because the handler keeps the root
+  and the releases directory as separate state and only the second follows
+  `RELDIR`: relocating the records moves the bookkeeping and leaves the
+  applications being extracted into, resolved against and deleted out of the
+  root. That is why `RELDIR` is not a way out, and why the refusal says so.
 
   The question is asked of the node, and there is exactly one implementation of
   it. **The shell-side gate in Forecastle's `env.sh` was considered and
@@ -359,6 +371,20 @@ Castle's job is configuration and release management on a running node.
   `filename:join(Root, "erts-" ++ EVsn)`. Relocating the records moves the
   bookkeeping and leaves the applications themselves being extracted into, read
   from and deleted out of the emulator's root.
+
+  **The comparison has three answers, not two.** `compare_dirs/2` is
+  `Path.expand/1` on both and then a `stat` on device and inode, and it returns
+  `:same`, `:different` or `{:indeterminate, why}`. The third is the one to keep:
+  by the time the `stat` runs the two have already failed to match as strings, so
+  a catch-all folding every unusable result into `:different` puts an `:eacces`
+  on a parent, an `:enoent`, an `:eloop` and a filesystem with no inode numbers
+  into the same branch as two directories that genuinely differ — and then the
+  message asserts a difference that was never established. Both answers still
+  refuse, so this changes no outcome; it changes what the operator is told, which
+  is the part they act on. Do not fold them back together, and note that
+  fixtures feel it: a test pointing `RELEASE_ROOT` at a path nothing created
+  exercises the *indeterminate* refusal, not this one, so the directories in
+  these tests have to exist.
 
   It gates `make_releases/0` — before the `File.exists?` check, not after,
   because an Erlang installation built by OTP has a `releases/RELEASES` of its

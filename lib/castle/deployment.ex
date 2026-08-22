@@ -13,9 +13,28 @@ defmodule Castle.Deployment do
   @doc """
   The root `:release_handler` resolves its own relative paths against.
 
-  `root_dir_relative_path/1` is `filename:join(code:root_dir(), Pathname)`, so
-  this is the directory that decides where `releases/RELEASES`,
-  `releases/<vsn>/…` and every `lib/<app>-<vsn>` the handler names actually are.
+  This is the authoritative account of what that root does and does not decide;
+  everywhere else in Castle that needs it should point here rather than restate
+  it, because restating it is how the two halves below came to be conflated in
+  four separate places.
+
+  **Two anchors, not one.** `root_dir_relative_path/1` is
+  `filename:join(code:root_dir(), Pathname)`, so what is anchored *here* is the
+  applications: the `extract_tar(Root, Tar)` an unpack goes through, every
+  `lib/<app>-<vsn>` the handler resolves — stored relatively by
+  `create_RELEASES/3` precisely so the file can be moved — and the
+  `erts-<vsn>` a removal deletes.
+
+  **The release records are not.** `init/1` takes its releases directory from
+  `{sasl, releases_dir}`, then `RELDIR`, and only then `init:get_argument(root)`.
+  Mix sets neither, so on a Mix release `releases/RELEASES` and
+  `releases/<vsn>/…` land under this root too — but by default rather than
+  necessarily, and Castle currently derives them as though it were necessarily
+  (see [#23](https://github.com/ausimian/castle/issues/23)).
+
+  The distinction is what makes the ERTS guard correct: a deployment whose root
+  is not its own cannot be rescued by relocating the records, because relocating
+  them moves the bookkeeping and leaves the applications where they were.
   """
   @spec root_dir() :: Path.t()
   def root_dir, do: to_string(:code.root_dir())

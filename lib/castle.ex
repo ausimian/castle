@@ -87,12 +87,16 @@ defmodule Castle do
   # The release directory, and the version directory of the release being
   # operated on beneath it. Derived, never chosen by the caller: which file the
   # configuration lands in, and which file the release records go in, are
-  # properties of the installation rather than arguments. `code:root_dir()` is
-  # the root because that is the root `:release_handler` itself resolves
-  # relative paths against, so these name the files it will read, and a caller's
-  # working directory cannot make them name different ones. The version
-  # directory resolves for any version the running release knows about, because
+  # properties of the installation rather than arguments, and a caller's working
+  # directory cannot make them name different ones. The version directory
+  # resolves for any version the running release knows about, because
   # `:release_handler` unpacks every version into this same root.
+  #
+  # `Castle.Deployment.root_dir/0` says what that root does and does not decide,
+  # and is the one place that says it. The part that bears on these two: it is
+  # the right derivation for a release Mix built, and only because Mix sets
+  # neither of the two things that would move the release records elsewhere -
+  # see castle#23.
   #
   # It is read through `Castle.Deployment` so that there is one place naming it,
   # the same place `Castle.Commands.ensure_own_erts/2` compares it against

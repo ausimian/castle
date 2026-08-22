@@ -31,13 +31,15 @@ defmodule Castle.Commands do
 
   The directory is an argument because that is what makes this testable, not
   because a caller gets to choose it: `Castle.make_releases/0` derives it from
-  the root of the release, and that is the same root `:release_handler` resolves
-  its own relative paths against - `code:root_dir()`, never the working
-  directory (`consult/2` is `file:consult(root_dir_relative_path(File))`, and
-  `do_write_release/3` the same). So the working directory was only ever visible
-  to the check below, which is what made it possible for the file this looked
-  for and the file `create_RELEASES/3` wrote to be different ones. Nothing has
-  to change directory to call this, and nothing should.
+  the root of the release - `code:root_dir()`, never the working directory. So
+  the working directory was only ever visible to the check below, which is what
+  made it possible for the file this looked for and the file `create_RELEASES/3`
+  wrote to be different ones. Nothing has to change directory to call this, and
+  nothing should.
+
+  That derivation is right for a release Mix built and not in general;
+  `Castle.Deployment.root_dir/0` is the one place that explains why, and
+  castle#23 is the gap.
 
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2`
   below - and refuses it *before* looking for the file, not after. The whole
@@ -109,20 +111,18 @@ defmodule Castle.Commands do
   # `code:root_dir()` names the installation and not the deployment.
   #
   # Which matters because `code:root_dir()` is `:release_handler`'s own anchor,
-  # not Castle's choice of one: `root_dir_relative_path/1` is
-  # `filename:join(code:root_dir(), Pathname)`, and `create_RELEASES/3` stores
-  # library directories *relatively* - `filename:join("lib", LibName)`, "to make
-  # it easy to create a relocatable RELEASES file" - so `releases/RELEASES`,
-  # `releases/<vsn>/…` and every `lib/<app>-<vsn>` the handler reads, writes or
-  # deletes are resolved there. Mix sets neither `RELDIR` nor
-  # `{sasl, releases_dir}`, the two things that could redirect the releases
-  # directory, so nothing moves it back.
+  # not Castle's choice of one - `Castle.Deployment.root_dir/0` sets out what it
+  # anchors and what it does not, and is the only place that should. The half
+  # this rests on is the applications: extraction, every `lib/<app>-<vsn>` the
+  # handler resolves, and the `erts-<vsn>` a removal deletes. Those cannot be
+  # relocated, which is why relocating the *records* - the half that can be, with
+  # `RELDIR` or `{sasl, releases_dir}` - is not a way out of this refusal.
   #
   # **Do not "fix" this by deriving the root from `RELEASE_ROOT`.** It reads like
   # the obvious remedy and it is the worse one: Castle would put the
-  # configuration and the release records somewhere `:release_handler` never
-  # looks, and an upgrade would go on reading the installation's. A loud refusal
-  # is better than a silent divergence, and there is no root Castle may choose
+  # configuration somewhere `:release_handler` never looks, and an upgrade would
+  # go on using applications under the installation. A loud refusal is better
+  # than a silent divergence, and there is no root Castle may choose
   # that makes such a release upgradable.
   #
   # The question is asked of the node, and there is one implementation of it.
@@ -583,9 +583,11 @@ defmodule Castle.Commands do
 
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2` -
   which is the one check this operation makes. `make_permanent/1` rewrites
-  `releases/RELEASES` and `releases/start_erl.data`, both resolved against
-  `code:root_dir()`, so on such a deployment it would be promoting a version of
-  the Erlang installation.
+  `releases/RELEASES` and `releases/start_erl.data`, which on a release Mix
+  built sit under `code:root_dir()`, so on such a deployment it would be
+  promoting a version of the Erlang installation. Those two are the *records*,
+  so they are the relocatable half - see `Castle.Deployment.root_dir/0` - but
+  the version it would be promoting is the installation's either way.
   """
   @spec commit(String.t(), module(), module()) :: result()
   def commit(vsn, handler \\ :release_handler, deployment \\ Castle.Deployment) do
@@ -602,10 +604,10 @@ defmodule Castle.Commands do
 
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2` -
   and of everything gated this is the operation with the most to lose by not
-  being: `remove_release/1` *deletes*, and every path it deletes is resolved
-  against `code:root_dir()`, so on such a deployment it is the Erlang
-  installation's version directory and library directories it would be asked to
-  take away.
+  being: `remove_release/1` *deletes*, and the library directories and
+  `erts-<vsn>` it takes away are resolved against `code:root_dir()` - the anchor
+  nothing can relocate - so on such a deployment it is the Erlang installation
+  it would be asked to delete out of.
   """
   @spec remove(String.t(), module(), module()) :: result()
   def remove(vsn, handler \\ :release_handler, deployment \\ Castle.Deployment) do

@@ -8,11 +8,12 @@ defmodule Castle.MakeReleasesTest do
   use ExUnit.Case, async: true
 
   alias Castle.Commands
+  alias Castle.DeploymentStub
   alias Castle.ReleaseHandlerStub, as: Stub
 
   @moduletag :tmp_dir
 
-  describe "make_releases/2" do
+  describe "make_releases/3" do
     test "leaves an existing RELEASES file alone", %{tmp_dir: dir} do
       rel_dir = rel_dir(dir)
       File.write!(Path.join(rel_dir, "RELEASES"), "")
@@ -20,6 +21,35 @@ defmodule Castle.MakeReleasesTest do
       # The stub has no registered replies, so it raises if it is consulted.
       assert Commands.make_releases(rel_dir, Stub) == {:ok, []}
       assert Stub.calls(:which_releases) == []
+    end
+
+    test "refuses a release that did not bring its own ERTS", %{tmp_dir: dir} do
+      # This is the operation the finding was about: with no ERTS of its own the
+      # release runs the system emulator, code:root_dir() is the Erlang
+      # installation, and this would create - or write over - the RELEASES file
+      # of the installation itself.
+      rel_dir = rel_dir(dir)
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [], :permanent}])
+      Stub.stub(:create_RELEASES, :ok)
+
+      assert {:error, message} = Commands.make_releases(rel_dir, handler, erts_less())
+      assert message =~ "Cannot create #{Path.join(rel_dir, "RELEASES")}"
+      assert message =~ "this release does not bring its own ERTS."
+      assert message =~ "cannot be upgraded by Castle."
+      assert Stub.calls(:create_RELEASES) == []
+      assert Stub.calls(:which_releases) == []
+    end
+
+    test "refuses it even where the file it looks for is already there", %{tmp_dir: dir} do
+      # Which is the ordering that matters, and the reason the guard is the first
+      # thing this does: an Erlang installation built by OTP has a
+      # releases/RELEASES of its own, so looking first would find it, report
+      # success, and never say that the deployment cannot be upgraded at all.
+      rel_dir = rel_dir(dir)
+      File.write!(Path.join(rel_dir, "RELEASES"), "")
+
+      assert {:error, message} = Commands.make_releases(rel_dir, Stub, erts_less())
+      assert message =~ "this release does not bring its own ERTS."
     end
 
     test "creates it from the release running as permanent", %{tmp_dir: dir} do
@@ -74,4 +104,9 @@ defmodule Castle.MakeReleasesTest do
     File.mkdir_p!(rel_dir)
     rel_dir
   end
+
+  # A deployment whose launcher exported a root of its own while the emulator's
+  # is elsewhere, which is what `include_erts: false` leaves behind. Neither path
+  # exists, so nothing can make the two look like one directory.
+  defp erts_less, do: DeploymentStub.stub("/opt/app", "/usr/lib/erlang")
 end

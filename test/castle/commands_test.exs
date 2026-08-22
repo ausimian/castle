@@ -2,11 +2,12 @@ defmodule Castle.CommandsTest do
   use ExUnit.Case, async: true
 
   alias Castle.Commands
+  alias Castle.DeploymentStub
   alias Castle.InitStub
   alias Castle.PeerStub
   alias Castle.ReleaseHandlerStub, as: Stub
 
-  describe "materialise/2" do
+  describe "materialise/3" do
     @tag :tmp_dir
     test "hands an unpacked version to the peer", %{tmp_dir: dir} do
       unpacked(dir)
@@ -109,7 +110,7 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "unpack/2" do
+  describe "unpack/3" do
     test "reports the version that was unpacked" do
       handler = real_record(:unpack_release, {:ok, ~c"1.2.3"})
 
@@ -130,7 +131,7 @@ defmodule Castle.CommandsTest do
       # ends in write_releases/3, so an unpack here would put the synthesised
       # record into RELEASES, and the next boot would read it back - which takes
       # away the restart the refusal names as the remedy, because
-      # make_releases/2 does nothing once the file exists.
+      # make_releases/3 does nothing once the file exists.
       handler = synthesised_record(:unpack_release, {:ok, ~c"1.2.3"})
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
@@ -150,7 +151,7 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "install/2" do
+  describe "install/3" do
     test "reports the version change" do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
@@ -303,7 +304,7 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "commit/2" do
+  describe "commit/3" do
     test "reports what committing means" do
       handler = Stub.stub(:make_permanent, :ok)
 
@@ -334,7 +335,7 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "remove/2" do
+  describe "remove/3" do
     test "reports the version that was removed" do
       handler = Stub.stub(:remove_release, :ok)
 
@@ -369,11 +370,141 @@ defmodule Castle.CommandsTest do
     end
   end
 
+  # A release built with `include_erts: false` runs the system emulator, so
+  # `code:root_dir()` - and therefore every path `:release_handler` resolves - is
+  # the Erlang installation rather than the deployment. Every operation that
+  # would act on that tree has to refuse before it acts, and each of these
+  # registers the reply that would have had it succeed, so what is asserted is
+  # ordering: the handler stands ready and is never asked.
+  #
+  # The state cannot be reached without substituting the guard's input, because
+  # `mix test` has no `RELEASE_ROOT` and the guard is inert without one. The
+  # comparison itself is not substituted - `Castle.DeploymentStub` answers the
+  # two roots and `Castle.Commands` does the rest - so these exercise the real
+  # rule.
+  describe "the ERTS guard" do
+    test "refuses to unpack, without unpacking" do
+      handler = real_record(:unpack_release, {:ok, ~c"1.2.3"})
+
+      assert {:error, message} = Commands.unpack("sample-1.2.3", handler, erts_less())
+      assert message =~ "Cannot unpack sample-1.2.3: this release does not bring its own ERTS."
+      assert message =~ "/opt/app"
+      assert message =~ "/usr/lib/erlang"
+      assert message =~ "cannot be upgraded by Castle."
+      assert Stub.calls(:unpack_release) == []
+
+      # And ahead of the record check, which on such a deployment is asking about
+      # the Erlang installation's own release record and so cannot see anything
+      # wrong. The refusal has to name the reason that is true.
+      assert Stub.calls(:which_releases) == []
+    end
+
+    test "refuses to install, without installing" do
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", handler, erts_less())
+      assert message =~ "Cannot install 1.2.3: this release does not bring its own ERTS."
+      assert Stub.calls(:install_release) == []
+      assert Stub.calls(:which_releases) == []
+    end
+
+    test "refuses to commit, without committing" do
+      handler = Stub.stub(:make_permanent, :ok)
+
+      assert {:error, message} = Commands.commit("1.2.3", handler, erts_less())
+      assert message =~ "Cannot commit 1.2.3: this release does not bring its own ERTS."
+      assert Stub.calls(:make_permanent) == []
+    end
+
+    test "refuses to remove, without removing" do
+      # The one with the most to lose: remove_release/1 deletes, and every path
+      # it deletes is resolved against code:root_dir() - so on this deployment it
+      # is the Erlang installation's directories it would be asked to take away.
+      handler = Stub.stub(:remove_release, :ok)
+
+      assert {:error, message} = Commands.remove("1.2.3", handler, erts_less())
+      assert message =~ "Cannot remove 1.2.3: this release does not bring its own ERTS."
+      assert Stub.calls(:remove_release) == []
+    end
+
+    @tag :tmp_dir
+    test "refuses to configure a version, without starting a peer", %{tmp_dir: dir} do
+      # The version directory is real and has something in it, so the refusal
+      # cannot be the one about a release that was never unpacked.
+      unpacked(dir)
+      peer = PeerStub.stub({:ok, []})
+
+      assert {:error, message} = Commands.materialise(dir, peer, erts_less())
+      assert message =~ "does not bring its own ERTS."
+      assert PeerStub.calls() == []
+    end
+
+    test "leaves the read-only diagnostics alone" do
+      # An operator whose deployment has just been refused needs these to work in
+      # order to make sense of the refusal, so neither takes the guard - there is
+      # no deployment to hand them. Gating a diagnostic on the condition it
+      # diagnoses leaves nothing to ask.
+      handler =
+        Stub.stub(:which_releases, [
+          {~c"sample", ~c"1.2.3", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
+        ])
+
+      assert Commands.upgradable(handler) == {:ok, []}
+      assert Commands.releases(handler) == {:ok, ["1.2.3  permanent"]}
+    end
+
+    test "is inert when nothing says where the deployment is" do
+      # Which is what makes it safe to put in front of every mutating operation:
+      # only a launcher `mix release` generated exports RELEASE_ROOT, so outside
+      # a release there is nothing to compare and nothing is refused. An empty
+      # value names no directory and is no evidence either.
+      handler = Stub.stub(:remove_release, :ok)
+
+      for release_root <- [nil, ""] do
+        deployment = DeploymentStub.stub(release_root, "/usr/lib/erlang")
+
+        assert Commands.remove("1.2.3", handler, deployment) == {:ok, ["Removed 1.2.3."]}
+      end
+    end
+
+    test "is inert when the deployment is where the emulator's root is" do
+      handler = Stub.stub(:remove_release, :ok)
+
+      # Spelled the same way, and spelled differently for the same directory: a
+      # trailing separator and a doubled one are what Path.expand/1 settles, and
+      # an ordinary release has the two strings identical anyway - both come from
+      # `pwd -P`, in the launcher and in the erl shim two levels below it.
+      for release_root <- ["/opt/app", "/opt/app/", "/opt//app"] do
+        deployment = DeploymentStub.stub(release_root, "/opt/app")
+
+        assert Commands.remove("1.2.3", handler, deployment) == {:ok, ["Removed 1.2.3."]}
+      end
+    end
+
+    @tag :tmp_dir
+    test "is inert when the two spell one directory through a symlink", %{tmp_dir: dir} do
+      # A deployment with a `current` symlink is ordinary, and refusing one that
+      # does bring its own ERTS is the one failure of this guard that an operator
+      # cannot work around - so where the strings disagree the filesystem is
+      # asked, and it is the same directory.
+      root = Path.join(dir, "1.2.3")
+      link = Path.join(dir, "current")
+      File.mkdir!(root)
+      File.ln_s!(root, link)
+
+      handler = Stub.stub(:remove_release, :ok)
+      deployment = DeploymentStub.stub(link, root)
+
+      assert Path.expand(link) != Path.expand(root)
+      assert Commands.remove("1.2.3", handler, deployment) == {:ok, ["Removed 1.2.3."]}
+    end
+  end
+
   # What a node reports once its boot script has run to the end.
   defp booted, do: InitStub.stub({:starting, :started})
 
   # A handler whose running release was read from a RELEASES file, so it names
-  # applications and the check unpack/2 and install/2 make passes, with `fun`
+  # applications and the check unpack/3 and install/3 make passes, with `fun`
   # answering `reply`.
   defp real_record(fun, reply) do
     Stub.stub(:which_releases, [
@@ -393,7 +524,12 @@ defmodule Castle.CommandsTest do
     Stub.stub(fun, reply)
   end
 
-  # Enough of an unpacked version directory for `materialise/2`: what is in it is
+  # A deployment that did not bring its own ERTS: the launcher exported a root
+  # of its own and the emulator's is elsewhere. Neither path exists, so the
+  # filesystem cannot be made to say they are one directory either.
+  defp erts_less, do: DeploymentStub.stub("/opt/app", "/usr/lib/erlang")
+
+  # Enough of an unpacked version directory for `materialise/3`: what is in it is
   # the peer's business, and the peer is a stub here. Everything it would look
   # for is covered against a real one in `Castle.PeerTest`.
   defp unpacked(dir), do: File.write!(Path.join(dir, "sys.config"), "[].\n")

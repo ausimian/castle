@@ -4,6 +4,7 @@ defmodule Castle do
   """
 
   alias Castle.Commands
+  alias Castle.Deployment
 
   # Every function in this module is a command entry point: `bin/castle` sends
   # each one to the running node over `bin/<release> rpc`, and the launcher's
@@ -69,7 +70,7 @@ defmodule Castle do
   # that can refuse to go on - a peer that will not start, a boot script that is
   # not there, a provider that raises - refuses from inside this call.
   #
-  # `Commands.install/2` then refuses a running node whose release record OTP
+  # `Commands.install/3` then refuses a running node whose release record OTP
   # synthesised, which is a fact about this node rather than about the target,
   # and so cannot be answered here. Both refusals are before `install_release/1`
   # has been asked for anything, which is the line that matters: nothing after
@@ -92,7 +93,12 @@ defmodule Castle do
   # working directory cannot make them name different ones. The version
   # directory resolves for any version the running release knows about, because
   # `:release_handler` unpacks every version into this same root.
-  defp rel_dir, do: Path.join(to_string(:code.root_dir()), "releases")
+  #
+  # It is read through `Castle.Deployment` so that there is one place naming it,
+  # the same place `Castle.Commands.ensure_own_erts/2` compares it against
+  # `RELEASE_ROOT` - which is the one deployment where this derivation names the
+  # wrong tree, and where every operation that would act on it refuses.
+  defp rel_dir, do: Path.join(Deployment.root_dir(), "releases")
   defp rel_vsn_dir(vsn), do: Path.join(rel_dir(), vsn)
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)

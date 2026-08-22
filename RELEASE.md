@@ -149,6 +149,35 @@
 
 ### Fixed
 
+- A release built with `include_erts: false` is now refused, by name and with
+  the reason, rather than quietly managing the Erlang installation it happens to
+  be running on. Such a release ships no emulator, so it runs the system one, and
+  `code:root_dir()` — the directory `:release_handler` resolves every path it
+  uses against — is then the shared Erlang installation rather than the
+  deployment. Left to itself, `make_releases/0` created that installation's
+  `releases/RELEASES`, which usually fails for want of permission and, where it
+  succeeds, puts the release records of unrelated deployments in one file;
+  `unpack/1`, `install/1` and `commit/1` wrote into the installation, and
+  `remove/1` deleted out of it. Each of those now fails instead, with a message
+  naming both directories and saying that a release which does not bring its own
+  ERTS cannot be upgraded by Castle.
+
+  The remedy is to build the release with its ERTS included, because there is no
+  other directory Castle could be pointed at: `:release_handler` anchors its own
+  relative paths to the emulator's root — `releases/RELEASES`, the version
+  directories and every `lib/<app>-<vsn>` among them — so records kept anywhere
+  else are records it never reads, and an upgrade would go on using the
+  installation's regardless. A refusal that says so is better than a divergence
+  that does not.
+
+  `upgradable/0` and `releases/0` are deliberately unaffected. They only read,
+  and they are what an operator needs working in order to make sense of the
+  refusal.
+
+  Note that this reaches the launcher's preboot step, which is where
+  `make_releases/0` is called: on such a release that step now reports a failure
+  on every start, and whether a start continues past it is Forecastle's `env.sh`
+  to decide.
 - `install/1` reports the emulator restart that an upgrade to a new emulator,
   or to a new kernel, stdlib or sasl, needs - rather than failing with a
   `CaseClauseError` while the upgrade proceeds.

@@ -247,10 +247,84 @@ defmodule Castle.PeerTest do
 
     test "reports a version directory with no release file", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root)
-      File.rm!(Path.join(vsn_dir, "synthetic.rel"))
+      for path <- Path.wildcard(Path.join(vsn_dir, "*.rel")), do: File.rm!(path)
 
       assert {:error, message} = Castle.Peer.materialise(vsn_dir)
       assert message =~ "Cannot find a release file"
+    end
+
+    # Every version this path is asked to configure was unpacked from a tarball,
+    # and an unpacked version directory holds two release files: the one Mix put
+    # inside the tarball's version directory, and the copy `release_handler`
+    # makes of the tarball's own `<name>-<vsn>.rel` beside it. That pair is not
+    # ambiguous, and refusing it refused every install - which is what the rest
+    # of this file now builds by default.
+    test "reads the release file in a version directory that was unpacked", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root)
+
+      assert Enum.sort(rel_files(vsn_dir)) == ["synthetic-1.0.0.rel", "synthetic.rel"]
+
+      # The two hold the same bytes, which is why nothing but a difference
+      # planted between them can show which one was read.
+      assert File.read!(Path.join(vsn_dir, "synthetic-1.0.0.rel")) ==
+               File.read!(Path.join(vsn_dir, "synthetic.rel"))
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+    end
+
+    test "reads the copy unpacking left, and not Mix's", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root)
+
+      # Mix's copy, made to name an emulator that is not there. It is the copy
+      # `release_handler` admitted the version on that says what the version is -
+      # `RELEASES` was written from those bytes - so that is the one to read, and
+      # preferring this one would refuse a release that boots.
+      File.write!(
+        Path.join(vsn_dir, "synthetic.rel"),
+        :io_lib.format(~c"~tp.~n", [
+          {:release, {~c"synthetic", ~c"1.0.0"}, {:erts, ~c"0.0.0"}, []}
+        ])
+      )
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+    end
+
+    test "reads the one release file a version Mix assembled has", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, shape: :assembled)
+
+      assert rel_files(vsn_dir) == ["synthetic.rel"]
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+    end
+
+    test "refuses two release files that are not one release's", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, shape: :assembled)
+      File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "other.rel"))
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Found more than one release file"
+      assert message =~ "synthetic.rel"
+      assert message =~ "other.rel"
+    end
+
+    test "refuses a copy that belongs to another version", %{tmp_dir: root} do
+      # What is accepted is a release file and the copy made of it *for this
+      # version*, since the version directory's own name is the version. A name
+      # that merely looks like such a copy is two release files.
+      vsn_dir = SyntheticRelease.build(root, shape: :assembled)
+      File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "synthetic-2.0.0.rel"))
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Found more than one release file"
+      assert message =~ "synthetic-2.0.0.rel"
+    end
+
+    test "refuses a third release file beside the pair", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root)
+      File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "other.rel"))
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Found more than one release file"
+      assert message =~ "other.rel"
     end
 
     test "gives up on a peer that never boots, at the deadline", %{tmp_dir: root} do
@@ -783,6 +857,7 @@ defmodule Castle.PeerTest do
                  "preboot.boot",
                  "preboot.script",
                  "synthetic.rel",
+                 "synthetic-1.0.0.rel",
                  "sys.config",
                  "sys.config.pristine",
                  Path.join(work, "sys.config"),
@@ -977,6 +1052,8 @@ defmodule Castle.PeerTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  defp rel_files(vsn_dir), do: Enum.filter(File.ls!(vsn_dir), &String.ends_with?(&1, ".rel"))
 
   # What the peer saw, as paths relative to the version directory.
   defp snapshot(path, relative_to) do

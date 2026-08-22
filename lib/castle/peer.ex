@@ -467,9 +467,43 @@ defmodule Castle.Peer do
   end
 
   # Mix names the release file after the release, so it is found rather than
-  # named. A version directory holds exactly one: Mix renames the one belonging
-  # to the `start` script and removes the rest. Listed rather than globbed,
-  # since a release root is a path and not a pattern.
+  # named. A version directory holds one or two of them, and which it holds says
+  # how the version got there.
+  #
+  # Mix's copy is `<name>.rel` - the release file belonging to the `start`
+  # script, renamed after the release - and a version directory as Mix
+  # assembled it holds that one alone. Unpacking a tarball into it adds a
+  # second: `release_handler` extracts the tarball's `<name>-<vsn>.rel`, reads
+  # *that* to decide what the version is - `check_rel` on the way in, and the
+  # `RELEASES` entry is written from the record it returns - and then copies it
+  # into the version directory, "keeping this for backwards compatibility
+  # reasons with older systools:make_tar, where there is no copy of the .rel
+  # file in the releases/<vsn> dir. See OTP-9746." For a tarball `systools`
+  # built the two names are the same and that copy overwrites Mix's, which is
+  # why the comment reads as harmless. They differ here, so both survive, and
+  # every unpacked release has two.
+  #
+  # Of the two, `release_handler`'s copy is the authoritative one: it is the
+  # file the version was admitted on, and the applications and emulator version
+  # `RELEASES` records came from those very bytes, so it is the release as the
+  # system understands it. The two are byte-identical in practice - Forecastle
+  # writes the tarball's copy from Mix's with `File.cp!`, the tar carries it
+  # unchanged, and `release_handler`'s copy is a read and a write of the whole
+  # file - and nothing here compares them, deliberately. This is a choice of
+  # which file is authoritative rather than a tie-break between equals, so it
+  # holds however the two differ, and a difference in bytes that cannot change
+  # the answer is no reason to refuse an install that works.
+  #
+  # Anything other than those two shapes is refused, naming what it found: two
+  # names that are not that pair are two release files rather than two copies of
+  # one, and so is any third. The version is all the pair is recognised by, and
+  # it is the version directory's own name - `release_handler` copies into
+  # `releases/<Vsn>` for the `Vsn` it has just read out of the file, and Mix
+  # assembles into `releases/<version>` - so the directory is the version, and
+  # the release name never has to be known here.
+  #
+  # Listed rather than globbed, since a release root is a path and not a
+  # pattern.
   defp release_file(rel_vsn_dir) do
     case File.ls(rel_vsn_dir) do
       {:ok, entries} ->
@@ -489,10 +523,33 @@ defmodule Castle.Peer do
   end
 
   defp release_file(rel_vsn_dir, names) do
-    {:error,
-     "Found more than one release file in #{rel_vsn_dir} - #{Enum.join(names, ", ")} - so " <>
-       "the emulator to evaluate its configuration with is ambiguous."}
+    case unpacked_copy(names, Path.basename(rel_vsn_dir)) do
+      {:ok, name} ->
+        {:ok, Path.join(rel_vsn_dir, name)}
+
+      :none ->
+        {:error,
+         "Found more than one release file in #{rel_vsn_dir} - #{Enum.join(names, ", ")}. An " <>
+           "unpacked version directory holds two, a release file and the copy unpacking " <>
+           "leaves beside it, and these are not that pair - so the emulator to evaluate its " <>
+           "configuration with is ambiguous."}
+    end
   end
+
+  # The copy `release_handler` made, recognised only while the file it was made
+  # from is still beside it: the one name of the two that is the other with the
+  # version in it.
+  defp unpacked_copy([first, second], vsn) do
+    cond do
+      first == copy_of(second, vsn) -> {:ok, first}
+      second == copy_of(first, vsn) -> {:ok, second}
+      true -> :none
+    end
+  end
+
+  defp unpacked_copy(_names, _vsn), do: :none
+
+  defp copy_of(name, vsn), do: "#{Path.rootname(name)}-#{vsn}.rel"
 
   ## sys.config, and the base it is resolved from
 

@@ -10,7 +10,13 @@ defmodule Castle.PeerProviderStub do
   #
   #   * `marker:` a path, to write the operating system pid of the VM it is
   #     running in there, which is how a test tells whether that VM is still
-  #     alive afterwards, and
+  #     alive afterwards,
+  #   * `raw:` a string, to write it outside the io system altogether - once
+  #     through `:erlang.display_string/1` and once straight to a file
+  #     descriptor, which is the door native code would use and the one no relay
+  #     can cover,
+  #   * `sleep:` a number of milliseconds or `:infinity`, to take longer than it
+  #     is allowed to, and
   #   * `raise:` a message, to fail the way a provider that cannot find what it
   #     needs fails.
 
@@ -25,10 +31,27 @@ defmodule Castle.PeerProviderStub do
       File.write!(marker, System.pid())
     end
 
+    if raw = opts[:raw] do
+      write_outside_the_io_system(raw)
+    end
+
+    if wait = opts[:sleep] do
+      Process.sleep(wait)
+    end
+
     if message = opts[:raise] do
       raise message
     end
 
     Config.Reader.merge(config, Keyword.get(opts, :merge, []))
+  end
+
+  defp write_outside_the_io_system(text) do
+    :erlang.display_string(String.to_charlist(text))
+
+    # Straight at the descriptor, with no process and no io protocol between.
+    port = :erlang.open_port({:fd, 0, 2}, [:out])
+    true = Port.command(port, text)
+    Port.close(port)
   end
 end

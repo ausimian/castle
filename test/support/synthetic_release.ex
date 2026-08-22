@@ -67,7 +67,26 @@ defmodule Castle.SyntheticRelease do
 
     [{^module, binary}] = compile(source)
     File.write!(Path.join(ebin, "#{module}.beam"), binary)
+    write_app(ebin, app, vsn, [module])
 
+    {{app, vsn, dir}, binary}
+  end
+
+  @doc """
+  Writes an application with no modules at all, and returns the triple
+  `build/2` takes.
+
+  Enough to be loadable, which is what the compile-environment check needs of an
+  application before it will read its environment.
+  """
+  def plain_app(dir, app, vsn) do
+    ebin = Path.join(dir, "ebin")
+    File.mkdir_p!(ebin)
+    write_app(ebin, app, vsn, [])
+    {app, vsn, dir}
+  end
+
+  defp write_app(ebin, app, vsn, modules) do
     File.write!(
       Path.join(ebin, "#{app}.app"),
       :io_lib.format(~c"~tp.~n", [
@@ -75,14 +94,12 @@ defmodule Castle.SyntheticRelease do
          [
            {:description, to_charlist(app)},
            {:vsn, to_charlist(vsn)},
-           {:modules, [module]},
+           {:modules, modules},
            {:registered, []},
            {:applications, [:kernel, :stdlib, :elixir]}
          ]}
       ])
     )
-
-    {{app, vsn, dir}, binary}
   end
 
   # Two versions of one module are compiled in the same node here, which is a

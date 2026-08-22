@@ -48,6 +48,20 @@ defmodule Castle.CommandsTest do
     end
 
     @tag :tmp_dir
+    test "leaves nothing for install_release/1 to be given", %{tmp_dir: dir} do
+      # The order `Castle.install/1` composes these in, with the release handler
+      # ready to accept an install that must not be asked for. Everything able
+      # to refuse belongs on this side of the mutation, and a configuration that
+      # could not be materialised is the whole of what this adds to that list.
+      peer = PeerStub.stub({:error, "the compile environment does not agree"})
+      Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.materialise(dir, peer)
+      assert message =~ "the compile environment does not agree"
+      assert Stub.calls(:install_release) == []
+    end
+
+    @tag :tmp_dir
     test "reports a version that has not been unpacked", %{tmp_dir: dir} do
       missing = Path.join(dir, "9.9.9")
 

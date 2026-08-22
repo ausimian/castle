@@ -26,12 +26,50 @@ defmodule Castle.Peer do
   #
   # ## The VM
   #
-  # `:peer` with `connection: :standard_io`: the peer is an ordinary child
-  # process talking over its own stdin and stdout, so no epmd, cookie, node name
-  # or distribution is involved, and its output - a provider printing a
-  # diagnostic, say - is forwarded to whoever asked for the install. It is
-  # started linked, so that it cannot outlive the command: the peer stops when
-  # its control port closes, and that port belongs to the control process.
+  # `:peer` with a control connection over a loopback socket. No epmd, no
+  # cookie, no node name, no distribution: `:peer` requires none of those once a
+  # connection is given, and the peer node reports `nonode@nohost` and
+  # `is_alive() == false`. Erlang-level output from the peer - a provider
+  # printing a diagnostic, say - travels over that same connection and is
+  # forwarded to whoever asked for the install.
+  #
+  # `connection: :standard_io` is the other way to have all of that, and is what
+  # the issue suggested, but it multiplexes the peer's console output with the
+  # frames carrying the call over one byte stream, reserving sixteen byte values
+  # for the framing. Every one of them is a UTF-8 lead byte. So a provider - or
+  # a NIF under it - writing an accented character straight to a file
+  # descriptor, by `:erlang.display_string/1` or anything else that bypasses the
+  # io system, is read as framing, fails the frame's checksum and takes the
+  # origin's control process down: a refusal, but a refusal of an install that
+  # was about to succeed. Nothing outside `:peer` can harden that, because the
+  # stream being shared is the mechanism. A socket carries only frames, length
+  # prefixed, and a raw write goes to the null device the peer was detached onto
+  # instead. The cost is measured below.
+  #
+  # The socket is bound to 127.0.0.1 explicitly. `connection: 0` would listen on
+  # every interface, and the first connection accepted is taken to be the peer's
+  # - which is a channel that can send messages to named processes on this node.
+  # Loopback leaves the window that another process on this host could connect
+  # first, in the fraction of a second between the listen and the peer's
+  # connect; `:peer` offers nothing to authenticate the other end with. That is
+  # worth knowing and small in context, since a host with an untrusted local
+  # process on it can already read `releases/COOKIE`.
+  #
+  # What the socket costs is the diagnosis of a peer that cannot boot. A
+  # detached peer's console output goes to the null device before anything can be
+  # said, and the origin holds no handle on the process, so a boot that fails is
+  # noticed when `wait_boot` expires rather than at once and with the emulator's
+  # own reason. That is a poor way to learn that a release is broken, and it was
+  # weighed against failing installs that ought to have worked: a boot script
+  # that will not boot is a broken release either way, `unpack` has already
+  # verified the tarball it came out of, and the preflight below has already
+  # established that the script and the emulator are there.
+  #
+  # It is started linked, so that it cannot outlive the command. Being detached
+  # does not change that: the connection is the whole of the peer's attachment to
+  # anything, the control process owns this end of it, and the link means that
+  # process goes when this one does - so a node that dies mid-install takes the
+  # peer with it rather than leaving a VM behind.
   #
   # It boots `preboot`, the script Forecastle writes into every version
   # directory. That script starts kernel, stdlib, sasl, compiler, elixir and
@@ -61,6 +99,23 @@ defmodule Castle.Peer do
   # handed, sees an unconfigured VM. Reading the application environment is not
   # how a provider is given its input.
   #
+  # ## The compile environment
+  #
+  # Elixir checks a resolved configuration against the values the release was
+  # compiled against - `Application.compile_env/3` - and refuses to boot when
+  # they disagree. It does that check in the branch that *applies* the
+  # configuration, and again on the boot that follows the branch that writes it.
+  # This drives the writing branch and there is no boot after it, so neither
+  # would happen, and a release Elixir considers unbootable would reach
+  # `install_release/1`. So the check is made here, with Elixir's own validator -
+  # see `validate_compile_env/2`.
+  #
+  # Elixir's other boot-time check, that the configuration does not try to
+  # configure kernel or stdlib after they have been loaded, is deliberately not
+  # reproduced. That one is about whether a configuration can be *applied* to a
+  # VM which is already running, which is a property of a boot rather than of the
+  # configuration, and the target makes that judgement itself when it boots.
+  #
   # ## The compatibility contract
   #
   # `resolve/1` is called *in the target release*, so it is the target's copy of
@@ -82,9 +137,14 @@ defmodule Castle.Peer do
   # that boots and never answers, would otherwise hold an install open for as
   # long as it liked - and all of this runs before `install_release/1`, so an
   # install that never starts is the best outcome left once something has gone
-  # wrong.
+  # wrong. Generous, because a preboot script boots in a fraction of a second
+  # and a runtime.exs is compiled: neither is expected to come near them.
   @boot_timeout 30_000
   @resolve_timeout 120_000
+
+  # The control connection: a socket on the loopback interface, on whatever port
+  # the system hands out.
+  @connection {{127, 0, 0, 1}, 0}
 
   @typedoc "The outcome of materialisation: nothing to report, or why it failed."
   @type result :: {:ok, [String.t()]} | {:error, String.t()}
@@ -95,10 +155,14 @@ defmodule Castle.Peer do
 
   The release root is the directory two levels above, which is where a release
   keeps `lib`, `erts-*` and the `releases` directory this one lives in.
+
+  `:boot_timeout` and `:resolve_timeout` override the deadlines. They are
+  options for the same reason `Castle.Commands` takes the module to talk to: a
+  deadline nothing can shorten is a deadline no test can prove is enforced.
   """
-  @spec materialise(Path.t()) :: result()
-  def materialise(rel_vsn_dir) do
-    with {:ok, peer} <- plan(rel_vsn_dir),
+  @spec materialise(Path.t(), keyword()) :: result()
+  def materialise(rel_vsn_dir, opts \\ []) do
+    with {:ok, peer} <- plan(rel_vsn_dir, opts),
          {:ok, header, config} <- read_sys_config(peer) do
       # A release with no providers has nothing to resolve: what Mix wrote is
       # already its final configuration, and `sys.config` is left exactly as it
@@ -167,11 +231,11 @@ defmodule Castle.Peer do
   defp start(peer) do
     {:ok, pid, _node} =
       :peer.start_link(%{
-        connection: :standard_io,
+        connection: @connection,
         exec: to_charlist(peer.erl),
         args: args(peer),
         env: env(peer),
-        wait_boot: @boot_timeout,
+        wait_boot: peer.boot_timeout,
         shutdown: :close
       })
 
@@ -179,17 +243,17 @@ defmodule Castle.Peer do
   catch
     kind, reason ->
       {:error,
-       "Cannot configure #{peer.vsn}: no VM could be started from #{peer.boot}.boot. " <>
-         Exception.format(kind, reason, __STACKTRACE__)}
+       "Cannot configure #{peer.vsn}: no VM was started from #{peer.boot}.boot within " <>
+         "#{peer.boot_timeout}ms. " <> Exception.format(kind, reason, __STACKTRACE__)}
   end
 
   defp call(pid, peer) do
-    case :peer.call(pid, __MODULE__, :resolve, [peer.scratch], @resolve_timeout) do
+    case :peer.call(pid, __MODULE__, :resolve, [peer.scratch], peer.resolve_timeout) do
       {:ok, config} when is_list(config) ->
         {:ok, config}
 
       {:error, message} when is_binary(message) ->
-        {:error, message}
+        {:error, "Cannot configure #{peer.vsn}: " <> message}
 
       other ->
         {:error,
@@ -204,9 +268,11 @@ defmodule Castle.Peer do
          Exception.format(kind, reason, __STACKTRACE__)}
   end
 
-  # `:peer.stop/1` closes the control port, which the peer sees as the end of
-  # its standard input and halts on. Failing to stop a control process that has
-  # already gone is not failing to stop the peer, so nothing is made of it.
+  # `:peer.stop/1` closes the control connection, which the peer halts on: the
+  # connection is the whole of its attachment to anything, so losing it is how
+  # it is told to go, and how it goes if this node dies instead. Failing to stop
+  # a control process that has already gone is not failing to stop the peer, so
+  # nothing is made of it.
   defp stop(pid) do
     :peer.stop(pid)
   catch
@@ -253,7 +319,7 @@ defmodule Castle.Peer do
   # `install_release/1`: a target that cannot be evaluated has to be refused
   # while refusing is still free.
 
-  defp plan(rel_vsn_dir) do
+  defp plan(rel_vsn_dir, opts) do
     root = Path.expand("../..", rel_vsn_dir)
     boot = Path.join(rel_vsn_dir, @boot_script)
     sys_config = Path.join(rel_vsn_dir, @sys_config)
@@ -270,7 +336,9 @@ defmodule Castle.Peer do
          boot: boot,
          erl: erl,
          sys_config: sys_config,
-         scratch: scratch
+         scratch: scratch,
+         boot_timeout: Keyword.get(opts, :boot_timeout, @boot_timeout),
+         resolve_timeout: Keyword.get(opts, :resolve_timeout, @resolve_timeout)
        }}
     end
   end
@@ -388,23 +456,20 @@ defmodule Castle.Peer do
     end
   end
 
-  # Everything the pipeline writes has to leave this VM as a control frame
-  # rather than as bytes of its own.
+  # Everything the pipeline writes has to leave this VM through the control
+  # connection, because nothing else it writes leaves at all.
   #
-  # A `standard_io` connection multiplexes the peer's console output with the
-  # frames that carry the call and its answer over the one stream, and reserves
-  # sixteen byte values for the framing. Those values are lead bytes of UTF-8, so
-  # a byte in that range arriving as console output is read as framing, the
-  # frame's checksum then fails, and the origin's control process dies with it -
-  # which is to say a provider writing an accented character to standard error
-  # would fail an install that was otherwise about to succeed.
+  # A peer reached over a socket is detached, so its file descriptors are the
+  # null device: what a provider writes to standard error - and Elixir's own
+  # account of a provider that raised is written there - would be discarded, and
+  # the operator would be told that an install failed without being told what
+  # the provider said. What goes through this VM's `user` process does travel the
+  # connection, so standard error is pointed at the same place. A relay, because
+  # a process can hold one registered name and `user` has one; requests are
+  # passed on untouched, so it is `user` that answers whoever asked.
   #
-  # What the pipeline writes through this VM's `user` process is already a frame
-  # and is unaffected, so standard error is pointed at the same place: a relay,
-  # because a process can hold only one registered name and `user` has one.
-  # Requests are passed on untouched, so it is `user` that answers whoever asked.
-  # The only raw output left after this is the emulator's own, which it writes
-  # while going down and which is ASCII.
+  # Discarding is the safe direction to fail, which is the point of the socket:
+  # a raw write that cannot reach the channel cannot corrupt it either.
   defp forward_standard_error do
     user = Process.whereis(:user)
     standard_error = Process.whereis(:standard_error)
@@ -452,18 +517,58 @@ defmodule Castle.Peer do
     )
 
     case Config.Provider.boot(fn -> :written end) do
-      :written -> resolved(path)
+      :written -> resolved(path, provider)
       other -> {:error, "Evaluating #{path} answered #{inspect(other)} instead of writing it."}
     end
+  end
+
+  defp resolved(path, provider) do
+    with {:ok, config} <- consult(path), do: validated(strip_booted(config), provider)
   end
 
   # The marker Elixir adds on its way to a reboot says "the providers have run
   # already for this boot", and this was not a boot. Left in, it would tell the
   # target to skip its providers the next time it starts cold, freezing its
   # configuration as of the upgrade.
-  defp resolved(path) do
-    with {:ok, config} <- consult(path) do
-      {:ok, Keyword.replace_lazy(config, :elixir, &Keyword.delete(&1, @booted_key))}
+  defp strip_booted(config) do
+    Keyword.replace_lazy(config, :elixir, &Keyword.delete(&1, @booted_key))
+  end
+
+  # The check Elixir would have made had it applied this configuration, or had
+  # it rebooted into it: that what `Application.compile_env/3` read when the
+  # release was compiled is what the resolved configuration says now. Neither
+  # happens here - the pipeline was asked to write, and nothing boots afterwards
+  # - so a release Elixir considers unbootable would otherwise be installed and
+  # discovered on the way up, where the only way out is a rollback.
+  #
+  # Made with Elixir's own validator, and in the way Elixir makes it: the
+  # resolved values are put into this VM's application environment first,
+  # because that is where the validator reads them from. Persistently, so that
+  # loading an application to read its environment cannot overwrite them with
+  # the defaults from its `.app` file. Only the applications the check names,
+  # since those are the only ones it reads and this VM has no other use for
+  # them.
+  #
+  # `false` and `[]` are what a release with the check turned off and a release
+  # with nothing to check look like. Anything else is refused rather than
+  # skipped: if what Elixir puts here ever stops being a list of triples, this
+  # has to stop and say so, not quietly pass everything.
+  defp validated(config, provider) do
+    case provider.validate_compile_env do
+      [_ | _] = compile_env -> validate(config, compile_env)
+      false -> {:ok, config}
+      [] -> {:ok, config}
+      other -> {:error, "Cannot check the compile environment, which is #{inspect(other)}."}
+    end
+  end
+
+  defp validate(config, compile_env) do
+    apps = compile_env |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+    Application.put_all_env(Keyword.take(config, apps), persistent: true)
+
+    case Config.Provider.validate_compile_env(compile_env) do
+      :ok -> {:ok, config}
+      {:error, message} -> {:error, message}
     end
   end
 

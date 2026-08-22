@@ -41,8 +41,8 @@ defmodule Castle.PeerTest do
       assert config[:sample][:greeting] == "from the peer"
       assert config[:sample][:untouched] == true
 
-      # Not the node running the test: a VM of its own, with no node name at
-      # all, since the peer talks over its own standard input and output.
+      # Not the node running the test: a VM of its own, and one with no node
+      # name at all, since nothing here starts distribution.
       assert config[:sample][:resolved_in] == "nonode@nohost"
 
       # The configuration is assembled beside sys.config and moved onto it, so
@@ -122,11 +122,10 @@ defmodule Castle.PeerTest do
     test "survives a provider that writes to standard error", %{tmp_dir: root} do
       runtime = Path.join(root, "runtime.exs")
 
-      # Not ASCII, deliberately. The peer's console output and the frames that
-      # carry the answer share one stream, and the framing reserves byte values
-      # that are lead bytes of UTF-8 - so an accented character written straight
-      # out would be read as framing and take the channel down, failing an
-      # install that was about to succeed.
+      # A detached peer's standard error is the null device, so this is only
+      # heard at all because it is relayed through the peer's user process and
+      # over the control connection. Not ASCII, deliberately: what a provider
+      # says about what it could not find has to arrive as written.
       File.write!(runtime, """
       import Config
       IO.puts(:stderr, "café — naïve, and still fine")
@@ -143,6 +142,24 @@ defmodule Castle.PeerTest do
       assert result == {:ok, []}
       assert forwarded =~ "café — naïve, and still fine"
       assert read_sys_config(vsn_dir)[:sample][:greeting] == "resolved"
+    end
+
+    test "survives a provider that writes outside the io system", %{tmp_dir: root} do
+      # The door the standard-error relay cannot cover, and the reason the
+      # control connection is a socket: `:erlang.display_string/1` and a write
+      # straight to a file descriptor, both with characters that a stream
+      # shared with the framing would have been unable to tell from framing.
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config:
+            with_providers(
+              [{PeerProviderStub, raw: "café — naïve ✅", merge: [sample: [ok: true]]}],
+              []
+            )
+        )
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+      assert read_sys_config(vsn_dir)[:sample][:ok] == true
     end
 
     test "leaves a release that has no providers exactly as it was", %{tmp_dir: root} do
@@ -235,26 +252,135 @@ defmodule Castle.PeerTest do
       assert message =~ "Cannot find a release file"
     end
 
-    test "reports a boot script the emulator will not boot", %{tmp_dir: root} do
+    test "gives up on a peer that never boots, at the deadline", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
       File.write!(Path.join(vsn_dir, "preboot.boot"), "not a boot script")
 
-      {result, forwarded} = IoSink.with_group_leader(fn -> Castle.Peer.materialise(vsn_dir) end)
+      # A peer reached over a socket is detached, so nothing it says on the way
+      # down arrives and the origin holds no handle on it: a boot that fails is
+      # noticed when the deadline expires. Which is what this is here to pin -
+      # that there is a deadline, and that it is the one it was given.
+      {elapsed, result} =
+        :timer.tc(fn -> Castle.Peer.materialise(vsn_dir, boot_timeout: 1_000) end, :millisecond)
 
       assert {:error, message} = result
-      assert message =~ "no VM could be started from #{Path.join(vsn_dir, "preboot")}.boot"
-      assert forwarded =~ "Runtime terminating during boot"
+
+      assert message =~
+               "no VM was started from #{Path.join(vsn_dir, "preboot")}.boot within 1000ms"
+
+      assert elapsed < 10_000
+    end
+  end
+
+  describe "the deadlines" do
+    test "give up on a peer that never answers, and stop it", %{tmp_dir: root} do
+      marker = Path.join(root, "peer.pid")
+
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config:
+            with_providers(
+              [{PeerProviderStub, marker: marker, sleep: :infinity}],
+              sample: [greeting: "compile-time"]
+            )
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+
+      {elapsed, result} =
+        :timer.tc(
+          fn -> Castle.Peer.materialise(vsn_dir, resolve_timeout: 1_000) end,
+          :millisecond
+        )
+
+      assert {:error, message} = result
+      assert message =~ "its configuration could not be evaluated"
+      assert elapsed < 30_000
+
+      # A provider still running is not a reason to leave a VM behind, and not a
+      # reason to have written anything either.
+      assert gone?(File.read!(marker))
+      assert File.read!(sys_config) == before
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+  end
+
+  describe "the compile environment" do
+    test "refuses a configuration Elixir would not boot", %{tmp_dir: root} do
+      app = SyntheticRelease.plain_app(Path.join(root, "checked"), :checked_app, "1.0.0")
+
+      vsn_dir =
+        SyntheticRelease.build(root,
+          apps: [app],
+          config:
+            with_providers(
+              [{PeerProviderStub, merge: [checked_app: [mode: "runtime"]]}],
+              [checked_app: [mode: "compile-time"]],
+              # The shape Mix computes from each application's :compile_env, and
+              # passes to Config.Provider.init/3. If Elixir ever stops
+              # representing it this way, init/3 stops producing it, this test
+              # stops seeing a refusal, and it fails - which is the point of
+              # asserting the refusal rather than asserting a call was made.
+              [{:checked_app, [:mode], {:ok, "compile-time"}}]
+            )
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ ":checked_app has a different value set for key :mode"
+      assert message =~ "Compile time value was set to: \"compile-time\""
+      assert message =~ "Runtime value was set to: \"runtime\""
+
+      # Refused before anything was written, so there is nothing for
+      # install_release/1 to have been given.
+      assert File.read!(sys_config) == before
+    end
+
+    test "refuses to proceed when it cannot tell what to check", %{tmp_dir: root} do
+      # Not a shape Elixir produces. If it ever produces another one, the check
+      # has to stop and say so rather than quietly pass every release through -
+      # which is the failure mode that would look exactly like working.
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, []}], [], true)
+        )
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Cannot check the compile environment, which is true."
+    end
+
+    test "accepts a configuration that agrees with what was compiled", %{tmp_dir: root} do
+      app = SyntheticRelease.plain_app(Path.join(root, "checked"), :checked_app, "1.0.0")
+
+      # The same populated check, satisfied. Without this the refusal above
+      # could as easily be a check that fails for everything.
+      vsn_dir =
+        SyntheticRelease.build(root,
+          apps: [app],
+          config:
+            with_providers(
+              [{PeerProviderStub, merge: [checked_app: [other: "runtime"]]}],
+              [checked_app: [mode: "compile-time"]],
+              [{:checked_app, [:mode], {:ok, "compile-time"}}]
+            )
+        )
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+      assert read_sys_config(vsn_dir)[:checked_app][:other] == "runtime"
     end
   end
 
   # The configuration Mix writes for a release with providers: the initialised
   # provider state under the elixir application's key, merged over the
   # compile-time configuration.
-  defp with_providers(providers, config) do
+  defp with_providers(providers, config, validate_compile_env \\ false) do
     Config.Reader.merge(
       config,
       Config.Provider.init(providers, {:system, "RELEASE_SYS_CONFIG", ".config"},
-        validate_compile_env: false
+        validate_compile_env: validate_compile_env
       )
     )
   end

@@ -99,6 +99,41 @@ defmodule Castle.Peer do
   # handed, sees an unconfigured VM. Reading the application environment is not
   # how a provider is given its input.
   #
+  # ## The base
+  #
+  # Every evaluation starts from the configuration Mix wrote, and never from the
+  # result of the last one. Providers are not required to be idempotent, and the
+  # ones people write are not: `if System.get_env("FEATURE"), do: config ...` in
+  # a `runtime.exs` sets a key on a run where the variable is set and says
+  # nothing about it on a run where it is not. Resolving over the previous
+  # result would leave that key behind, so the version an operator commits would
+  # be configured differently from the way it will actually boot - and a boot
+  # resolves over the release's own configuration, every time.
+  #
+  # Which means the release has to keep that configuration. `sys.config` cannot
+  # be it, because `sys.config` is what `release_handler` reads and therefore
+  # what has to hold the resolved result. So the first materialisation of a
+  # version copies it to `sys.config.pristine` and every one after that seeds
+  # from there. The copy is made once, with an exclusive create, so that two
+  # installs racing cannot make it twice and neither can capture anything but
+  # the original.
+  #
+  # This is permanent, not a step in the migration. The `build.config` path this
+  # sits beside has always had a pristine base - `build.config` *is* one, and
+  # `generate/1` only ever reads it - and that is the one thing the old
+  # mechanism got right. When step 3 of castle#13 deletes that path, this is
+  # what carries the property forward. It is deliberately not *called*
+  # `build.config`: that name is the discriminator between the two paths, and a
+  # file by that name would send the release back down the one being removed.
+  #
+  # `sys.config` gains a `CASTLE_MATERIALISED` line when it is written, which is
+  # what makes the invariant checkable: written by Castle, so a base must exist.
+  # A version whose `sys.config` says that and has no base beside it has lost its
+  # original - it was materialised by a Castle that did not keep one, or someone
+  # removed it - and is refused rather than having a once-resolved configuration
+  # captured as though it were pristine. Unpacking the version again restores
+  # what Mix wrote.
+  #
   # ## The compile environment
   #
   # Elixir checks a resolved configuration against the values the release was
@@ -127,6 +162,11 @@ defmodule Castle.Peer do
 
   @boot_script "preboot"
   @sys_config "sys.config"
+
+  # The configuration as the release was built with it, and the line that says
+  # the live one is no longer that.
+  @pristine "sys.config.pristine"
+  @materialised "%% CASTLE_MATERIALISED=true"
 
   # Elixir's own private keys, read and written here because this drives
   # Elixir's own pipeline.
@@ -163,11 +203,12 @@ defmodule Castle.Peer do
   @spec materialise(Path.t(), keyword()) :: result()
   def materialise(rel_vsn_dir, opts \\ []) do
     with {:ok, peer} <- plan(rel_vsn_dir, opts),
-         {:ok, header, config} <- read_sys_config(peer) do
+         {:ok, base} <- base(peer) do
       # A release with no providers has nothing to resolve: what Mix wrote is
       # already its final configuration, and `sys.config` is left exactly as it
-      # is rather than rewritten with the same contents.
-      if declares_providers?(config), do: expand(peer, header), else: {:ok, []}
+      # is rather than rewritten with the same contents. No base is kept for it
+      # either - there is nothing that could change it.
+      if declares_providers?(base.config), do: expand(peer, base), else: {:ok, []}
     end
   end
 
@@ -180,19 +221,24 @@ defmodule Castle.Peer do
 
   # The resolved configuration is assembled beside `sys.config` and then moved
   # onto it, so that the release is never left holding half a configuration: the
-  # copy is what the peer reads and writes, and the rename is the only moment
-  # `sys.config` changes. Copied rather than created so that it inherits
-  # `sys.config`'s mode, which the rename then keeps.
-  defp expand(peer, header) do
-    expand_into_scratch(peer, header)
+  # scratch file is what the peer reads and writes, and the rename is the only
+  # moment `sys.config` changes.
+  defp expand(peer, base) do
+    expand_into_scratch(peer, base)
   after
     File.rm(peer.scratch)
   end
 
-  defp expand_into_scratch(peer, header) do
+  # The copy is of `sys.config` and the contents written over it are the base's,
+  # because a copy carries the mode of what it was copied from and a write does
+  # not: the file that is about to become `sys.config` keeps `sys.config`'s
+  # permissions, whatever an operator has made them, while holding the
+  # configuration the release was built with.
+  defp expand_into_scratch(peer, base) do
     with :ok <- copy(peer.sys_config, peer.scratch),
+         :ok <- write(peer.scratch, base.bytes),
          {:ok, config} <- run(peer),
-         :ok <- write(peer.scratch, [header, format(config)]) do
+         :ok <- write(peer.scratch, [head(base.header), format(config)]) do
       rename(peer.scratch, peer.sys_config)
     end
   end
@@ -336,6 +382,7 @@ defmodule Castle.Peer do
          boot: boot,
          erl: erl,
          sys_config: sys_config,
+         pristine: Path.join(rel_vsn_dir, @pristine),
          scratch: scratch,
          boot_timeout: Keyword.get(opts, :boot_timeout, @boot_timeout),
          resolve_timeout: Keyword.get(opts, :resolve_timeout, @resolve_timeout)
@@ -417,26 +464,79 @@ defmodule Castle.Peer do
        "the emulator to evaluate its configuration with is ambiguous."}
   end
 
-  ## sys.config
+  ## sys.config, and the base it is resolved from
 
-  # The comment header Mix writes above the term is kept, because the launcher
-  # reads it: `RUNTIME_CONFIG=true` is what tells the launcher to boot from a
-  # copy of this file rather than from the file itself, which is what keeps a
-  # release that reboots after configuring it from rewriting itself. Re-emitting
-  # the term without the header would change how the version boots.
-  defp read_sys_config(peer) do
-    with {:ok, contents} <- read(peer.sys_config),
+  # The base is `sys.config.pristine` once there is one, and `sys.config` itself
+  # the first time - which is the only time `sys.config` is known to hold what
+  # Mix wrote.
+  defp base(peer) do
+    if File.regular?(peer.pristine), do: read_base(peer.pristine), else: first_base(peer)
+  end
+
+  defp first_base(peer) do
+    with {:ok, bytes} <- read(peer.sys_config),
          {:ok, config} <- consult(peer.sys_config) do
-      {:ok, header(contents), config}
+      keep_base(peer, %{header: header(bytes), config: config, bytes: bytes})
+    end
+  end
+
+  # Kept only when there is something that could change it: a release with no
+  # providers is never rewritten, so it has nothing to be protected from and
+  # gets no second file in its version directory.
+  defp keep_base(peer, base) do
+    if declares_providers?(base.config) do
+      with :ok <- unmaterialised(peer, base.header), do: keep(peer, base)
+    else
+      {:ok, base}
+    end
+  end
+
+  # `sys.config` says Castle wrote it and there is no base beside it, so the
+  # configuration the release was built with is gone. Capturing what is there
+  # would make one run of the providers permanent - which is the thing the base
+  # exists to prevent - so it is refused instead.
+  defp unmaterialised(peer, header) do
+    if @materialised in header do
+      {:error,
+       "#{peer.sys_config} was written by Castle and #{peer.pristine}, the configuration " <>
+         "it was resolved from, is not there. Every evaluation has to start from the " <>
+         "configuration the release was built with, and what is there now has already " <>
+         "been through one. Unpack #{peer.vsn} again to restore it."}
+    else
+      :ok
+    end
+  end
+
+  # Exclusively, so that of two installs racing neither can overwrite what the
+  # other captured, and whichever loses reads what the winner wrote rather than
+  # a `sys.config` that may already have been resolved.
+  defp keep(peer, base) do
+    case File.write(peer.pristine, base.bytes, [:exclusive]) do
+      :ok -> {:ok, base}
+      {:error, :eexist} -> read_base(peer.pristine)
+      {:error, reason} -> {:error, "Cannot write #{peer.pristine}. #{format_error(reason)}"}
+    end
+  end
+
+  defp read_base(path) do
+    with {:ok, bytes} <- read(path), {:ok, config} <- consult(path) do
+      {:ok, %{header: header(bytes), config: config, bytes: bytes}}
     end
   end
 
   defp header(contents) do
-    contents
-    |> String.split("\n")
-    |> Enum.take_while(&String.starts_with?(&1, "%%"))
-    |> Enum.map(&[&1, ?\n])
+    contents |> String.split("\n") |> Enum.take_while(&String.starts_with?(&1, "%%"))
   end
+
+  # The comment header Mix wrote above the term is kept, because the launcher
+  # reads it: `RUNTIME_CONFIG=true` is what tells the launcher to boot from a
+  # copy of this file rather than from the file itself, which is what keeps a
+  # release that reboots after configuring it from rewriting itself. Re-emitting
+  # the term without the header would change how the version boots. Mix's
+  # `coding` pragma stays first, where the emulator looks for it, and the line
+  # saying Castle wrote this goes after - taken from the base, which never has
+  # one, so it cannot accumulate.
+  defp head(header), do: Enum.map(header ++ [@materialised], &[&1, ?\n])
 
   defp format(config), do: :io_lib.format(~c"~tp.~n", [config])
 

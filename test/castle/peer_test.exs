@@ -3,6 +3,7 @@ defmodule Castle.PeerTest do
   # peer inherits, which belong to the whole node.
   use ExUnit.Case, async: false
 
+  alias Castle.Commands
   alias Castle.IoSink
   alias Castle.PeerProviderStub
   alias Castle.SyntheticRelease
@@ -269,6 +270,115 @@ defmodule Castle.PeerTest do
                "no VM was started from #{Path.join(vsn_dir, "preboot")}.boot within 1000ms"
 
       assert elapsed < 10_000
+    end
+  end
+
+  describe "the pristine base" do
+    # The reason the base exists, in the shape it actually bites: a runtime.exs
+    # that sets a key only when something in the environment says so. Resolved
+    # over the previous result, the key would still be there on the run that
+    # stopped setting it - and the version an operator committed would be
+    # configured differently from the way it boots.
+    @conditional """
+    import Config
+    config :sample, greeting: "resolved"
+    if System.get_env("CASTLE_TEST_FEATURE") do
+      config :sample, feature: true
+    end
+    """
+
+    test "resolves the same way twice, whatever the first pass produced", %{tmp_dir: root} do
+      runtime = Path.join(root, "runtime.exs")
+      File.write!(runtime, @conditional)
+      on_exit(fn -> System.delete_env("CASTLE_TEST_FEATURE") end)
+
+      # Two versions of one release, differing in nothing a provider can see:
+      # the same runtime.exs, so the state the providers carry is identical and
+      # the two configurations are comparable term for term.
+      config = with_providers([{Config.Reader, path: runtime, env: :prod}], [])
+      installed = SyntheticRelease.build(root, vsn: "1.0.0", config: config)
+      control = SyntheticRelease.build(root, vsn: "2.0.0", config: config)
+
+      # Install with the feature, commit without it, which is the sequence an
+      # operator runs.
+      System.put_env("CASTLE_TEST_FEATURE", "1")
+      assert Commands.materialise(installed) == {:ok, []}
+      assert read_sys_config(installed)[:sample][:feature] == true
+
+      System.delete_env("CASTLE_TEST_FEATURE")
+      assert Commands.materialise(installed) == {:ok, []}
+
+      # What one pass from the base produces, which is what booting the version
+      # would produce.
+      assert Commands.materialise(control) == {:ok, []}
+
+      refute Keyword.has_key?(read_sys_config(installed)[:sample], :feature)
+      assert read_sys_config(installed) == read_sys_config(control)
+    end
+
+    test "captures what Mix wrote, once, and never again", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      pristine = Path.join(vsn_dir, "sys.config.pristine")
+      mix_wrote = File.read!(sys_config)
+
+      refute File.exists?(pristine)
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert File.read!(pristine) == mix_wrote
+
+      # Resolved, so no longer what Mix wrote - and the base is not touched by
+      # the second run either.
+      refute File.read!(sys_config) == mix_wrote
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert File.read!(pristine) == mix_wrote
+    end
+
+    test "says so once, however often it is materialised", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      lines = Path.join(vsn_dir, "sys.config") |> File.read!() |> String.split("\n")
+
+      # Mix's pragma stays where the emulator looks for it, and the line that
+      # makes the invariant checkable is added rather than accumulated.
+      assert Enum.at(lines, 0) == "%% coding: utf-8"
+      assert Enum.count(lines, &(&1 == "%% CASTLE_MATERIALISED=true")) == 1
+    end
+
+    test "keeps no base for a release with nothing to resolve", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      refute File.exists?(Path.join(vsn_dir, "sys.config.pristine"))
+    end
+
+    test "refuses a version whose original configuration is gone", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      # What a release materialised by a Castle that kept no base looks like,
+      # and what someone deleting the base leaves behind. Capturing the resolved
+      # configuration as though it were the original is the one thing that must
+      # not happen.
+      pristine = Path.join(vsn_dir, "sys.config.pristine")
+      File.rm!(pristine)
+      resolved = File.read!(Path.join(vsn_dir, "sys.config"))
+
+      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert message =~ "was written by Castle"
+      assert message =~ "Unpack 1.0.0 again to restore it."
+      refute File.exists?(pristine)
+      assert File.read!(Path.join(vsn_dir, "sys.config")) == resolved
     end
   end
 

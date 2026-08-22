@@ -139,6 +139,9 @@ defmodule Castle.SyntheticRelease do
     File.chmod!(erl, 0o755)
   end
 
+  # Idempotent, so that a root can hold more than one version - which is what a
+  # test comparing one materialisation against another needs, since the paths a
+  # provider's state carries have to be the same in both.
   defp link_apps(lib, apps, extra) do
     File.mkdir_p!(lib)
     sources = Map.new(extra, fn {app, _vsn, dir} -> {app, dir} end)
@@ -146,9 +149,13 @@ defmodule Castle.SyntheticRelease do
     for app_spec <- apps do
       {app, vsn} = {elem(app_spec, 0), elem(app_spec, 1)}
       link = Path.join(lib, "#{app}-#{vsn}")
-      File.ln_s!(Map.get_lazy(sources, app, fn -> :code.lib_dir(app) end), link)
+      link_app(link, Map.get_lazy(sources, app, fn -> :code.lib_dir(app) end))
       to_charlist(Path.join(link, "ebin"))
     end
+  end
+
+  defp link_app(link, source) do
+    unless File.exists?(link), do: File.ln_s!(source, link)
   end
 
   # `systools` writes the `.rel` it was given back out beside the boot script,

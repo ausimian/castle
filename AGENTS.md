@@ -44,7 +44,32 @@ Castle's job is configuration and release management on a running node.
   version being installed, which is why this cannot be done on the running
   node, and is what the peer earns.
 
-  Five things about it are load-bearing.
+  Six things about it are load-bearing.
+
+  Every evaluation starts from the configuration Mix wrote, and never from the
+  result of the last one. Providers are not obliged to be idempotent and the
+  ones people write are not — `if System.get_env("FEATURE"), do: config …` in a
+  `runtime.exs` sets a key on a run where the variable is set and says nothing
+  about it on a run where it is not — so resolving over the previous result
+  would leave that key behind, and the version an operator commits would be
+  configured differently from the way it boots. `sys.config` cannot be the base,
+  because that is the file `:release_handler` reads and so the file the resolved
+  result has to land in; the first materialisation therefore copies it to
+  `sys.config.pristine`, with an exclusive create so two racing installs cannot
+  capture anything but the original, and every later one seeds from there. This
+  is permanent design: the `build.config` path has always had a pristine base —
+  `build.config` *is* one — and this is what carries that property forward when
+  step 3 deletes it. It is deliberately not called `build.config`, since that
+  name is the discriminator and would send the release back down the path being
+  removed. `sys.config` gains a `CASTLE_MATERIALISED` comment line, which makes
+  the invariant checkable: written by Castle, so a base must exist. A version
+  that says that and has no base beside it is refused, with the remedy (unpack
+  it again) named, rather than having a once-resolved configuration captured as
+  though it were the original.
+
+  With a pristine base, materialising at `commit` is not merely harmless but
+  right: it produces what a boot at commit time would produce, which is the
+  point of doing it there.
 
   The peer is started linked and stopped on every path out, including the
   failing ones; `wait_boot` and the call both have deadlines, so a peer that
@@ -200,6 +225,14 @@ can shorten is a deadline no test can show is enforced. Two tests give it a
 second and assert that the refusal names it, which is what keeps the deadlines
 from being a claim in a comment.
 
+Idempotence is asserted against a control rather than against a hard-coded
+expectation: two versions of the same release are built in one root, sharing a
+`runtime.exs` so that the state the providers carry is identical, one is
+materialised twice with the environment changing in between — install, then
+commit — and the other once with the environment as it ended up. The two
+`sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
+its symlinks idempotently: a root has to be able to hold two versions.
+
 Two of these tests would pass for the wrong reason if written carelessly, so
 they are written to fail when what they rest on moves. The compile-environment
 test asserts the *refusal*, over provider state built by
@@ -229,15 +262,14 @@ each command prints. Those strings — `Unpacked <vsn> ok`,
   [#13](https://github.com/ausimian/castle/issues/13) has deleted the path that
   reads `build.config`. The peer path does not have it — nothing boots to
   configure a target — but a boot still goes through `generate/1` until then.
-- **The materialised configuration is the next base.** The peer writes the
-  resolved configuration over the target's `sys.config`, because that is the
-  file `:release_handler` reads, so a second `install` or a `commit` of the same
-  version resolves the providers over what the first one wrote rather than over
-  what Mix wrote. For providers that set what they care about — which is what
-  `Config.Reader` over a `runtime.exs` does — that is the same answer. A value a
-  provider sets only conditionally would linger. The interaction between this
-  file and a later cold boot of the same version becomes reachable with
-  forecastle#6 and is to be verified there.
+- **How the materialised `sys.config` and a later cold boot of the same version
+  interact is not verified yet.** Both write the same file. Materialisation
+  resolves from `sys.config.pristine` and leaves no `config_provider_booted`
+  marker behind, so a cold boot re-runs the providers over the materialised
+  result — which is what the issue expects, and what the header Mix wrote is
+  preserved for. It only becomes reachable with
+  [forecastle#6](https://github.com/ausimian/forecastle/issues/6), and belongs
+  there.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

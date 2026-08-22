@@ -599,22 +599,54 @@ defmodule Castle.Peer do
   # momentary blink. Narrowing after creation is not a window that can be made
   # small enough. It has to be a path no one else can reach.
   #
-  # So `work_dir/1` makes a working directory in the version directory and
-  # chmods it 0700 *while it is still empty*, and both files are created inside
-  # it and moved out. `mkdir` takes no mode either, so the directory is created
-  # against the umask and narrowed just as a file would be - but an empty
-  # directory exposes nothing to see, and permission to traverse a directory is
-  # checked on every lookup rather than captured in a descriptor, so a handle
-  # taken on it during that window grants nothing once the chmod has happened.
-  # That is the whole difference between doing this to a directory and doing it
-  # to a file, and it is why the file-level version of this could not be made
-  # airtight however carefully it was written.
+  # So `work_dir/1` makes a working directory in the version directory, chmods it
+  # 0700, and then checks that it is *still empty*. Both files are created inside
+  # it, exclusively, and moved out.
+  #
+  # The check is the part that matters, and it is here because the reasoning it
+  # replaces was wrong. `mkdir` takes no mode either, so the directory is created
+  # against the umask and narrowed afterwards exactly as a file would be, and the
+  # argument for why that was harmless went: an empty directory has nothing in it
+  # to read, and permission to traverse a directory is checked on every lookup
+  # rather than captured in a descriptor, so a handle taken on it during the
+  # window grants nothing once the chmod has happened. Both halves are true. Both
+  # are about *reading*. A directory the umask left group-writable - 0002 is an
+  # ordinary umask and 0000 exists - can be written *into* during that window,
+  # and the names inside it are predictable, so an interloper needs no descriptor
+  # at all: it plants `sys.config` as a symlink to a file it can read, and waits
+  # for the configuration to be written through it.
+  #
+  # Hence create, narrow, then *verify*: a directory that gained an entry before
+  # it was narrowed is removed and the install refused. Verifying does not depend
+  # on the window being harmless, which is the judgement that has now been wrong
+  # five times running in this module.
+  #
+  # Each child is then created exclusively, which refuses rather than follows or
+  # truncates a name that is already there - a regular file, a symlink, or a
+  # symlink to nothing, all `:eexist`, and the last of those without creating
+  # what it pointed at. That is a different property from the mode, and the two
+  # do not substitute for each other: exclusivity says nothing about the
+  # permissions an inode arrives with, so it is no answer to the paragraph above,
+  # and a private directory says nothing about what a name already inside it
+  # would do, so it is no answer to this one.
   #
   # What it does not defend is a version directory other accounts can write to:
   # whoever can create a name there can replace `sys.config` itself, so such a
   # release is compromised before Castle is asked to configure it. The case being
   # defended is the ordinary one, a version directory anyone may traverse and
   # read.
+  #
+  # The other two names this module brings into existence are in the version
+  # directory, and neither can be captured by a name planted at it. `sys.config`
+  # is replaced by `File.rename/2`, which replaces a symlink sitting at that name
+  # with the file rather than writing through it - measured, and the link's target
+  # is left untouched. The base is published by `File.ln/2`, which refuses
+  # `:eexist` against a file, a symlink, or a symlink to nothing, and creates
+  # nothing in the last case. What follows an `:eexist` there is a *read* of
+  # whatever holds the name, so a planted symlink at `sys.config.pristine` would
+  # be read through - but planting it needs write permission on the version
+  # directory, and an account with that could put its own configuration in that
+  # file directly. It is the case above, not a separate one.
   #
   # `write_private/2` is the one way to bring one of these files into existence,
   # and it refuses to create one in a directory that grants anything to group or
@@ -663,30 +695,61 @@ defmodule Castle.Peer do
   # after it was filled looks exactly like one secured before, and a window
   # nothing can stand in is a window nothing can test.
 
-  # Created rather than ensured: a name that is already there is not adopted,
-  # whether it is a directory, a file or a symlink to somewhere else - `mkdir`
-  # refuses all three, and the name carries this process's pid and a number no
-  # other call in it will use again. Chmodded straight afterwards, while the only
-  # thing an interloper could reach through it is the fact that it is empty.
-  #
-  # A directory that could not be secured is removed again rather than used: it
-  # is this call's own, made an instant ago and with nothing in it, so removing it
-  # cannot take anybody else's work with it.
+  # Created rather than ensured: a name that is already there is not adopted, and
+  # `File.mkdir/1` is what refuses it - measured against a directory, a regular
+  # file, a symlink to a directory and a symlink to nothing, all `:eexist`. The
+  # name carries this process's pid and a number no other call in it will use
+  # again, so there is nothing to guess in time either way.
   @doc false
   @spec work_dir(Path.t()) :: {:ok, Path.t()} | {:error, String.t()}
   def work_dir(dir) do
     path = Path.join(dir, "castle-#{System.pid()}-#{unique()}.work")
 
-    with :ok <- mkdir(path) do
-      case chmod(path, 0o700) do
-        :ok ->
-          {:ok, path}
+    with :ok <- mkdir(path), :ok <- secure_dir(path), do: {:ok, path}
+  end
 
-        {:error, _reason} = error ->
-          discard(path)
-          error
-      end
+  # Narrowed and then checked, and removed rather than used if either fails. What
+  # the check catches is an entry that appeared between the `mkdir` and the
+  # `chmod`, which is possible for exactly as long as the umask left the new
+  # directory writable by anyone else - and is worth catching whatever put it
+  # there, since nothing of Castle's is written until afterwards.
+  #
+  # Removing it cannot take anyone else's work with it. It is this call's own,
+  # made an instant ago, and `File.rm_rf/1` unlinks a symlink rather than
+  # following it, so a planted name goes and what it pointed at stays.
+  @doc false
+  @spec secure_dir(Path.t()) :: :ok | {:error, String.t()}
+  def secure_dir(path) do
+    case narrowed_and_empty(path) do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        discard(path)
+        error
     end
+  end
+
+  defp narrowed_and_empty(path) do
+    with :ok <- chmod(path, 0o700), do: empty(path)
+  end
+
+  defp empty(path) do
+    case File.ls(path) do
+      {:ok, []} -> :ok
+      {:ok, entries} -> {:error, occupied(path, entries)}
+      {:error, reason} -> {:error, "Cannot list #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  defp occupied(path, entries) do
+    "Cannot assemble configuration in #{path}. Castle had just created that " <>
+      "directory and written nothing to it, and it already holds " <>
+      "#{Enum.join(entries, ", ")} - so something else can write where this " <>
+      "release's configuration is about to be, and a name planted there is a name " <>
+      "the configuration could be written through. Nothing has been written and " <>
+      "the directory has been removed. Check the umask the release runs under: a " <>
+      "new directory has to be private to the account doing the install."
   end
 
   @doc false
@@ -704,10 +767,35 @@ defmodule Castle.Peer do
     end
   end
 
+  # Exclusively, so that a name already at this path is refused rather than
+  # followed or truncated. `File.write/2` here would do neither safely: pointed at
+  # a symlink it truncates what the link points at, chmods *that* to 0600, and
+  # fills it with the configuration - and creates the target outright if the link
+  # dangles. All three measured. The mode still goes on afterwards, because there
+  # is still no way to ask for it at creation.
   @doc false
   @spec create_private(Path.t()) :: :ok | {:error, String.t()}
   def create_private(path) do
-    with :ok <- write(path, ""), do: chmod(path, 0o600)
+    with :ok <- create_exclusive(path), do: chmod(path, 0o600)
+  end
+
+  defp create_exclusive(path) do
+    case File.open(path, [:write, :exclusive, :raw]) do
+      {:ok, handle} -> close(path, handle)
+      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+    end
+  end
+
+  # Closed rather than written through, because what is written to these files is
+  # written more than once and by more than this module - the peer's own pipeline
+  # writes the scratch too - so no handle could serve all of it. Nothing can reach
+  # the path between the close and the write: the directory holding it has been
+  # verified private.
+  defp close(path, handle) do
+    case File.close(handle) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+    end
   end
 
   @doc false

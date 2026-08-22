@@ -93,15 +93,42 @@ Castle's job is configuration and release management on a running node.
   closes it. Do not go looking for an atomic create-with-mode; there isn't one.
 
   What works is `Castle.Peer.work_dir/1`: `mkdir` a directory in the version
-  directory and chmod it 0700 **while it is still empty**. `mkdir` takes no mode
-  either, so the directory is narrowed after the fact exactly as a file would
-  be — but an empty directory has nothing behind the window, and permission to
-  traverse a directory is checked on every lookup rather than captured at open
-  the way permission to read a file is, so a descriptor taken on it during that
-  window grants nothing once the chmod has happened. That asymmetry is the whole
-  reason this works on a directory and could not be made to work on the file.
-  `plan/2` is the one place the two paths are decided, and it puts both inside
-  the working directory under the names they will have when they leave.
+  directory, chmod it 0700, and then **check that it is still empty**, refusing
+  and removing it if it is not. `plan/2` is the one place the two file paths are
+  decided, and it puts both inside that directory under the names they will have
+  when they leave. Each is created **exclusively**, so a name already at the
+  path is refused rather than followed or truncated.
+
+  **The rule is create, narrow, then verify.** The verification is not
+  decoration and it is not defence in depth: it is there because five successive
+  attempts to reason about whether a window was harmless were all wrong, and a
+  sixth judgement of the same kind is worth nothing. Do not remove it on the
+  grounds that you can see why the window is safe. That is precisely the
+  sentence that preceded each of the previous five findings.
+
+  The particular argument it replaced, so nobody reconstructs it: an empty
+  directory has nothing behind the window, and permission to traverse a
+  directory is checked on every lookup rather than captured at open the way
+  permission to read a file is, so a stale directory descriptor grants nothing
+  once the chmod has happened. Both halves are true, and both are about
+  *reading*. A directory the umask left group-writable — 0002 is an ordinary
+  umask and 0000 exists — can be written *into* during that window, and the child
+  names are predictable, so an interloper needs no descriptor at all: it plants
+  `sys.config` as a symlink to a file it can read and waits for the
+  configuration to arrive through it. Empty is safe to read. It is not safe to
+  write into.
+
+  Exclusivity and privacy are separate properties and neither substitutes for
+  the other. `:exclusive` on the open says nothing about the permissions the
+  inode arrives with, which is why it is no answer to the paragraph above — that
+  was measured, and `{:mode, _}` alongside it is silently ignored. A private
+  directory says nothing about what a name already inside it would do, which is
+  why it is no answer to a planted symlink: `File.write/2` follows one, truncates
+  what it points at, chmods *that* to 0600, fills it with the configuration, and
+  creates the target outright if the link dangles. All measured, all refused by
+  `:exclusive`, which returns `:eexist` for a regular file, a symlink and a
+  dangling symlink alike. `File.mkdir/1` refuses all three too, which is what
+  stops the working directory's own name being taken first.
 
   It does not defend a version directory other accounts can write to: whoever
   can create a name there can replace `sys.config` itself, so that release is
@@ -112,11 +139,11 @@ Castle's job is configuration and release management on a running node.
   anything to group or other, rather than trusting the caller to have picked a
   path inside the working directory — the invariant is in the primitive because
   remembering it at the call sites is what failed, four times over. It is a
-  guard against the next call site and not against an attacker (a directory can
-  be chmodded between the check and the create), and it also catches a
-  filesystem that took the `mkdir` and ignored the `chmod`, where none of this
-  can be honoured and the operator's own mode on `sys.config` would not be
-  either.
+  guard against the next call site rather than against an attacker — a directory
+  can be chmodded between the check and the create, which is the gap the
+  exclusive create covers — and it also catches a filesystem that took the
+  `mkdir` and ignored the `chmod`, where none of this can be honoured and the
+  operator's own mode on `sys.config` would not be either.
 
   Inside the directory the file is still created owner-only at 0600, filled
   through that, and given the model's mode **last** — `write_like/3` is the two
@@ -352,16 +379,24 @@ commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
 
-`Castle.Peer.work_dir/1`, `write_like/3`, `write_private/2`, `create_private/1`
-and `publish/2` are public for the same kind of reason: what they guarantee is
-about *intermediate* states, and a window nothing can stand in is a window
-nothing can test. One test takes `work_dir/1`, `write_like/3` and `publish/2` one
-at a time and looks at the destination in between — where it finds no file, rather
-than a partial one — then checks that publishing again is refused rather than
-allowed to replace. Another calls `work_dir/1` and finds the directory already at
-0700 **and still empty**, which is the pair of facts that makes its own window
-harmless. A third calls `write_private/2` with a path in a directory the host can
-traverse and gets a refusal.
+`Castle.Peer.work_dir/1`, `secure_dir/1`, `write_like/3`, `write_private/2`,
+`create_private/1` and `publish/2` are public for the same kind of reason: what
+they guarantee is about *intermediate* states, and a window nothing can stand in
+is a window nothing can test. One test takes `work_dir/1`, `write_like/3` and
+`publish/2` one at a time and looks at the destination in between — where it finds
+no file, rather than a partial one — then checks that publishing again is refused
+rather than allowed to replace. Another calls `work_dir/1` and finds the
+directory at 0700 and still empty.
+
+`secure_dir/1` is public so that the `mkdir`-to-`chmod` window can be stood in:
+a test creates a directory at 0777, plants a `sys.config` symlink inside it, and
+asserts that securing it is refused, the directory removed and what the symlink
+pointed at untouched. That is the only way to observe it — nothing about the end
+state distinguishes a directory that was empty when it was narrowed from one that
+was not, which is what made the same mistake possible a sixth time at the
+directory after five at the file. A companion test plants a name inside an
+already-private directory and asserts `write_private/2` refuses it rather than
+writing through it, which is the half a private directory does not cover.
 
 Those have to be written that way. The mode a file *ends up* with is the same
 whether it was set before or after the content, so a test of the end state

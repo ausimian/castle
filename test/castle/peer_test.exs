@@ -499,10 +499,9 @@ defmodule Castle.PeerTest do
     test "makes the working directory private before there is anything in it",
          %{tmp_dir: root} do
       # `mkdir` takes no mode, so the directory is narrowed after it exists just
-      # as a file would be - and this is the difference: at the moment it is
-      # secured it is empty, so the window has nothing behind it, and permission
-      # to traverse a directory is re-checked on every lookup rather than
-      # captured in a descriptor the way permission to read a file is.
+      # as a file would be. What makes that sound is not the window being
+      # harmless - it is not, see below - but that the state is checked once the
+      # narrowing is done: 0700, and still empty, or the directory is not used.
       assert {:ok, work} = Castle.Peer.work_dir(root)
 
       assert File.dir?(work)
@@ -510,10 +509,92 @@ defmodule Castle.PeerTest do
       assert mode(work) == 0o700
       assert Bitwise.band(mode(work), 0o077) == 0
 
+      # A name already there is not adopted, whatever it is: File.mkdir/1 is what
+      # refuses it, so no interloper can arrange to own the directory the
+      # configuration is assembled in by getting to its name first.
+      assert File.mkdir(work) == {:error, :eexist}
+
+      link = Path.join(root, "to-work")
+      File.ln_s!(work, link)
+      assert File.mkdir(link) == {:error, :eexist}
+
+      dangling = Path.join(root, "to-nothing")
+      File.ln_s!(Path.join(root, "nowhere"), dangling)
+      assert File.mkdir(dangling) == {:error, :eexist}
+
       # A directory of its own each time, so two installs in one version
       # directory cannot write into each other's.
       assert {:ok, other} = Castle.Peer.work_dir(root)
       refute other == work
+    end
+
+    test "refuses a working directory that was written into before it was narrowed",
+         %{tmp_dir: root} do
+      # The window `mkdir` leaves, stood in. A directory created under a umask
+      # that leaves it group- or world-writable - 0002 is ordinary, 0000 exists -
+      # can be written into before the chmod arrives, and the names inside it are
+      # predictable. So the two steps are taken here one at a time, and something
+      # else gets there in between, which is the only way to observe it: nothing
+      # about the end state distinguishes a directory that was empty when it was
+      # narrowed from one that was not.
+      secret = Path.join(root, "secret")
+      File.write!(secret, "the operator's own file")
+
+      poisoned = Path.join(root, "castle-99999-1.work")
+      File.mkdir!(poisoned)
+      File.chmod!(poisoned, 0o777)
+
+      # What an interloper plants: the name the configuration will be written to,
+      # pointing at a file it can read. It needs no descriptor on the directory
+      # for this - only a name inside it.
+      planted = Path.join(poisoned, "sys.config")
+      File.ln_s!(secret, planted)
+
+      assert {:error, message} = Castle.Peer.secure_dir(poisoned)
+      assert message =~ "sys.config"
+      assert message =~ "Nothing has been written"
+      assert message =~ "umask"
+
+      # Refused, removed, and the file that was pointed at neither truncated nor
+      # written through: rm_rf unlinks a symlink rather than following it.
+      refute File.exists?(poisoned)
+      assert File.read!(secret) == "the operator's own file"
+    end
+
+    test "refuses a name already at the path rather than writing through it",
+         %{tmp_dir: root} do
+      # The other half, and it is not the same half: a private directory says
+      # nothing about a name that is already inside it. Created exclusively, so
+      # this is refused; created with File.write/2, the symlink is followed - the
+      # target is truncated, chmodded to 0600 and filled with the configuration,
+      # for whoever still holds it open to read.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+
+      secret = Path.join(root, "secret")
+      File.write!(secret, "the operator's own file")
+      File.chmod!(secret, 0o644)
+
+      planted = Path.join(work, "sys.config")
+      File.ln_s!(secret, planted)
+
+      assert {:error, message} = Castle.Peer.write_private(planted, "the configuration")
+      assert message =~ "file already exists"
+
+      assert File.read!(secret) == "the operator's own file"
+      assert mode(secret) == 0o644
+
+      # A plain file already at the name, and a symlink to nothing, are refused
+      # the same way - the second without bringing what it points at into
+      # existence.
+      taken = Path.join(work, "taken")
+      File.write!(taken, "already here")
+      assert {:error, _} = Castle.Peer.create_private(taken)
+      assert File.read!(taken) == "already here"
+
+      dangling = Path.join(work, "dangling")
+      File.ln_s!(Path.join(root, "nowhere"), dangling)
+      assert {:error, _} = Castle.Peer.create_private(dangling)
+      refute File.exists?(Path.join(root, "nowhere"))
     end
 
     test "refuses to create one where anyone else could reach it", %{tmp_dir: root} do
@@ -534,19 +615,22 @@ defmodule Castle.PeerTest do
 
     test "is owner-only from the moment it exists", %{tmp_dir: root} do
       assert {:ok, work} = Castle.Peer.work_dir(root)
-      path = Path.join(work, "copy")
-      assert Castle.Peer.create_private(path) == :ok
 
       # Belt to the directory's braces: the file's own mode is never the umask's
       # choice either, so every state it passes through is narrower than the one
       # it ends in rather than merely unreachable. Empty here as well, but that
       # is not what carries the argument - the 0600 is.
-      assert mode(path) == 0o600
-      assert File.read!(path) == ""
+      created = Path.join(work, "created")
+      assert Castle.Peer.create_private(created) == :ok
+      assert mode(created) == 0o600
+      assert File.read!(created) == ""
 
-      assert Castle.Peer.write_private(path, "secret") == :ok
-      assert mode(path) == 0o600
-      assert File.read!(path) == "secret"
+      # And filled through that, so the content is never held by a wider file
+      # than the one it ends up in.
+      filled = Path.join(work, "filled")
+      assert Castle.Peer.write_private(filled, "secret") == :ok
+      assert mode(filled) == 0o600
+      assert File.read!(filled) == "secret"
     end
 
     test "carries an unrestricted mode just as faithfully", %{tmp_dir: root} do

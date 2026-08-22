@@ -85,7 +85,15 @@ defmodule Castle.CommandsTest do
       assert message =~ "This system cannot be upgraded: 1.2.3 is running from a release record"
       assert message =~ "names no applications"
       assert message =~ "running its old code"
-      assert message =~ "Restart the system: the release creates the file before it starts."
+      assert message =~ "make sure the RELEASES file :release_handler reads is"
+
+      # The remedy names the state the file has to be in, not the reason the
+      # record was synthesised. A bare "restart" loops forever on a file that is
+      # present and unreadable, because the hook that creates it is guarded on its
+      # absence - and a case analysis of the cause, which is what this said first,
+      # has no advice at all for a file that was absent at boot and has been
+      # created readably since, where a plain restart is all that is needed.
+      assert message =~ "Absent, or accepted, is what a restart needs."
     end
 
     test "asks the release the system is running, and not another one" do
@@ -136,7 +144,7 @@ defmodule Castle.CommandsTest do
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
       assert message =~ "Cannot unpack sample-1.2.3: 1.2.2 is running from a release record"
-      assert message =~ "Restart the system"
+      assert message =~ "the system has to be restarted"
       assert Stub.calls(:unpack_release) == []
     end
 
@@ -193,7 +201,7 @@ defmodule Castle.CommandsTest do
       assert {:error, message} = Commands.install("1.2.3", handler)
       assert message =~ "Cannot install 1.2.3: 1.2.2 is running from a release record"
       assert message =~ "running its old code"
-      assert message =~ "Restart the system"
+      assert message =~ "the system has to be restarted"
       assert Stub.calls(:install_release) == []
     end
 

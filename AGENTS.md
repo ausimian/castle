@@ -437,6 +437,55 @@ Castle's job is configuration and release management on a running node.
   `RELEASES` file names at least `kernel` and `stdlib`. The remedy the message
   names is a restart, because that is the only thing that changes the answer.
 
+  **A restart is necessary and not always sufficient, so the message names the
+  state the file has to be in rather than just saying "restart".** The record is
+  synthesised when `RELEASES` was missing *or* could not be read, and Forecastle's
+  `env.sh` creates it only when it is **absent** (`[ ! -f ... ]`). So a file that
+  is present and unreadable is stepped over on every start: the node comes back on
+  a freshly synthesised record, the refusal repeats, and an operator following a
+  message that named only the restart would loop forever.
+
+  **State the required condition, not the boot-time cause.** The obvious
+  correction — branch the advice on why the record was synthesised, absent versus
+  unreadable — is wrong in a third case, and that was the first attempt here. The
+  file can have been absent at boot and been created, readably, since: the node
+  keeps its synthesised record either way, so the refusal still fires, and an
+  operator told to check whether the file is "absent" or "present and unreadable"
+  finds it is neither and has no applicable advice. A plain restart is exactly
+  right for them. So the message asks for `releases/RELEASES` to be *absent or
+  consultable* before the restart, which covers all three states and is shorter
+  than the branch it replaced. Do not turn it back into a case analysis of the
+  cause, and do not collapse it into a bare "restart the system" either.
+
+  **Name the authority, not the mechanism — and this is the lesson of five
+  successive corrections to one sentence.** Each named a property of the file and
+  each was necessary but not sufficient, so each admitted a narrower
+  counterexample: "restart" missed a file that was present and unreadable;
+  "present or absent" missed one created readably since boot; "readable" missed
+  malformed terms, because `init/1` reads it with `file:consult/1`; "consultable"
+  missed a file of two valid terms, because `init/1` accepts only `{ok, [Term]}`.
+  There is no reason to think that series had ended, and the hook leaves an
+  existing file alone whatever is in it, so every one of those states loops.
+
+  The message therefore asks for a file **`:release_handler` accepts**, and says
+  that no single property of the file is the test. That cannot be narrowed further
+  because it does not claim a mechanism, and it is what an operator needs anyway:
+  the handler is the thing that has to take the file. Do not "improve" it by
+  substituting whichever internal criterion is current — that is the move that was
+  wrong five times.
+
+  **And it must not name `releases/RELEASES` unqualified**, because that is the
+  file the *release* creates, not necessarily the one the handler reads — see
+  `Castle.Deployment.root_dir/0` and
+  [#23](https://github.com/ausimian/castle/issues/23). Where `RELDIR` or
+  `{sasl, releases_dir}` points elsewhere the two are different files, and the
+  remedy is then genuinely harder rather than merely differently spelled: the
+  hook creates one at the root that the handler will not read, so "absent" does
+  not get the operator out either, and the file the handler *does* read has to be
+  put there by hand. The message says so. When #23 lands and Castle follows those
+  overrides, this paragraph and that sentence both need revisiting — the
+  divergence is the thing being described, and it is the thing #23 removes.
+
   It has to be asked of the node rather than of the filesystem — a file that
   appeared *after* the boot that looked for it passes a shell test and still
   leaves the node on the synthesised record — and it has to be asked *in the call

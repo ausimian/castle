@@ -47,16 +47,17 @@
 - `Castle.unpack/1` and `Castle.install/1` now refuse a system that cannot be
   upgraded from, and refuse it in the same call that would otherwise have done
   the work. `:release_handler` reads `releases/RELEASES` once, as it starts, and
-  when the file is not there it makes a release record up out of the boot
-  script's name and version — a record that names no applications at all.
+  when it cannot — the file absent, or there but not something it accepts — it
+  makes a release record up out of the boot script's name and version — a record
+  that names no applications at all.
   Upgrading a system in that state is worse than being stopped: the install
   reports success, and every application whose version changed but whose code the
   upgrade does not explicitly load goes on running its old code out of the
   directory of the release that was just replaced, until a later `remove` deletes
   it. Nothing can repair the running system afterwards, because creating the file
-  changes no record the node holds — so what the refusal says is to restart,
-  which is the one thing that does: the release creates the file before it
-  starts.
+  changes no record the node holds — so what the refusal says is to restart, with
+  the file either absent or accepted first. See *Fixed* below for what that
+  condition is and why a bare restart is not always enough.
 
   The question is asked of the node's own records rather than of the filesystem,
   which is the only way to see the case where the file exists but the boot that
@@ -70,7 +71,7 @@
   operation that *writes* release records: an unpack on such a node would put the
   made-up record into `releases/RELEASES`, where the next boot would read it back
   as though it belonged there — which takes away the restart that is the way out,
-  since the file is only created when it is missing. Committing and removing are
+  since the file is only created when it is absent. Committing and removing are
   unaffected: neither can write that record back, and refusing them could strand
   a version that was already installed.
 - `Castle.upgradable/0`, which answers the same question on its own, for an
@@ -149,6 +150,24 @@
   providers.
 
 ### Fixed
+
+- The refusal for a system running from a synthesised release record now names a
+  remedy that works. It said to restart, and a restart alone is enough only when
+  the `RELEASES` file `:release_handler` reads is absent or accepted by the handler
+  itself: present, readable and parsing as Erlang terms are each necessary and none
+  of them sufficient. The release creates the file only when it is *absent*, so
+  anything left in place that the handler will not accept is stepped over on every
+  start and the system comes back on another synthesised record. An operator following the old message would have restarted
+  indefinitely.
+
+  The refusal now asks for that file to be absent or accepted before the restart,
+  and identifies it rather than assuming: `releases/RELEASES` under the release
+  root, unless `RELDIR` or the `sasl` `releases_dir` parameter points elsewhere.
+  Where one of those does, the two are different files and a restart cannot fix it
+  on its own — the release creates the one at the root, which the handler will not
+  read — so the file the handler *does* read has to be put there by hand. Castle
+  following those overrides itself is
+  [#23](https://github.com/ausimian/castle/issues/23).
 
 - A release built with `include_erts: false` is now refused, by name and with
   the reason, rather than quietly managing the Erlang installation it happens to

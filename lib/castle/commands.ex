@@ -344,8 +344,20 @@ defmodule Castle.Commands do
            "not be read, when the system booted. An upgrade from that record reports " <>
            "success and leaves any application whose version changed, but whose code the " <>
            "upgrade does not load, running its old code. Creating the file now would not " <>
-           "change the record this node works from. Restart the system: the release " <>
-           "creates the file before it starts."}
+           "change the record this node works from, so the system has to be restarted. " <>
+           "Before restarting, make sure the RELEASES file :release_handler reads is " <>
+           "either absent or one that :release_handler itself accepts - being present, " <>
+           "being readable and parsing as Erlang terms are each necessary and none of " <>
+           "them sufficient, so the test that matters is whether the handler takes it, " <>
+           "not any one property of the file. The release creates that file only when it " <>
+           "is absent, so anything left in place that the handler will not accept is " <>
+           "stepped over on every start and the system comes back on the same " <>
+           "synthesised record. Absent, or accepted, is what a restart needs. That file " <>
+           "is " <>
+           "releases/RELEASES under the release root unless RELDIR or the sasl " <>
+           "releases_dir parameter points elsewhere; where one of those does, the release " <>
+           "creates a file at the root that the handler will not read, so the one it does " <>
+           "read has to be put there by hand."}
 
       nil ->
         {:error, "#{refusal}: no release is running."}

@@ -9,28 +9,24 @@ build-time dependency.
 
 Castle's job is configuration and release management on a running node.
 
-- **`Castle.generate/1`** — reads `build.config` from the release's version
-  directory, folds the stashed config providers over it, and writes the result
-  as that version's `sys.config`. This is the whole reason the pair exists:
-  Mix expands runtime configuration once, at boot, from the version it booted;
-  Castle re-expands it for the version being upgraded *to*, before the relup
-  runs. It is now the older of two ways to do that — see the next bullet — and
-  goes away with the third step of
-  [#13](https://github.com/ausimian/castle/issues/13).
 - **Materialising the target's configuration**, which `install/1` and `commit/1`
-  do before they hand a version to `:release_handler`. Which way depends on
-  whether `releases/<vsn>/build.config` exists, and that is a sound
-  discriminator because it is Forecastle that creates it: assembling a release
-  today strips the providers out, stashes their initialised state under
-  `:castle`, and renames the `sys.config` Mix wrote to `build.config`. So the
-  file is present exactly when the configuration was intercepted at build time,
-  and `Castle.generate/1` is then the only thing that can expand it. Note that
-  it has to be the *presence of `build.config`* rather than the absence of
-  `sys.config`: once such a release has booted once, it has both.
+  do before they hand a version to `:release_handler`. This is the whole reason
+  the pair exists: Mix expands runtime configuration once, at boot, from the
+  version it booted; Castle expands it for the version being upgraded *to*,
+  before the relup runs.
 
-  When it is absent, Mix's pipeline is intact and `Castle.Peer` materialises the
-  configuration instead: a `:peer` reached over a loopback socket — so no epmd,
-  cookie, node name or distribution; the peer reports `nonode@nohost` and
+  There is one way it happens, and there used to be two. The other read a
+  `build.config` — the `sys.config` Forecastle renamed at assembly time, having
+  stripped the providers out and stashed their initialised state under
+  `:castle` — and folded that state over it in the running node, which is
+  `Castle.generate/1`. Both halves of that are gone: forecastle#6 stopped
+  intercepting configuration at build time, and the third step of
+  [#13](https://github.com/ausimian/castle/issues/13) deleted the path that read
+  it. Do not reintroduce either. A release whose providers ran in the version
+  that happens to be running was configured by the wrong code.
+
+  What is left is `Castle.Peer`: a `:peer` reached over a loopback socket — so no
+  epmd, cookie, node name or distribution; the peer reports `nonode@nohost` and
   `is_alive() == false` — booted on the target's own `preboot` script and its
   own emulator, which runs `Config.Provider.boot/1` over the target's own
   provider modules and hands the resolved configuration back to be written.
@@ -214,24 +210,14 @@ Castle's job is configuration and release management on a running node.
   scratch will be created with that group and the mode bits will be honoured
   against it.
 
-  `Castle.Commands.write_sys_config/2`, on the `build.config` path, is the one
-  place this rule is not applied: it creates `sys.config` with the process umask
-  when the file does not exist yet. There is no transient exposure there — the
-  mode it is granted is the mode it keeps — and that path is deleted in step 3,
-  while "nothing observable changes for a release assembled by today's
-  Forecastle" pins its behaviour until then. It is a real gap, recorded rather
-  than fixed here.
-
   A base that cannot be read as a configuration is refused, naming the remedy,
   rather than resolved from: it is preferred to `sys.config` by definition, so
   failing loudly is the only safe thing left.
 
-  This is permanent design: the `build.config` path has always had a pristine
-  base —
-  `build.config` *is* one — and this is what carries that property forward when
-  step 3 deletes it. It is deliberately not called `build.config`, since that
-  name is the discriminator and would send the release back down the path being
-  removed. `sys.config` gains a `CASTLE_MATERIALISED` comment line, which makes
+  This is permanent design: the path this replaced always had a pristine base —
+  `build.config` *was* one, and nothing ever wrote it — and this is what carries
+  that property forward now that it is gone.
+  `sys.config` gains a `CASTLE_MATERIALISED` comment line, which makes
   the invariant checkable: written by Castle, so a base must exist. A version
   that says that and has no base beside it is refused, with the remedy (unpack
   it again) named, rather than having a once-resolved configuration captured as
@@ -285,7 +271,39 @@ Castle's job is configuration and release management on a running node.
 
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
-  can manage its own upgrades.
+  can manage its own upgrades. The directory is derived from `code:root_dir()`,
+  which is the root `:release_handler` resolves *its* relative paths against
+  (`consult/2` is `file:consult(root_dir_relative_path(File))`, and
+  `do_write_release/3` the same), so no caller has to change directory and none
+  should: the working directory was only ever visible to the `File.exists?/1`
+  guard, which is what let the file this looked for and the file OTP wrote be
+  different ones. It calls **`create_RELEASES/3`**, never `/4` with the root
+  supplied: `/3` is `create_RELEASES("", RelDir, RelFile, LibDirs)`, and
+  `check_rel_data/4` stores library directories as `lib/<app>-<vsn>` when the
+  root is empty and as absolute paths under it when it is not — "to make it easy
+  to create a relocatable RELEASES file", in OTP's own words. Passing the root
+  would bake this machine's paths into a file whose point is that it can be
+  moved, and no end-state test would see it.
+- **`Castle.upgradable/0`** — succeeds when the running release can be upgraded
+  from, and refuses when `:release_handler` is working from the record it
+  synthesises for itself. It reads `RELEASES` once, in `init/1`, and when it
+  cannot it builds a record out of the boot script's name and version with the
+  `libs` field left at `[]`. Nothing can replace that afterwards, and creating
+  the file later does not: the first operation that changes anything writes the
+  in-memory record back over it. Upgrading from it is silently wrong rather than
+  refused — the relup's `point_of_no_return` switches code paths for
+  `get_new_libs(Current, New)`, which folds over the *current* release's
+  applications and so yields nothing at all, leaving any application whose
+  version changed but whose code the relup does not load running from the
+  directory of the release being replaced. The discriminator is that empty
+  application list, and it is exact: `which_releases/0` reports
+  `mk_lib_name(Libs)`, `mk_lib_name([]) -> []`, and a record read from a
+  `RELEASES` file names at least `kernel` and `stdlib`. It has to be asked of the
+  node rather than of the filesystem, which is why this is here and not in
+  `bin/castle`: a file that appeared *after* the boot that looked for it passes
+  a shell test for the file and still leaves the node on the synthesised record.
+  The remedy the message names is a restart, because that is the only thing that
+  changes the answer.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
   ahead of `install` and `commit` so that it exists before the version is
@@ -296,9 +314,8 @@ Castle's job is configuration and release management on a running node.
   rebooted, and an emulator upgrade finishes on the way back up, where it can
   still roll back. So Castle answers the question and leaves the asking to
   Forecastle: `bin/castle install` repeats it rather than trusting the reply,
-  from Forecastle 1.0.0 — the revision pinned in this project's `mix.lock`
-  installs with a single rpc and never calls this, so do not describe the
-  polling as something Castle's own integrated state does. Two conditions. The
+  from Forecastle 1.0.0 — so the polling is Forecastle's, and not something
+  Castle's own state does. Two conditions. The
   version is the running release: the
   `current` one, or the `permanent` one when none is current — `install` leaves
   its target `current` and `commit` promotes it, so both count; `unpacked` (a
@@ -335,10 +352,10 @@ re-raises in the calling VM, and only that VM exits. `Castle.Commands` holds
 the operations themselves, returning their outcome instead of acting on the
 process, which is what makes them testable.
 
-Forecastle is what arranges for these to be reachable: it renames `sys.config`
-to `build.config` at assembly time, adds a `:preboot` script that starts
-`:castle`, and writes the `env.sh` fragment and `bin/castle` wrapper that call
-into this module.
+Forecastle is what arranges for these to be reachable: it leaves the
+configuration Mix wrote alone, adds a `:preboot` script that starts `:castle`,
+and writes the `env.sh` fragment and `bin/castle` wrapper that call into this
+module.
 
 ## Layout
 
@@ -370,11 +387,18 @@ into this module.
 `mix test` covers `Castle.Commands` as units. `:release_handler`, `:init` and
 `Castle.Peer` are reached through module arguments that default to them, so the
 tests hand them `Castle.ReleaseHandlerStub`, `Castle.InitStub` and
-`Castle.PeerStub` instead; `generate/1` and `materialise/2` take the version
-directory they work on, so the tests give them a `tmp_dir`.
+`Castle.PeerStub` instead; `materialise/2` takes the version directory it works
+on and `make_releases/2` the releases directory, so the tests give them a
+`tmp_dir` — and neither the commands nor their tests touch the working
+directory, which is what lets them all run async.
 `test/castle_test.exs` drives the boundary itself against the real
 `:release_handler` — which is running under `mix test`, because castle depends
-on sasl — and the real `:init`, naming releases that do not exist.
+on sasl — and the real `:init`, naming releases that do not exist. One test
+there is not about the boundary: `upgradable/0` rests on a claim about OTP's own
+data, that a record read from a `RELEASES` file names applications, so it is
+asserted against the record the real `:release_handler` read from the OTP
+installation's own file rather than against a stub. It fails, loudly and with
+the reason visible, on an installation that has no `releases/RELEASES`.
 
 `test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
 peer would prove nothing about the one thing it exists to do, which is to run a
@@ -478,24 +502,15 @@ each command prints. Those strings — `Unpacked <vsn> ok`,
 
 ## Known limitations
 
-- **Concurrent boots race on `sys.config`.** `generate/1` writes into the
-  version directory, so simultaneous `start`/`daemon`/`eval` invocations with
-  differing environments overwrite each other's configuration. Do not fix this
-  by letting callers choose where the configuration is written: it goes with
-  `generate/1` itself, once
-  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) has stopped
-  intercepting configuration at build time and the third step of
-  [#13](https://github.com/ausimian/castle/issues/13) has deleted the path that
-  reads `build.config`. The peer path does not have it — nothing boots to
-  configure a target — but a boot still goes through `generate/1` until then.
 - **How the materialised `sys.config` and a later cold boot of the same version
-  interact is not verified yet.** Both write the same file. Materialisation
-  resolves from `sys.config.pristine` and leaves no `config_provider_booted`
-  marker behind, so a cold boot re-runs the providers over the materialised
-  result — which is what the issue expects, and what the header Mix wrote is
-  preserved for. It only becomes reachable with
-  [forecastle#6](https://github.com/ausimian/forecastle/issues/6), and belongs
-  there.
+  interact is not verified.** Both write the same file. Materialisation resolves
+  from `sys.config.pristine` and leaves no `config_provider_booted` marker
+  behind, so a cold boot re-runs the providers over the materialised result —
+  which is what the issue expects, and what the header Mix wrote is preserved
+  for. That is now reachable, since
+  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) landed, but
+  nothing asserts it: Forecastle's `:e2e` suite installs and commits without
+  restarting afterwards. It belongs there, because it takes a booted release.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

@@ -41,13 +41,23 @@
   found to be unbootable — which, for an upgrade that restarts, is found on the
   way back up with a rollback as the only way out.
 
-  Which way a release is configured is settled by the release itself. One whose
-  configuration was intercepted at build time — every release assembled by the
-  Forecastle this is released alongside, recognisable by the `build.config` in
-  its version directory — is expanded exactly as it was before, so nothing about
-  installing or committing such a release changes. The new path is taken by a
-  release whose ordinary Mix provider pipeline is intact, which is the shape
-  Forecastle stops interfering with in its own next release.
+  This is how every release is configured now, and the only way: the path that
+  read a `build.config` is gone, along with the build-time interception that
+  produced one — see *Removed* below.
+- `Castle.upgradable/0`, which succeeds when the release the system is running
+  can be upgraded from, and fails when it cannot. `:release_handler` reads
+  `releases/RELEASES` once, as it starts, and when the file is not there it makes
+  a release record up out of the boot script's name and version — a record that
+  names no applications at all. Upgrading a system in that state is worse than
+  being stopped: the install reports success, and every application whose version
+  changed but whose code the upgrade does not explicitly load goes on running its
+  old code out of the directory of the release that was just replaced, until a
+  later `remove` deletes it. Nothing can repair the running system afterwards,
+  because creating the file changes no record the node holds — so what the
+  failure says is to restart the system before upgrading it, which is the one
+  thing that does. The question is asked of the node's own records rather than of
+  the filesystem, which is the only way to see the case where the file exists but
+  the boot that went looking for it was earlier.
 - `Castle.Error`, the exception raised by a release-management command that did
   not succeed.
 - `Castle.running/1`, which succeeds when the version it is given is the
@@ -91,7 +101,12 @@
 ### Changed
 
 - Raised the minimum Elixir requirement to 1.18.
-- `unpack/1`, `install/1`, `commit/1`, `remove/1`, `generate/1` and
+- `make_releases/0` no longer depends on the working directory. It looks for
+  `releases/RELEASES` under the root of the release - `code:root_dir()`, which is
+  the root `:release_handler` resolves its own relative paths against - so the
+  file it looks for is necessarily the file OTP writes, and a caller that used to
+  change directory before calling it no longer has to.
+- `unpack/1`, `install/1`, `commit/1`, `remove/1` and
   `make_releases/0` now fail when the operation fails, instead of printing the
   reason and returning normally. These are invoked over `bin/castle`, which
   reaches them by `rpc`, and by the launcher's preboot `eval`, so the reason
@@ -102,6 +117,17 @@
   node, re-raised in the short-lived VM that made the call, and it is that VM
   which exits. What a successful command reports is unchanged.
 
+### Removed
+
+- `Castle.generate/1`, and with it the path through `install/1` and `commit/1`
+  that read a `build.config`. Expanding the target's configuration by folding
+  provider state stashed at build time over a renamed `sys.config`, in whichever
+  version happens to be running, is what the temporary VM above replaces - and
+  from Forecastle 1.0.0 nothing assembles a release that has a `build.config` to
+  read. Runtime configuration on a normal boot is Mix's own again, and the
+  configuration of a version being installed is expanded by that version's own
+  providers.
+
 ### Fixed
 
 - `install/1` reports the emulator restart that an upgrade to a new emulator,
@@ -109,5 +135,5 @@
   `CaseClauseError` while the upgrade proceeds.
 - `releases/0` reports nothing at all, rather than raising `Enum.EmptyError`,
   when no releases are installed.
-- `generate/1` and `make_releases/0` say what went wrong - which file could not
-  be read or written, and why - rather than raising `MatchError`.
+- `make_releases/0` says what went wrong - which file could not be read or
+  written, and why - rather than raising `MatchError`.

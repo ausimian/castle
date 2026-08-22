@@ -14,41 +14,54 @@ defmodule Castle.Commands do
   # signatures - the ones `bin/castle` and `env.sh` call - unchanged. Nothing
   # outside `Castle` is meant to call this module.
 
-  @app Mix.Project.config()[:app]
-
   @typedoc """
   The outcome of a command: the lines to report, or the message to fail with.
   """
   @type result :: {:ok, [String.t()]} | {:error, String.t()}
 
-  @reldir "releases"
-
   @doc """
-  Creates the `RELEASES` file from the running permanent release.
+  Creates the `RELEASES` file in `rel_dir` from the running permanent release.
 
-  Does nothing if the file already exists. Resolved relative to the current
-  working directory, which the caller is expected to have set to the release
-  root.
+  Does nothing if the file already exists.
+
+  The directory is an argument because that is what makes this testable, not
+  because a caller gets to choose it: `Castle.make_releases/0` derives it from
+  the root of the release, and that is the same root `:release_handler` resolves
+  its own relative paths against - `code:root_dir()`, never the working
+  directory (`consult/2` is `file:consult(root_dir_relative_path(File))`, and
+  `do_write_release/3` the same). So the working directory was only ever visible
+  to the check below, which is what made it possible for the file this looked
+  for and the file `create_RELEASES/3` wrote to be different ones. Nothing has
+  to change directory to call this, and nothing should.
   """
-  @spec make_releases(module()) :: result()
-  def make_releases(handler \\ :release_handler) do
-    releases_file = Path.join(@reldir, "RELEASES")
+  @spec make_releases(Path.t(), module()) :: result()
+  def make_releases(rel_dir, handler \\ :release_handler) do
+    releases_file = Path.join(rel_dir, "RELEASES")
 
     if File.exists?(releases_file) do
       {:ok, []}
     else
       {:ok, _} = Application.ensure_all_started(:sasl)
-      create_releases(releases_file, handler)
+      create_releases(rel_dir, releases_file, handler)
     end
   end
 
-  defp create_releases(releases_file, handler) do
+  # `create_RELEASES/3`, and not `/4` with the root supplied. The three-argument
+  # form is `create_RELEASES("", RelDir, RelFile, LibDirs)`, and `check_rel_data/4`
+  # keys off that empty `Root`: with it, each library directory is stored as
+  # `lib/<app>-<vsn>` - "to make it easy to create a relocatable RELEASES file",
+  # in OTP's own comment - and with a root supplied, as an absolute path under
+  # it. Passing the root would therefore write this machine's paths into a file
+  # whose whole point is that it can be moved, and nothing would notice until it
+  # was.
+  defp create_releases(rel_dir, releases_file, handler) do
     case handler.which_releases(:permanent) do
       [{name, vsn, _, _}] ->
-        relfile = Path.join([@reldir, vsn, "#{name}.rel"])
+        # `vsn` arrives as a charlist, which `Path.join/1` takes as chardata.
+        relfile = Path.join([rel_dir, vsn, "#{name}.rel"])
 
         # credo:disable-for-next-line Credo.Check.Readability.FunctionNames
-        case handler.create_RELEASES(to_charlist(@reldir), relfile, []) do
+        case handler.create_RELEASES(to_charlist(rel_dir), relfile, []) do
           :ok ->
             {:ok, []}
 
@@ -67,90 +80,95 @@ defmodule Castle.Commands do
   end
 
   @doc """
-  Materialises the configuration of the release in `rel_vsn_dir`.
+  Confirms that the running release can be upgraded from.
 
-  Two shapes of release reach this, and the presence of `build.config` is what
-  tells them apart. Forecastle used to intercept configuration at assembly time:
-  it stripped the providers out of the release, stashed their initialised state
-  under this application's key, and renamed the `sys.config` Mix had written to
-  `build.config`. The only thing that can expand a release assembled that way is
-  `generate/1`, folding the stashed state over the file it was taken from - and
-  the presence of `build.config` is the test rather than the absence of
-  `sys.config`, because from its first boot onwards such a release has both:
-  writing one beside the other is what `generate/1` does.
+  `:release_handler` reads `RELEASES` once, in its `init/1`, and when it cannot
+  it synthesises a record out of the boot script's name and version instead -
+  `[#release{name = Name, vsn = Vsn, status = permanent}]`, leaving the `libs`
+  field at its default of `[]`. That record is what such a node then works from
+  for the rest of its life: creating the file afterwards changes nothing, and
+  the first operation that changes anything writes the in-memory record straight
+  back over it.
 
-  A release Mix configured normally has its providers where Mix put them and its
-  `sys.config` under the name Mix gave it, and nothing has been renamed - so the
-  absence of `build.config` says the pipeline is intact, and the target can be
-  evaluated the way Elixir intends: in a VM of its own, running its own
-  providers, which is what `Castle.Peer` does. That is the only sound way to do
-  it, since a provider module can differ between the version that is running and
-  the version being installed.
+  Upgrading from it is worse than being refused. The library directories a
+  release is loaded from are switched at the relup's `point_of_no_return`, which
+  calls `code:replace_path/2` over `get_new_libs(Current, New)` - the
+  applications whose version differs between the two records - together with
+  whichever ones the relup loads object code for. `get_new_libs/2` folds over
+  the *current* release's applications, and `get_new_libs([], _) -> []`, so a
+  record that names none switches nothing: an application whose version did
+  change, and whose code the relup does not explicitly load, goes on running
+  from the library directory of the release being replaced. The install reports
+  success, and that directory survives until the next `remove` deletes it.
 
-  The module is an argument for the same reason `:release_handler` is: so that a
-  test can watch which way the decision went without starting a VM.
+  The discriminator is that empty application list, and it is exact: the list
+  `which_releases/0` reports is `mk_lib_name(Libs)`, `mk_lib_name([]) -> []`,
+  and a record read from `RELEASES` names at least `kernel` and `stdlib`. So
+  emptiness distinguishes the synthesised record from every real one, which
+  testing for the file cannot do - a file that appeared after the boot that
+  looked for it passes that test and leaves the node on the synthesised record
+  regardless.
+
+  The running release is selected the way `running/3` selects it: the `current`
+  one if there is one, and the `permanent` one otherwise.
   """
-  @spec materialise(Path.t(), module()) :: result()
-  def materialise(rel_vsn_dir, peer \\ Castle.Peer) do
-    cond do
-      File.exists?(Path.join(rel_vsn_dir, "build.config")) ->
-        generate(rel_vsn_dir)
+  @spec upgradable(module()) :: result()
+  def upgradable(handler \\ :release_handler) do
+    case running_release(handler) do
+      {_vsn, [_ | _]} ->
+        {:ok, []}
 
-      File.dir?(rel_vsn_dir) ->
-        peer.materialise(rel_vsn_dir)
-
-      true ->
+      {vsn, []} ->
         {:error,
-         "Cannot configure #{Path.basename(rel_vsn_dir)}: #{rel_vsn_dir} does not exist. " <>
-           "Unpack the release first."}
+         "#{vsn} is running from a release record OTP built from the boot script, which " <>
+           "names no applications: releases/RELEASES was missing, or could not be read, " <>
+           "when the system booted. An upgrade from it reports success and leaves any " <>
+           "application whose version changed, but whose code the upgrade does not load, " <>
+           "running its old code. Creating the file now would not change the record this " <>
+           "node works from. Restart the system before upgrading it: the release creates " <>
+           "the file before it starts."}
+
+      nil ->
+        {:error, "No release is running, so this system cannot be upgraded."}
     end
   end
 
   @doc """
-  Expands the build-time configuration in `rel_vsn_dir` into its `sys.config`.
+  Materialises the configuration of the release in `rel_vsn_dir`.
 
-  The directory is the version directory of the release being configured. It is
-  an argument because that is what makes this testable, not because a caller
-  gets to choose it: `Castle.generate/1` derives it from the running release,
-  and the configuration always lands beside the `build.config` it came from.
+  There is one way to do that: in a VM of its own, running the target's own
+  provider modules over the target's own configuration, which is what
+  `Castle.Peer` does. A provider module can differ between the version that is
+  running and the version being installed - that is precisely what an upgrade
+  may change - so the running node is not a place where the answer can be
+  worked out.
+
+  What is left here is the one thing the peer cannot say well: that there is no
+  release at that path to configure at all. The peer's own refusals name a file
+  the version is missing, or something its providers did - the right answers for
+  a release that was unpacked and then damaged, and the wrong ones for a version
+  that was never unpacked. So a version directory that is absent, empty, or not
+  a directory is answered here, where the remedy can be named.
+
+  The module is an argument for the same reason `:release_handler` is: so that a
+  test can see what was asked of it without starting a VM.
   """
-  @spec generate(Path.t()) :: result()
-  def generate(rel_vsn_dir) do
-    build_config_path = Path.join(rel_vsn_dir, "build.config")
+  @spec materialise(Path.t(), module()) :: result()
+  def materialise(rel_vsn_dir, peer \\ Castle.Peer) do
+    case File.ls(rel_vsn_dir) do
+      {:ok, [_ | _]} ->
+        peer.materialise(rel_vsn_dir)
 
-    case :file.consult(to_charlist(build_config_path)) do
-      {:ok, [build_config]} ->
-        write_sys_config(rel_vsn_dir, expand(build_config))
-
-      {:ok, terms} ->
-        {:error, "Cannot read #{build_config_path}: expected one term, found #{length(terms)}."}
-
-      {:error, reason} ->
-        {:error, "Cannot read #{build_config_path}. #{:file.format_error(reason)}"}
+      nothing ->
+        {:error,
+         "Cannot configure #{Path.basename(rel_vsn_dir)}: " <>
+           "#{rel_vsn_dir} #{describe(nothing)}. Unpack the release first."}
     end
   end
 
-  # The providers were stashed under this application's key at build time, each
-  # already initialised, so all that is left to do is fold them over the
-  # configuration they were built from. An exception raised by a provider - a
-  # runtime.exs that cannot find what it needs, say - is left to propagate: it
-  # describes the problem better than anything that could be said here.
-  defp expand(build_config) do
-    build_config
-    |> Keyword.get(@app, [])
-    |> Keyword.get(:config_providers, [])
-    |> Enum.reduce(build_config, fn {mod, arg}, cfg -> mod.load(cfg, arg) end)
-  end
-
-  defp write_sys_config(rel_vsn_dir, sys_config) do
-    path = Path.join(rel_vsn_dir, "sys.config")
-    contents = :io_lib.format(~c"%% coding: utf-8~n~tp.~n", [sys_config])
-
-    case File.write(path, contents) do
-      :ok -> {:ok, []}
-      {:error, reason} -> {:error, "Cannot write #{path}. #{:file.format_error(reason)}"}
-    end
-  end
+  defp describe({:ok, []}), do: "is empty"
+  defp describe({:error, :enoent}), do: "does not exist"
+  defp describe({:error, reason}), do: "cannot be read (#{:file.format_error(reason)})"
 
   @doc """
   Unpacks the named release tarball.
@@ -219,9 +237,9 @@ defmodule Castle.Commands do
   @spec running(String.t(), module(), module()) :: result()
   def running(vsn, handler \\ :release_handler, init \\ :init) do
     case running_release(handler) do
-      ^vsn -> booted(vsn, init)
+      {^vsn, _apps} -> booted(vsn, init)
       nil -> {:error, "#{vsn} is not the running release. No release is running."}
-      other -> {:error, "#{vsn} is not the running release. #{other} is."}
+      {other, _apps} -> {:error, "#{vsn} is not the running release. #{other} is."}
     end
   end
 
@@ -257,17 +275,22 @@ defmodule Castle.Commands do
     end
   end
 
+  # The release the system is running, as `{vsn, apps}`, or `nil` if there is
+  # none. The application list comes along because `upgradable/1` reads it, and
+  # both questions have to be asked of the same release.
   defp running_release(handler) do
-    releases = for {_, vsn, _, status} <- handler.which_releases(), do: {to_string(vsn), status}
+    releases =
+      for {_, vsn, apps, status} <- handler.which_releases(),
+          do: {to_string(vsn), apps, status}
 
     case with_status(releases, :current) do
       nil -> with_status(releases, :permanent)
-      vsn -> vsn
+      running -> running
     end
   end
 
   defp with_status(releases, wanted) do
-    Enum.find_value(releases, fn {vsn, status} -> if status == wanted, do: vsn end)
+    Enum.find_value(releases, fn {vsn, apps, status} -> if status == wanted, do: {vsn, apps} end)
   end
 
   @doc """

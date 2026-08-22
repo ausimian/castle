@@ -131,13 +131,12 @@ defmodule Castle.Peer do
   # nothing reads it: an install cannot tell its own leftovers from another
   # install's work in progress, so it does not try.
   #
-  # This is permanent, not a step in the migration. The `build.config` path this
-  # sits beside has always had a pristine base - `build.config` *is* one, and
-  # `generate/1` only ever reads it - and that is the one thing the old
-  # mechanism got right. When step 3 of castle#13 deletes that path, this is
-  # what carries the property forward. It is deliberately not *called*
-  # `build.config`: that name is the discriminator between the two paths, and a
-  # file by that name would send the release back down the one being removed.
+  # This is permanent, not a step in the migration. The path this replaced -
+  # `Castle.generate/1`, folding provider state stashed at build time over the
+  # `build.config` Forecastle renamed `sys.config` to - always had a pristine
+  # base, because `build.config` *was* one and nothing ever wrote it. That was
+  # the one thing the old mechanism got right, and this is what carries the
+  # property forward now that it is gone.
   #
   # `sys.config` gains a `CASTLE_MATERIALISED` line when it is written, which is
   # what makes the invariant checkable: written by Castle, so a base must exist.
@@ -399,7 +398,7 @@ defmodule Castle.Peer do
     sys_config = Path.join(rel_vsn_dir, @sys_config)
     vsn = Path.basename(rel_vsn_dir)
 
-    with :ok <- regular(sys_config, "#{vsn} has neither a sys.config nor a build.config."),
+    with :ok <- regular(sys_config, "#{vsn} has no configuration to evaluate."),
          :ok <- regular(boot <> ".boot", "Its configuration is evaluated on that script."),
          {:ok, erl} <- emulator(root, rel_vsn_dir),
          {:ok, work} <- work_dir(rel_vsn_dir) do

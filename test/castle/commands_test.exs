@@ -93,7 +93,7 @@ defmodule Castle.CommandsTest do
       # absence - and a case analysis of the cause, which is what this said first,
       # has no advice at all for a file that was absent at boot and has been
       # created readably since, where a plain restart is all that is needed.
-      assert message =~ "Absent, or consultable, is what a restart needs."
+      assert message =~ "Absent, or accepted, is what a restart needs."
     end
 
     test "asks the release the system is running, and not another one" do

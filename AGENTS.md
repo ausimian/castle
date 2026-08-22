@@ -457,13 +457,22 @@ Castle's job is configuration and release management on a running node.
   than the branch it replaced. Do not turn it back into a case analysis of the
   cause, and do not collapse it into a bare "restart the system" either.
 
-  **"Consultable", not "readable".** `init/1` reads the file with
-  `file:consult/1`, so a file whose permissions are fine but whose terms are
-  malformed fails in exactly the same way, and the hook leaves an existing file
-  alone whatever is in it. An earlier version of this message said "readable" and
-  so sent an operator with a corrupt `RELEASES` round the same restart loop it was
-  written to end. Permissions are not the whole of the condition; being
-  consultable by `:release_handler` is.
+  **Name the authority, not the mechanism — and this is the lesson of five
+  successive corrections to one sentence.** Each named a property of the file and
+  each was necessary but not sufficient, so each admitted a narrower
+  counterexample: "restart" missed a file that was present and unreadable;
+  "present or absent" missed one created readably since boot; "readable" missed
+  malformed terms, because `init/1` reads it with `file:consult/1`; "consultable"
+  missed a file of two valid terms, because `init/1` accepts only `{ok, [Term]}`.
+  There is no reason to think that series had ended, and the hook leaves an
+  existing file alone whatever is in it, so every one of those states loops.
+
+  The message therefore asks for a file **`:release_handler` accepts**, and says
+  that no single property of the file is the test. That cannot be narrowed further
+  because it does not claim a mechanism, and it is what an operator needs anyway:
+  the handler is the thing that has to take the file. Do not "improve" it by
+  substituting whichever internal criterion is current — that is the move that was
+  wrong five times.
 
   **And it must not name `releases/RELEASES` unqualified**, because that is the
   file the *release* creates, not necessarily the one the handler reads — see

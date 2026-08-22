@@ -47,16 +47,16 @@
 - `Castle.unpack/1` and `Castle.install/1` now refuse a system that cannot be
   upgraded from, and refuse it in the same call that would otherwise have done
   the work. `:release_handler` reads `releases/RELEASES` once, as it starts, and
-  when it cannot — the file absent, or there but not consultable — it makes a
-  release record up out of the boot script's name and version — a record that
-  names no applications at all.
+  when it cannot — the file absent, or there but not something it accepts — it
+  makes a release record up out of the boot script's name and version — a record
+  that names no applications at all.
   Upgrading a system in that state is worse than being stopped: the install
   reports success, and every application whose version changed but whose code the
   upgrade does not explicitly load goes on running its old code out of the
   directory of the release that was just replaced, until a later `remove` deletes
   it. Nothing can repair the running system afterwards, because creating the file
   changes no record the node holds — so what the refusal says is to restart, with
-  the file either absent or consultable first. See *Fixed* below for what that
+  the file either absent or accepted first. See *Fixed* below for what that
   condition is and why a bare restart is not always enough.
 
   The question is asked of the node's own records rather than of the filesystem,
@@ -153,14 +153,14 @@
 
 - The refusal for a system running from a synthesised release record now names a
   remedy that works. It said to restart, and a restart alone is enough only when
-  the `RELEASES` file `:release_handler` reads is absent or consultable: it reads
-  that file with `file:consult/1`, so a malformed one fails just as an unreadable
-  one does, and the release creates the file only when it is *absent* — so
-  anything left in place that cannot be consulted is stepped over on every start
-  and the system comes back on another synthesised record. An operator following the old message would have restarted
+  the `RELEASES` file `:release_handler` reads is absent or accepted by the handler
+  itself: present, readable and parsing as Erlang terms are each necessary and none
+  of them sufficient. The release creates the file only when it is *absent*, so
+  anything left in place that the handler will not accept is stepped over on every
+  start and the system comes back on another synthesised record. An operator following the old message would have restarted
   indefinitely.
 
-  The refusal now asks for that file to be absent or consultable before the restart,
+  The refusal now asks for that file to be absent or accepted before the restart,
   and identifies it rather than assuming: `releases/RELEASES` under the release
   root, unless `RELDIR` or the `sasl` `releases_dir` parameter points elsewhere.
   Where one of those does, the two are different files and a restart cannot fix it

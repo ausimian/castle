@@ -159,8 +159,11 @@
   succeeds, puts the release records of unrelated deployments in one file;
   `unpack/1`, `install/1` and `commit/1` wrote into the installation, and
   `remove/1` deleted out of it. Each of those now fails instead, with a message
-  naming both directories and saying that a release which does not bring its own
-  ERTS cannot be upgraded by Castle.
+  naming both directories and saying that the deployment cannot be upgraded by
+  Castle. The same refusal covers a release that *did* bring its ERTS but is run
+  with `ERL_ROOTDIR` set, which the release's own `erl` honours ahead of its
+  location: the divergence is what makes an upgrade unsafe, and the message
+  names both causes rather than asserting either.
 
   The remedy is to build the release with its ERTS included, because there is no
   other directory Castle could be pointed at: `:release_handler` anchors its own
@@ -175,9 +178,12 @@
   refusal.
 
   Note that this reaches the launcher's preboot step, which is where
-  `make_releases/0` is called: on such a release that step now reports a failure
-  on every start, and whether a start continues past it is Forecastle's `env.sh`
-  to decide.
+  `make_releases/0` is called, so such a deployment reports the refusal on every
+  start rather than once: the file the step looks for never appears, so the step
+  runs again each time. The start itself continues - Forecastle's `env.sh` warns
+  and carries on rather than refusing a start - so the cost is a warning and a
+  short-lived VM per boot, on a deployment that could not have been upgraded
+  either way.
 - `install/1` reports the emulator restart that an upgrade to a new emulator,
   or to a new kernel, stdlib or sasl, needs - rather than failing with a
   `CaseClauseError` while the upgrade proceeds.

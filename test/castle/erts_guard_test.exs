@@ -39,7 +39,10 @@ defmodule Castle.ErtsGuardTest do
         error = assert_raise(Castle.Error, command)
 
         assert error.message =~ refusal
-        assert error.message =~ "this release does not bring its own ERTS."
+
+        assert error.message =~
+                 "the deployment and the emulator's root are different directories."
+
         assert error.message =~ "cannot be upgraded by Castle."
       end
     end

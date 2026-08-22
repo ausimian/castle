@@ -387,7 +387,10 @@ defmodule Castle.CommandsTest do
       handler = real_record(:unpack_release, {:ok, ~c"1.2.3"})
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler, erts_less())
-      assert message =~ "Cannot unpack sample-1.2.3: this release does not bring its own ERTS."
+
+      assert message =~
+               "Cannot unpack sample-1.2.3: the deployment and the emulator's root are different directories."
+
       assert message =~ "/opt/app"
       assert message =~ "/usr/lib/erlang"
       assert message =~ "cannot be upgraded by Castle."
@@ -403,7 +406,10 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", handler, erts_less())
-      assert message =~ "Cannot install 1.2.3: this release does not bring its own ERTS."
+
+      assert message =~
+               "Cannot install 1.2.3: the deployment and the emulator's root are different directories."
+
       assert Stub.calls(:install_release) == []
       assert Stub.calls(:which_releases) == []
     end
@@ -412,7 +418,10 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:make_permanent, :ok)
 
       assert {:error, message} = Commands.commit("1.2.3", handler, erts_less())
-      assert message =~ "Cannot commit 1.2.3: this release does not bring its own ERTS."
+
+      assert message =~
+               "Cannot commit 1.2.3: the deployment and the emulator's root are different directories."
+
       assert Stub.calls(:make_permanent) == []
     end
 
@@ -423,7 +432,10 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:remove_release, :ok)
 
       assert {:error, message} = Commands.remove("1.2.3", handler, erts_less())
-      assert message =~ "Cannot remove 1.2.3: this release does not bring its own ERTS."
+
+      assert message =~
+               "Cannot remove 1.2.3: the deployment and the emulator's root are different directories."
+
       assert Stub.calls(:remove_release) == []
     end
 
@@ -435,7 +447,7 @@ defmodule Castle.CommandsTest do
       peer = PeerStub.stub({:ok, []})
 
       assert {:error, message} = Commands.materialise(dir, peer, erts_less())
-      assert message =~ "does not bring its own ERTS."
+      assert message =~ "the deployment and the emulator's root are different directories."
       assert PeerStub.calls() == []
     end
 

@@ -331,6 +331,17 @@ Castle's job is configuration and release management on a running node.
   ERTS — one spelled through a `current` symlink, say — is the one failure here
   an operator cannot work around.
 
+  **What it detects is the divergence, not the missing ERTS, and the message says
+  so.** `include_erts: false` is the cause in almost every case but it is not the
+  only one: the `erl` shim Mix writes is `ROOTDIR="${ERL_ROOTDIR:-…}"`, so an
+  `ERL_ROOTDIR` in the environment diverges the two on a release that *did* bring
+  its ERTS. The refusal is still correct there — `:release_handler` really would
+  resolve into `ERL_ROOTDIR` — so the message names both levers and asserts
+  neither. Two directories are the whole of the evidence, and a cause stated
+  confidently from them is how a correct refusal comes to be read as a bug in the
+  guard. `Castle.Peer.emulator/2` is the one that may still speak of ERTS in
+  particular, because it looked for the emulator and it was not there.
+
   It gates `make_releases/0` — before the `File.exists?` check, not after,
   because an Erlang installation built by OTP has a `releases/RELEASES` of its
   own and looking first would find it, report success and never say anything —

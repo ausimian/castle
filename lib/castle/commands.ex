@@ -154,15 +154,27 @@ defmodule Castle.Commands do
     end
   end
 
+  # What is observed is a divergence, and the message says that rather than
+  # naming a cause. `include_erts: false` is the cause in almost every case, but
+  # it is not the only one that produces this state: the `erl` shim Mix writes is
+  # `ROOTDIR="${ERL_ROOTDIR:-...}"`, so an `ERL_ROOTDIR` set in the environment
+  # diverges the two on a release that *did* bring its ERTS. The refusal is still
+  # right there - `:release_handler` really would resolve into `ERL_ROOTDIR` - so
+  # the message names both levers and asserts neither, which is all the two facts
+  # it has can honestly support. Reporting the wrong cause confidently is how a
+  # correct refusal gets read as a bug in the guard.
   defp refused_root(refusal, release_root, root_dir) do
-    "#{refusal}: this release does not bring its own ERTS. It runs the emulator " <>
-      "in #{root_dir}, so that - and not the deployment in #{release_root} - is " <>
-      "where :release_handler resolves releases/RELEASES, releases/<vsn> and " <>
-      "every lib/<app>-<vsn> it reads, writes or deletes. Reading and writing " <>
-      "the deployment instead is not an option: the handler's own paths are " <>
-      "anchored to the emulator's root, so records kept anywhere else would be " <>
-      "records it never sees. Rebuild the release without include_erts: false. " <>
-      "A release that does not bring its own ERTS cannot be upgraded by Castle."
+    "#{refusal}: the deployment and the emulator's root are different " <>
+      "directories. This system runs the emulator in #{root_dir}, so that - and " <>
+      "not the deployment in #{release_root} - is where :release_handler " <>
+      "resolves releases/RELEASES, releases/<vsn> and every lib/<app>-<vsn> it " <>
+      "reads, writes or deletes. Reading and writing the deployment instead is " <>
+      "not an option: the handler's own paths are anchored to the emulator's " <>
+      "root, so records kept anywhere else would be records it never sees. " <>
+      "Usually this means the release was built with include_erts: false and so " <>
+      "ships no emulator of its own; rebuild it with its ERTS included. " <>
+      "Otherwise ERL_ROOTDIR is set, which the release's own erl honours ahead " <>
+      "of its location. Either way this deployment cannot be upgraded by Castle."
   end
 
   # Whether two paths name the same directory. Both of the ones compared here

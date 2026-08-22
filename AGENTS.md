@@ -388,6 +388,15 @@ puts the other on the peer's code path, and asserts that the answer came from
 the peer's. Peer cleanup is asserted from outside: a provider records the
 operating system pid of the VM it ran in, and the test waits for it to go.
 
+It builds the **unpacked** shape by default, and the assembled one only when a
+test asks for it — because the peer path is reached from `install` and `commit`,
+so every version it is asked to configure was unpacked from a tarball. The two
+shapes differ in the version directory's release files: Mix assembles one,
+`<name>.rel`, while unpacking leaves two, that one plus the `<name>-<vsn>.rel`
+`release_handler` copies in beside it. A fixture that only built the assembled
+shape is how `Castle.Peer` came to refuse every unpacked release as ambiguous,
+having been reviewed seven times against a directory the peer path never meets.
+
 `Castle.Peer.materialise/2` takes `:boot_timeout` and `:resolve_timeout` for the
 same reason `Castle.Commands` takes the module to talk to — a deadline nothing
 can shorten is a deadline no test can show is enforced. Two tests give it a

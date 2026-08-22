@@ -453,9 +453,17 @@ Castle's job is configuration and release management on a running node.
   operator told to check whether the file is "absent" or "present and unreadable"
   finds it is neither and has no applicable advice. A plain restart is exactly
   right for them. So the message asks for `releases/RELEASES` to be *absent or
-  readable* before the restart, which covers all three states and is shorter than
-  the branch it replaced. Do not turn it back into a case analysis of the cause,
-  and do not collapse it into a bare "restart the system" either.
+  consultable* before the restart, which covers all three states and is shorter
+  than the branch it replaced. Do not turn it back into a case analysis of the
+  cause, and do not collapse it into a bare "restart the system" either.
+
+  **"Consultable", not "readable".** `init/1` reads the file with
+  `file:consult/1`, so a file whose permissions are fine but whose terms are
+  malformed fails in exactly the same way, and the hook leaves an existing file
+  alone whatever is in it. An earlier version of this message said "readable" and
+  so sent an operator with a corrupt `RELEASES` round the same restart loop it was
+  written to end. Permissions are not the whole of the condition; being
+  consultable by `:release_handler` is.
 
   **And it must not name `releases/RELEASES` unqualified**, because that is the
   file the *release* creates, not necessarily the one the handler reads — see

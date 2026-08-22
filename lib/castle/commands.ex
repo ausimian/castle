@@ -346,14 +346,16 @@ defmodule Castle.Commands do
            "upgrade does not load, running its old code. Creating the file now would not " <>
            "change the record this node works from, so the system has to be restarted. " <>
            "Before restarting, make sure the RELEASES file :release_handler reads is " <>
-           "either readable or absent, because the release creates that file only when it " <>
-           "is absent - an unreadable one left in place is stepped over on every start " <>
-           "and the system comes back on the same synthesised record. Absent, or " <>
-           "readable, is what a restart needs. That file is releases/RELEASES under the " <>
-           "release root unless RELDIR or the sasl releases_dir parameter points " <>
-           "elsewhere; where one of those does, the release creates a file at the root " <>
-           "that the handler will not read, so the one it does read has to be put there " <>
-           "and made readable by hand."}
+           "either absent or one it can consult - it reads that file with file:consult/1, " <>
+           "so a malformed one fails exactly as an unreadable one does, and permissions " <>
+           "are not the whole of the condition. The release creates that file only when " <>
+           "it is absent, so anything left in place that cannot be consulted is stepped " <>
+           "over on every start and the system comes back on the same synthesised " <>
+           "record. Absent, or consultable, is what a restart needs. That file is " <>
+           "releases/RELEASES under the release root unless RELDIR or the sasl " <>
+           "releases_dir parameter points elsewhere; where one of those does, the release " <>
+           "creates a file at the root that the handler will not read, so the one it does " <>
+           "read has to be put there by hand."}
 
       nil ->
         {:error, "#{refusal}: no release is running."}

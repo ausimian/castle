@@ -356,17 +356,23 @@ defmodule Castle.PeerTest do
 
       assert Commands.materialise(vsn_dir) == {:ok, []}
       refute File.exists?(Path.join(vsn_dir, "sys.config.pristine"))
+
+      # Not a working directory either, though one was made: a release that needs
+      # nothing written still gets it cleared away.
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
     end
 
     test "publishes a base nothing can read before it is complete", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
       sys_config = Path.join(vsn_dir, "sys.config")
       pristine = Path.join(vsn_dir, "sys.config.pristine")
-      staging = Path.join(vsn_dir, "castle-staged.pristine")
       bytes = File.read!(sys_config)
 
-      # The two steps materialisation takes, taken here one at a time, which is
+      # The three steps materialisation takes, taken here one at a time, which is
       # the only way to stand between them and look.
+      assert {:ok, work} = Castle.Peer.work_dir(vsn_dir)
+      staging = Path.join(work, "sys.config.pristine")
+
       assert Castle.Peer.write_like(staging, bytes, sys_config) == :ok
       assert File.read!(staging) == bytes
 
@@ -389,7 +395,8 @@ defmodule Castle.PeerTest do
       # Refuses rather than replaces, which is what makes the loser of a race
       # safe: it is told the name is taken, and goes on to read what is at that
       # name instead of publishing its own copy.
-      loser = Path.join(vsn_dir, "castle-staged-later.pristine")
+      assert {:ok, other} = Castle.Peer.work_dir(vsn_dir)
+      loser = Path.join(other, "sys.config.pristine")
       assert Castle.Peer.write_like(loser, "not what was published", sys_config) == :ok
       assert Castle.Peer.publish(loser, pristine) == :taken
       assert File.read!(pristine) == bytes
@@ -481,28 +488,183 @@ defmodule Castle.PeerTest do
   end
 
   # Every file this module brings into existence holds a release's
-  # configuration, so every one of them goes through `write_like/3`. What that
-  # buys is not the mode the file ends up with - `File.cp/2` gets that right too
-  # - but that there is no moment at which the file holds a configuration and is
-  # wider than the `sys.config` it came from. A test that looks only at the end
-  # state cannot tell the two apart, which is how the exposure survived being
-  # fixed once.
+  # configuration, so every one of them is made inside a working directory
+  # nothing else can reach and moved out of it. What that buys is not the mode
+  # the file ends up with - `File.cp/2` gets that right too - but that there is
+  # no moment at which the file holds a configuration and is reachable by anyone
+  # the `sys.config` it came from would exclude. A test that looks only at the
+  # end state cannot tell the two apart, which is how the exposure survived
+  # being fixed twice.
   describe "writing a file that holds configuration" do
-    test "is owner-only from the moment it exists", %{tmp_dir: root} do
+    test "makes the working directory private before there is anything in it",
+         %{tmp_dir: root} do
+      # `mkdir` takes no mode, so the directory is narrowed after it exists just
+      # as a file would be. What makes that sound is not the window being
+      # harmless - it is not, see below - but that the state is checked once the
+      # narrowing is done: 0700, and still empty, or the directory is not used.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+
+      assert File.dir?(work)
+      assert File.ls!(work) == []
+      assert mode(work) == 0o700
+      assert Bitwise.band(mode(work), 0o077) == 0
+
+      # A name already there is not adopted, whatever it is: File.mkdir/1 is what
+      # refuses it, so no interloper can arrange to own the directory the
+      # configuration is assembled in by getting to its name first.
+      assert File.mkdir(work) == {:error, :eexist}
+
+      link = Path.join(root, "to-work")
+      File.ln_s!(work, link)
+      assert File.mkdir(link) == {:error, :eexist}
+
+      dangling = Path.join(root, "to-nothing")
+      File.ln_s!(Path.join(root, "nowhere"), dangling)
+      assert File.mkdir(dangling) == {:error, :eexist}
+
+      # A directory of its own each time, so two installs in one version
+      # directory cannot write into each other's.
+      assert {:ok, other} = Castle.Peer.work_dir(root)
+      refute other == work
+    end
+
+    test "refuses a working directory that was written into before it was narrowed",
+         %{tmp_dir: root} do
+      # The window `mkdir` leaves, stood in. A directory created under a umask
+      # that leaves it group- or world-writable - 0002 is ordinary, 0000 exists -
+      # can be written into before the chmod arrives, and the names inside it are
+      # predictable. So the two steps are taken here one at a time, and something
+      # else gets there in between, which is the only way to observe it: nothing
+      # about the end state distinguishes a directory that was empty when it was
+      # narrowed from one that was not.
+      secret = Path.join(root, "secret")
+      File.write!(secret, "the operator's own file")
+
+      poisoned = Path.join(root, "castle-99999-1.work")
+      File.mkdir!(poisoned)
+      File.chmod!(poisoned, 0o777)
+
+      # What an interloper plants: the name the configuration will be written to,
+      # pointing at a file it can read. It needs no descriptor on the directory
+      # for this - only a name inside it.
+      planted = Path.join(poisoned, "sys.config")
+      File.ln_s!(secret, planted)
+
+      assert {:error, message} = Castle.Peer.secure_dir(poisoned)
+      assert message =~ "sys.config"
+      assert message =~ "Nothing has been written"
+      assert message =~ "umask"
+
+      # Refused, removed, and the file that was pointed at neither truncated nor
+      # written through: rm_rf unlinks a symlink rather than following it.
+      refute File.exists?(poisoned)
+      assert File.read!(secret) == "the operator's own file"
+    end
+
+    test "refuses a name already at the path rather than writing through it",
+         %{tmp_dir: root} do
+      # The other half, and it is not the same half: a private directory says
+      # nothing about a name that is already inside it. Created exclusively, so
+      # this is refused; created with File.write/2, the symlink is followed - the
+      # target is truncated, chmodded to 0600 and filled with the configuration,
+      # for whoever still holds it open to read.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+
+      secret = Path.join(root, "secret")
+      File.write!(secret, "the operator's own file")
+      File.chmod!(secret, 0o644)
+
+      planted = Path.join(work, "sys.config")
+      File.ln_s!(secret, planted)
+
+      assert {:error, message} = Castle.Peer.write_private(planted, "the configuration")
+      assert message =~ "file already exists"
+
+      assert File.read!(secret) == "the operator's own file"
+      assert mode(secret) == 0o644
+
+      # A plain file already at the name, and a symlink to nothing, are refused
+      # the same way - the second without bringing what it points at into
+      # existence.
+      taken = Path.join(work, "taken")
+      File.write!(taken, "already here")
+      assert {:error, _} = Castle.Peer.write_private(taken, "the configuration")
+      assert File.read!(taken) == "already here"
+
+      dangling = Path.join(work, "dangling")
+      File.ln_s!(Path.join(root, "nowhere"), dangling)
+      assert {:error, _} = Castle.Peer.write_private(dangling, "the configuration")
+      refute File.exists?(Path.join(root, "nowhere"))
+    end
+
+    test "writes through the handle it created, never through the name again",
+         %{tmp_dir: root} do
+      # What the exclusive open establishes is that the name was free. Closing the
+      # handle and reopening the same name to place the content gives that back:
+      # anything able to create the name in between is handed the configuration.
+      # So the two steps are taken here one at a time, and the name is swapped in
+      # between - the only way to tell content that went to the inode from content
+      # that went to the name, since with the name left alone the two are
+      # identical.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "sys.config")
+
+      assert {:ok, handle} = Castle.Peer.create_exclusive(path)
+
+      decoy = Path.join(root, "decoy")
+      File.write!(decoy, "the interloper's own file")
+      File.chmod!(decoy, 0o644)
+      File.rm!(path)
+      File.ln_s!(decoy, path)
+
+      assert Castle.Peer.fill(handle, path, "the configuration") == :ok
+
+      # The configuration went to the inode the exclusive open created, and the
+      # file the name now points at never saw it. That is the whole claim.
+      assert File.read!(decoy) == "the interloper's own file"
+
+      # The mode did go by path, because OTP has nothing that sets a mode on an
+      # open file. So the decoy has been narrowed to 0600 - Castle setting the
+      # permissions of a file that is not its own, which is the acknowledged cost
+      # of that asymmetry and is a nuisance rather than a disclosure: the content
+      # is what an onlooker wanted, and the content never came this way.
+      assert mode(decoy) == 0o600
+      assert File.read!(decoy) == "the interloper's own file"
+    end
+
+    test "refuses to create one where anyone else could reach it", %{tmp_dir: root} do
+      # The mistake this class of finding kept taking: a file holding
+      # configuration brought into existence next to `sys.config`, in a directory
+      # the whole host can traverse, where the mode it is created with is the
+      # umask's to choose and `chmod` cannot take back what a reader already has
+      # open. Refused rather than narrowed afterwards.
+      File.chmod!(root, 0o755)
       path = Path.join(root, "copy")
-      assert Castle.Peer.create_private(path) == :ok
 
-      # The state that has to hold for as long as the file is being written:
-      # nothing granted to group or other, so whatever the mode it ends up with,
-      # there is no window in which the contents are readable by anyone that
-      # mode would exclude. Empty here as well, but that is not what carries the
-      # argument - the 0600 is.
-      assert mode(path) == 0o600
-      assert File.read!(path) == ""
+      assert {:error, message} = Castle.Peer.write_private(path, "secret")
+      assert message =~ root
+      assert message =~ "0755"
+      assert message =~ "owner-only"
+      refute File.exists?(path)
+    end
 
-      assert Castle.Peer.write_private(path, "secret") == :ok
-      assert mode(path) == 0o600
-      assert File.read!(path) == "secret"
+    test "is owner-only once it exists", %{tmp_dir: root} do
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+
+      # Belt to the directory's braces: the file's own mode is not left as the
+      # umask's choice. It is the directory that makes the content unreachable
+      # while it is being written - the mode cannot, since there is no way to ask
+      # for one before the file exists and none to set one on the open handle it
+      # is written through.
+      filled = Path.join(work, "filled")
+      assert Castle.Peer.write_private(filled, "secret") == :ok
+      assert mode(filled) == 0o600
+      assert File.read!(filled) == "secret"
+
+      # And once is all it can be written: the name is taken, and a second call
+      # will not reopen it.
+      assert {:error, _} = Castle.Peer.write_private(filled, "again")
+      assert File.read!(filled) == "secret"
     end
 
     test "carries an unrestricted mode just as faithfully", %{tmp_dir: root} do
@@ -510,7 +672,8 @@ defmodule Castle.PeerTest do
       File.write!(model, "[].\n")
       File.chmod!(model, 0o644)
 
-      path = Path.join(root, "copy")
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "copy")
       assert Castle.Peer.write_like(path, "not secret", model) == :ok
       assert mode(path) == 0o644
     end
@@ -523,10 +686,17 @@ defmodule Castle.PeerTest do
       File.write!(model, "[].\n")
       File.chmod!(model, 0o440)
 
-      path = Path.join(root, "copy")
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "copy")
       assert Castle.Peer.write_like(path, "read only", model) == :ok
       assert mode(path) == 0o440
       assert File.read!(path) == "read only"
+
+      # And it can still be moved out from under that mode, and cleared away
+      # afterwards: both need permission on the directory rather than on the
+      # file.
+      assert File.rename(path, Path.join(root, "moved")) == :ok
+      assert File.rm_rf(work) == {:ok, [work]}
     end
 
     test "gives the file the configuration is resolved into sys.config's mode",
@@ -543,7 +713,7 @@ defmodule Castle.PeerTest do
             with_providers(
               [
                 {PeerProviderStub,
-                 mode_of: Path.join(vsn_dir, "castle-*.config"),
+                 mode_of: Path.join(vsn_dir, "castle-*.work/sys.config"),
                  mode_to: recorded,
                  merge: [sample: [n: 1]]}
               ],
@@ -557,6 +727,91 @@ defmodule Castle.PeerTest do
 
       assert String.to_integer(File.read!(recorded), 8) == 0o600
       assert mode(Path.join(vsn_dir, "sys.config")) == 0o600
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
+    end
+
+    test "keeps both files out of reach for the whole of their working life",
+         %{tmp_dir: root} do
+      # The intermediate state, which is the only state that can be wrong here:
+      # by the time materialisation returns both files have been moved to their
+      # final names or removed, and the end state is the same whether they were
+      # exposed on the way or not. So the version directory is walked from inside
+      # the peer, at the moment when the staged base and the file the
+      # configuration is being resolved into both exist and both hold one.
+      vsn_dir = Path.join([root, "releases", "1.0.0"])
+      snapshot = Path.join(root, "snapshot")
+
+      ^vsn_dir =
+        SyntheticRelease.build(root,
+          config:
+            with_providers(
+              [
+                {PeerProviderStub,
+                 snapshot_of: Path.join(vsn_dir, "**"),
+                 snapshot_to: snapshot,
+                 merge: [sample: [n: 1]]}
+              ],
+              []
+            )
+        )
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
+
+      seen = snapshot(snapshot, vsn_dir)
+
+      # One working name in the version directory, and it is a directory that
+      # grants nothing to group or other - so no path leads to what is inside it,
+      # and a descriptor taken on it while it was still empty leads nowhere
+      # either, traversal being checked on every lookup rather than at open.
+      assert [{work, :directory, work_mode}] = Enum.filter(seen, &match?({_, :directory, _}, &1))
+
+      assert work =~ ~r"^castle-\d+-\d+\.work$"
+      assert work_mode == 0o700
+      assert Bitwise.band(work_mode, 0o077) == 0
+
+      # And both files that hold configuration are inside it. Nothing Castle made
+      # is loose in the version directory beside the release's own files: the
+      # names it publishes there - sys.config, and the base it has already
+      # linked - are the release's, and every one of the others is under the
+      # working directory.
+      assert Enum.sort(for {"castle-" <> _ = path, :regular, _} <- seen, do: path) ==
+               [Path.join(work, "sys.config"), Path.join(work, "sys.config.pristine")]
+
+      assert Enum.sort(for {path, :regular, _} <- seen, do: path) ==
+               Enum.sort([
+                 "preboot.boot",
+                 "preboot.script",
+                 "synthetic.rel",
+                 "sys.config",
+                 "sys.config.pristine",
+                 Path.join(work, "sys.config"),
+                 Path.join(work, "sys.config.pristine")
+               ])
+
+      # And it is gone afterwards, along with what was in it.
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+
+    test "leaves a working directory that is not its own alone", %{tmp_dir: root} do
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      # What an install interrupted before it could move its files out leaves
+      # behind. It is indistinguishable from another install's work in progress -
+      # which may be about to publish from it - so it is neither read nor
+      # removed, exactly as a staged base that was never published is not.
+      orphan = Path.join(vsn_dir, "castle-99999-1.work")
+      File.mkdir!(orphan)
+      File.chmod!(orphan, 0o700)
+      File.write!(Path.join(orphan, "sys.config"), "")
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      assert File.dir?(orphan)
+      assert File.ls!(orphan) == ["sys.config"]
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
     end
 
@@ -584,6 +839,11 @@ defmodule Castle.PeerTest do
       assert Commands.materialise(vsn_dir) == {:ok, []}
       assert mode(sys_config) == 0o440
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
+
+      # Including the working directory, whose contents were read-only too:
+      # removing a file needs permission on the directory holding it rather than
+      # on the file, the same fact the rename onto sys.config rests on.
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
     end
   end
 
@@ -717,6 +977,14 @@ defmodule Castle.PeerTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  # What the peer saw, as paths relative to the version directory.
+  defp snapshot(path, relative_to) do
+    assert {:ok, [entries]} = :file.consult(to_charlist(path))
+
+    for {seen, type, mode} <- entries,
+        do: {Path.relative_to(to_string(seen), relative_to), type, mode}
+  end
 
   defp read_sys_config(vsn_dir) do
     assert {:ok, [config]} = :file.consult(to_charlist(Path.join(vsn_dir, "sys.config")))

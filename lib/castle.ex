@@ -34,7 +34,7 @@ defmodule Castle do
   end
 
   def install(vsn) when is_binary(vsn) do
-    generate(vsn)
+    materialise(vsn)
     report!(Commands.install(vsn))
   end
 
@@ -43,7 +43,7 @@ defmodule Castle do
   end
 
   def commit(vsn) when is_binary(vsn) do
-    generate(vsn)
+    materialise(vsn)
     report!(Commands.commit(vsn))
   end
 
@@ -55,10 +55,20 @@ defmodule Castle do
     report!(Commands.releases())
   end
 
-  # The version directory of the running release. Where the configuration is
-  # written is derived from the release that is running, never chosen by the
-  # caller - see castle#13, which materialises target configuration in a peer
-  # rather than extending this path.
+  # Makes sure the target version's configuration exists before the version is
+  # handed to `:release_handler`, and fails here if it cannot be made to. It
+  # runs ahead of both operations that need it, and everything that can refuse
+  # to go on - a peer that will not start, a boot script that is not there, a
+  # provider that raises - refuses from inside this call, which is to say before
+  # `install_release/1` has been asked for anything. Nothing after that point
+  # may fail without saying that an install happened.
+  defp materialise(vsn), do: report!(Commands.materialise(rel_vsn_dir(vsn)))
+
+  # The version directory of the release being operated on, under the root of
+  # the release that is running. Derived, never chosen by the caller: which file
+  # the configuration lands in is a property of the installation, not an
+  # argument. It resolves for any version the running release knows about,
+  # because `:release_handler` unpacks every version into this same root.
   defp rel_vsn_dir(vsn), do: Path.join([:code.root_dir(), "releases", vsn])
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)

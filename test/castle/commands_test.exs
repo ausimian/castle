@@ -4,7 +4,59 @@ defmodule Castle.CommandsTest do
   alias Castle.Commands
   alias Castle.ConfigProviderStub
   alias Castle.InitStub
+  alias Castle.PeerStub
   alias Castle.ReleaseHandlerStub, as: Stub
+
+  describe "materialise/2" do
+    @tag :tmp_dir
+    test "expands build.config, and starts nothing, when there is one", %{tmp_dir: dir} do
+      write_build_config(dir,
+        castle: [config_providers: [{ConfigProviderStub, merge: [sample: [greeting: "runtime"]]}]],
+        sample: [greeting: "build"]
+      )
+
+      # The peer stub has no registered reply, so it raises if it is reached.
+      assert Commands.materialise(dir, PeerStub) == {:ok, []}
+      assert PeerStub.calls() == []
+      assert read_sys_config(dir)[:sample][:greeting] == "runtime"
+    end
+
+    @tag :tmp_dir
+    test "keeps expanding build.config once it has written a sys.config", %{tmp_dir: dir} do
+      # Which is the state every release assembled by today's Forecastle is in
+      # from its first boot onwards, so the discriminator has to be the presence
+      # of build.config and not the absence of sys.config.
+      write_build_config(dir, sample: [greeting: "build"])
+      File.write!(Path.join(dir, "sys.config"), "[].\n")
+
+      assert Commands.materialise(dir, PeerStub) == {:ok, []}
+      assert PeerStub.calls() == []
+      assert read_sys_config(dir) == [sample: [greeting: "build"]]
+    end
+
+    @tag :tmp_dir
+    test "hands a release whose pipeline is intact to the peer", %{tmp_dir: dir} do
+      assert Commands.materialise(dir, PeerStub.stub({:ok, []})) == {:ok, []}
+      assert PeerStub.calls() == [dir]
+    end
+
+    @tag :tmp_dir
+    test "reports what the peer could not do", %{tmp_dir: dir} do
+      peer = PeerStub.stub({:error, "DATABASE_URL is not set"})
+
+      assert Commands.materialise(dir, peer) == {:error, "DATABASE_URL is not set"}
+    end
+
+    @tag :tmp_dir
+    test "reports a version that has not been unpacked", %{tmp_dir: dir} do
+      missing = Path.join(dir, "9.9.9")
+
+      assert {:error, message} = Commands.materialise(missing, PeerStub)
+      assert message =~ "Cannot configure 9.9.9"
+      assert message =~ "Unpack the release first"
+      assert PeerStub.calls() == []
+    end
+  end
 
   describe "generate/1" do
     @tag :tmp_dir

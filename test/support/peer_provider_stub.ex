@@ -16,7 +16,9 @@ defmodule Castle.PeerProviderStub do
   #     descriptor, which is the door native code would use and the one no relay
   #     can cover,
   #   * `sleep:` a number of milliseconds or `:infinity`, to take longer than it
-  #     is allowed to, and
+  #     is allowed to,
+  #   * `mode_of:` a glob and `mode_to:` a path, to record the permissions of the
+  #     one file the glob matches, and
   #   * `raise:` a message, to fail the way a provider that cannot find what it
   #     needs fails.
 
@@ -35,6 +37,10 @@ defmodule Castle.PeerProviderStub do
       write_outside_the_io_system(raw)
     end
 
+    if glob = opts[:mode_of] do
+      record_mode(glob, opts[:mode_to])
+    end
+
     if wait = opts[:sleep] do
       Process.sleep(wait)
     end
@@ -44,6 +50,15 @@ defmodule Castle.PeerProviderStub do
     end
 
     Config.Reader.merge(config, Keyword.get(opts, :merge, []))
+  end
+
+  # The permissions of the one file the glob matches, written where the test can
+  # read them. Taken from inside the peer, while the pipeline is running, which
+  # is the only place the file the configuration is being resolved into can be
+  # seen at all: it is renamed away before materialisation returns.
+  defp record_mode(glob, to) do
+    [path] = Path.wildcard(glob)
+    File.write!(to, Integer.to_string(Bitwise.band(File.stat!(path).mode, 0o777), 8))
   end
 
   defp write_outside_the_io_system(text) do

@@ -69,10 +69,33 @@ Castle's job is configuration and release management on a running node.
   its own copy. Staging that never gets published is left where it is: an
   install cannot tell its own leftovers from another install's work in progress,
   so it does not try, and nothing reads that name. Do not "tidy up" stray
-  `castle-*.pristine` files in code for the same reason. The mode is carried
-  because the base holds the configuration and the serialised provider state Mix
-  shipped, which is as much reason to restrict it as `sys.config` has — and an
-  operator who has restricted `sys.config` means it about both.
+  `castle-*.pristine` files in code for the same reason.
+
+  **Every file this module creates goes through `Castle.Peer.write_like/3`, and
+  new ones must too.** Each of them holds a release's configuration — the base,
+  and the scratch copy the providers resolve into — so none of them may be more
+  readable than the `sys.config` it came from or is about to become: an operator
+  who restricts that file has said something, and it has to hold for the copies.
+  The primitive sets the mode while the file is still empty, so there is no
+  moment at which it holds a configuration and is wider than it should be.
+
+  The ordering lives inside the primitive rather than at the call sites because
+  remembering it at the call sites is what failed, three times. `File.write/2`
+  creates with the process umask and never looks at a mode. `File.cp/2` *does*
+  carry the mode — and was adopted here for that reason — but it writes the whole
+  file first and narrows it afterwards (`:file.copy`, then `copy_file_mode/2` at
+  `file.ex:1285`), which is the same exposure with a shorter window. The end
+  state is identical either way, which is exactly why no test of the end state
+  caught it. Do not add a fourth way to write one of these files; extend the
+  primitive.
+
+  `Castle.Commands.write_sys_config/2`, on the `build.config` path, is the one
+  place this rule is not applied: it creates `sys.config` with the process umask
+  when the file does not exist yet. There is no transient exposure there — the
+  mode it is granted is the mode it keeps — and that path is deleted in step 3,
+  while "nothing observable changes for a release assembled by today's
+  Forecastle" pins its behaviour until then. It is a real gap, recorded rather
+  than fixed here.
 
   A base that cannot be read as a configuration is refused, naming the remedy,
   rather than resolved from: it is preferred to `sys.config` by definition, so
@@ -255,12 +278,21 @@ commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
 
-`Castle.Peer.stage/3` and `publish/2` are public for the same kind of reason: the
-window between them is what makes a concurrent install safe, and a window
-nothing can stand in is a window nothing can test. One test takes the two steps
-one at a time and looks at the destination in between — where it finds no file,
-rather than a partial one — then checks that publishing again is refused rather
-than allowed to replace.
+`Castle.Peer.write_like/3`, `create_like/2` and `publish/2` are public for the
+same kind of reason: what they guarantee is about *intermediate* states, and a
+window nothing can stand in is a window nothing can test. One test takes
+`write_like/3` and `publish/2` one at a time and looks at the destination in
+between — where it finds no file, rather than a partial one — then checks that
+publishing again is refused rather than allowed to replace. Another calls
+`create_like/2` and finds the mode already restricted with the file still empty,
+which is the state that makes the mode window unobservable-with-contents.
+
+That second one has to be written that way. The mode a file *ends up* with is
+the same whether it was set before or after the content, so a test of the end
+state passes either way — which is how the exposure survived a round of review
+that had already identified the class. The in-peer observation of the scratch
+file's mode is a regression guard on the site that was wrong, not a
+discriminator: it passes against the version that had the window too.
 
 Two of these tests would pass for the wrong reason if written carelessly, so
 they are written to fail when what they rest on moves. The compile-environment

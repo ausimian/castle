@@ -117,7 +117,7 @@ defmodule Castle.Peer do
   # from there.
   #
   # The copy is staged under a name of its own, given the mode `sys.config` has,
-  # and published by hard link - `stage/3` then `publish/2`. A link is atomic and
+  # and published by hard link - `write_like/3` then `publish/2`. A link is atomic and
   # refuses rather than replaces, so what appears at that name is a file that was
   # already complete, and of two installs racing the loser is told the name is
   # taken and reads what the winner published rather than its own copy. Writing
@@ -241,14 +241,13 @@ defmodule Castle.Peer do
     File.rm(peer.scratch)
   end
 
-  # The copy is of `sys.config` and the contents written over it are the base's,
-  # because a copy carries the mode of what it was copied from and a write does
-  # not: the file that is about to become `sys.config` keeps `sys.config`'s
-  # permissions, whatever an operator has made them, while holding the
-  # configuration the release was built with.
+  # The scratch file is created through `write_like/3`, so it has
+  # `sys.config`'s permissions from before it has any contents - and it holds
+  # the most sensitive thing here, the configuration with every provider's
+  # answer resolved into it. The writes after that leave the mode alone, and the
+  # rename carries it onto `sys.config`.
   defp expand_into_scratch(peer, base) do
-    with :ok <- copy(peer.sys_config, peer.scratch),
-         :ok <- write(peer.scratch, base.bytes),
+    with :ok <- write_like(peer.scratch, base.bytes, peer.sys_config),
          {:ok, config} <- run(peer),
          :ok <- write(peer.scratch, [head(base.header), format(config)]) do
       rename(peer.scratch, peer.sys_config)
@@ -557,7 +556,7 @@ defmodule Castle.Peer do
   end
 
   defp stage_and_publish(peer, base) do
-    with :ok <- stage(peer.staging, base.bytes, peer.sys_config) do
+    with :ok <- write_like(peer.staging, base.bytes, peer.sys_config) do
       case publish(peer.staging, peer.pristine) do
         :ok -> {:ok, base}
         :taken -> published_base(peer)
@@ -566,21 +565,40 @@ defmodule Castle.Peer do
     end
   end
 
-  # These two are public, alone among the file handling here, because the window
-  # between them is what makes a concurrent install safe and a window nothing
+  ## Writing a file that holds configuration
+  #
+  # There is one way to do it here, and it is `write_like/3`. Every file this
+  # module brings into existence holds a release's configuration - the base, and
+  # the scratch copy the providers are resolved into - so every one of them has
+  # to be no more readable than the `sys.config` it came from or is about to
+  # become. An operator who restricts that file has said something, and it has to
+  # hold for the copies too.
+  #
+  # The ordering is the whole of it, and it is inside the primitive rather than
+  # remembered at the call sites, because remembering is what failed: the mode
+  # is set while the file is still empty, so there is no moment at which it holds
+  # a configuration and is wider than it should be. Neither of the obvious ways
+  # round has that property. `File.write/2` creates with the process umask and
+  # never looks at a mode. `File.cp/2` does carry the mode, but it writes the
+  # whole file first and narrows it afterwards
+  # (`:file.copy` then `copy_file_mode/2`), which is the same exposure with a
+  # shorter window and was twice mistaken here for a fix.
+  #
+  # These are public, along with `publish/2`, because the intermediate states are
+  # the point: a mode that is only ever correct after the content is written
+  # looks exactly like a mode that was correct all along, and a window nothing
   # can stand in is a window nothing can test.
+
   @doc false
-  @spec stage(Path.t(), iodata(), Path.t()) :: :ok | {:error, String.t()}
-  def stage(staging, bytes, mode_from) do
-    # Emptied, given its mode, and only then filled: the base holds the
-    # configuration and the initialised provider state the release was built
-    # with, which is as much reason to restrict it as `sys.config` has, and an
-    # operator who has restricted `sys.config` means it about both. Between
-    # creating the file and setting its mode there is nothing in it to read.
-    with :ok <- write(staging, ""),
-         :ok <- carry_mode(mode_from, staging) do
-      write(staging, bytes)
-    end
+  @spec write_like(Path.t(), iodata(), Path.t()) :: :ok | {:error, String.t()}
+  def write_like(path, bytes, model) do
+    with :ok <- create_like(path, model), do: write(path, bytes)
+  end
+
+  @doc false
+  @spec create_like(Path.t(), Path.t()) :: :ok | {:error, String.t()}
+  def create_like(path, model) do
+    with :ok <- write(path, ""), do: carry_mode(model, path)
   end
 
   @doc false
@@ -773,13 +791,6 @@ defmodule Castle.Peer do
 
       {:error, reason} ->
         {:error, "Cannot read #{path}. #{format_error(reason)}"}
-    end
-  end
-
-  defp copy(source, destination) do
-    case File.cp(source, destination) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "Cannot write #{destination}. #{format_error(reason)}"}
     end
   end
 

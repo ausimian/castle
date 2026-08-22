@@ -367,7 +367,7 @@ defmodule Castle.PeerTest do
 
       # The two steps materialisation takes, taken here one at a time, which is
       # the only way to stand between them and look.
-      assert Castle.Peer.stage(staging, bytes, sys_config) == :ok
+      assert Castle.Peer.write_like(staging, bytes, sys_config) == :ok
       assert File.read!(staging) == bytes
 
       # A reader looking for the base while it is being staged. Not a partial
@@ -390,7 +390,7 @@ defmodule Castle.PeerTest do
       # safe: it is told the name is taken, and goes on to read what is at that
       # name instead of publishing its own copy.
       loser = Path.join(vsn_dir, "castle-staged-later.pristine")
-      assert Castle.Peer.stage(loser, "not what was published", sys_config) == :ok
+      assert Castle.Peer.write_like(loser, "not what was published", sys_config) == :ok
       assert Castle.Peer.publish(loser, pristine) == :taken
       assert File.read!(pristine) == bytes
     end
@@ -477,6 +477,75 @@ defmodule Castle.PeerTest do
       assert message =~ "Unpack 1.0.0 again to restore it."
       refute File.exists?(pristine)
       assert File.read!(Path.join(vsn_dir, "sys.config")) == resolved
+    end
+  end
+
+  # Every file this module brings into existence holds a release's
+  # configuration, so every one of them goes through `write_like/3`. What that
+  # buys is not the mode the file ends up with - `File.cp/2` gets that right too
+  # - but that there is no moment at which the file holds a configuration and is
+  # wider than the `sys.config` it came from. A test that looks only at the end
+  # state cannot tell the two apart, which is how the exposure survived being
+  # fixed once.
+  describe "writing a file that holds configuration" do
+    test "sets the mode before there is anything to read", %{tmp_dir: root} do
+      model = Path.join(root, "sys.config")
+      File.write!(model, "[].\n")
+      File.chmod!(model, 0o600)
+
+      path = Path.join(root, "copy")
+      assert Castle.Peer.create_like(path, model) == :ok
+
+      # The state the primitive exists to make unobservable-with-contents: the
+      # mode is already the model's, and the file is empty. Anything that got
+      # here first would find nothing worth having.
+      assert mode(path) == 0o600
+      assert File.read!(path) == ""
+
+      assert Castle.Peer.write_like(path, "secret", model) == :ok
+      assert mode(path) == 0o600
+      assert File.read!(path) == "secret"
+    end
+
+    test "carries an unrestricted mode just as faithfully", %{tmp_dir: root} do
+      model = Path.join(root, "sys.config")
+      File.write!(model, "[].\n")
+      File.chmod!(model, 0o644)
+
+      path = Path.join(root, "copy")
+      assert Castle.Peer.write_like(path, "not secret", model) == :ok
+      assert mode(path) == 0o644
+    end
+
+    test "gives the file the configuration is resolved into sys.config's mode",
+         %{tmp_dir: root} do
+      # Observed from inside the peer, while the pipeline is running: the file
+      # exists only until materialisation renames it onto sys.config, and its
+      # mode has to be right before the providers put anything in it.
+      vsn_dir = Path.join([root, "releases", "1.0.0"])
+      recorded = Path.join(root, "mode")
+
+      ^vsn_dir =
+        SyntheticRelease.build(root,
+          config:
+            with_providers(
+              [
+                {PeerProviderStub,
+                 mode_of: Path.join(vsn_dir, "castle-*.config"),
+                 mode_to: recorded,
+                 merge: [sample: [n: 1]]}
+              ],
+              []
+            )
+        )
+
+      File.chmod!(Path.join(vsn_dir, "sys.config"), 0o600)
+
+      assert Commands.materialise(vsn_dir) == {:ok, []}
+
+      assert String.to_integer(File.read!(recorded), 8) == 0o600
+      assert mode(Path.join(vsn_dir, "sys.config")) == 0o600
+      assert read_sys_config(vsn_dir)[:sample][:n] == 1
     end
   end
 

@@ -821,8 +821,19 @@ defmodule Castle.Peer do
     with :ok <- written, :ok <- closed, do: chmod(path, 0o600)
   end
 
+  # `:file.write/2` rather than `IO.binwrite/2`, because the handle is opened
+  # `:raw` and a raw handle is not an io device - it is a `:file_descriptor`
+  # record that the `IO` functions happen to accept. The difference is not
+  # cosmetic. `IO.binwrite/2` is specified to return `:ok`, and it earns that by
+  # calling `:file.write/2` and raising whatever error comes back, so a failed
+  # write would leave this module by way of an `ErlangError` rather than the
+  # `{:error, message}` every caller here is written to expect - and everything
+  # in this module reports rather than raises, because it runs ahead of
+  # `install_release/1` where an exception is a silent abort. `:file.write/2`
+  # returns the error instead: `{:error, :ebadf}` writing to a handle that cannot
+  # be written, `{:error, :einval}` to one already closed. Both measured.
   defp written(handle, path, bytes) do
-    case IO.binwrite(handle, bytes) do
+    case :file.write(handle, bytes) do
       :ok -> :ok
       {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
     end

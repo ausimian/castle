@@ -976,8 +976,16 @@ nobody should call. It keeps its `@spec` regardless — the spec is the contract
 whether or not the function is published. And `install/2..5` is documented as
 what it is, a seam the concurrency test drives: one `@doc` covers every arity of
 a clause with defaults, so saying nothing about the extra four would leave them
-reading as an API. Every other function is a command an operator invokes, and
-hiding one of those would document nothing useful anywhere.
+reading as an API. `running/1` is a third case, and documented rather than
+hidden for a different reason than the other two. It has no subcommand either —
+`bin/castle` dispatches exactly `releases`, `upgradable`, `unpack`, `install`,
+`remove` and `commit`, and `running/1`'s only shipped caller is the confirmation
+loop inside `bin/castle install`. But unlike `make_releases/0` it answers a
+read-only question and mutates nothing, and automation driving `rpc` rather than
+`bin/castle` needs precisely it to know when an install has finished booting.
+Hiding it would strand that caller; publishing it costs nothing. Every remaining
+function is a command an operator invokes, and hiding one of those would
+document nothing useful anywhere.
 
 The specs say `:: :ok` and nothing more, because that is what `report!/1`
 returns; a spec naming the lines, or an error tuple, would be describing

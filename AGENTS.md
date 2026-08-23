@@ -552,6 +552,16 @@ Castle's job is configuration and release management on a running node.
   that commits straight after installing would make a version that cannot boot
   the permanent one.
 
+  A version the launcher booted *provisionally*, after a transition that
+  restarted the emulator, arrives here as `current` and needs nothing of its
+  own — which is measured rather than assumed.
+  `prepare_restart_new_emulator/7` persists it as `tmp_current` before the
+  reboot; on the boot that follows, `transform_release/3` writes that back as
+  `unpacked` **on disk** while `set_current/2` hands the handler a record in
+  which it is `current` **in memory**, because `init:script_id()` names it. So
+  the same two conditions answer the same question across a reboot, which is
+  what lets `bin/castle install` poll through one.
+
   The marker is the whole of the evidence, so it inherits whatever the selected
   boot script does with it. `RELEASE_BOOT_SCRIPT` naming a hand-written script
   that never reaches `{progress, started}` will never be confirmed — `install`
@@ -563,6 +573,72 @@ Castle's job is configuration and release management on a running node.
   here claimed `systools_make:add_apply_upgrade/2`'s hard match on the trailing
   marker ruled this out. It does not: that builds the hybrid script for an
   emulator upgrade and says nothing about a script an operator supplies.)
+
+- **The restart marker** — `releases/castle-restart-pending`, armed by
+  `install/4` before `install_release/1` is asked for anything and cleared on
+  every path where the install failed. Forecastle's `env.sh` fragment consumes
+  it on the next start and boots the version it names. The two halves are
+  useless apart and landed together
+  ([#14](https://github.com/ausimian/castle/issues/14) and
+  [forecastle#10](https://github.com/ausimian/forecastle/issues/10)).
+
+  **Two files are the evidence, not one, and that is the point of this marker
+  existing at all.** `prepare_restart_new_emulator/7` writes
+  `releases/new_start_erl.data` *before* the reboot and nothing ever removes it —
+  `transform_release/3` reconciles the release *record* and does not touch the
+  file — so a preparation that failed after writing it leaves a file naming a
+  version that was never installed. On its own that file is not a boot
+  instruction. Castle's marker says a reboot was really asked for; the hook
+  requires both, and requires them to name one version.
+
+  Consuming them is Forecastle's, and both are consumed: the pending marker is
+  claimed by rename, atomically, and OTP's is removed with it, so the selection
+  is one-shot and a second start of the same deployment selects nothing.
+
+  **It is armed from the relup, and it has to be, because the reply cannot answer
+  the question.** `restart_emulator` is replied to with `{ok, Vsn, Descr}` —
+  exactly what a completed hot upgrade replies — and `init:reboot()` has already
+  been called by the time the reply arrives. So a marker armed unconditionally
+  and cleared on `{ok, ...}` would be racing a shutdown, and losing that race
+  loses the upgrade silently. `restart_planned?/3` therefore reads the same file
+  `release_handler` will read: `do_get_rh_script/4` looks for the from-version in
+  the target's own relup and then for the to-version in the from-release's
+  downgrade section, and the from-version is the release the system is running,
+  which is what `get_latest_release/1` selects and what `running_release/1`
+  already computes. **`which_releases/0` is asked once** and the answer used for
+  both the record check and this, for the reason the record check lives inside
+  the operation: two calls are two moments.
+
+  This is a prediction and not a second state machine. Nothing here writes a
+  release record, and it decides exactly one thing — whether to arm. Being wrong
+  either way is bounded: unarmed, the reboot returns on the permanent version and
+  `install` reports that the version never became the running one; armed without
+  a reboot, the hook consumes the marker on the next start and finds nothing to
+  correlate it with.
+
+  **The two-stage `restart_new_emulator` is deliberately not armed for**, and the
+  reason is not that it is out of scope. The marker OTP writes for it names the
+  *temporary hybrid* release, `__new_emulator__<current>`, and
+  `new_emulator_make_hybrid_boot/6` gives that version directory a `start.boot`
+  and a `sys.config` and none of the launcher's own furniture — no `env.sh`, no
+  `elixir`, no `vm.args`. There is nothing there for a launcher to boot, so
+  arming would point it at a version it cannot start. It is told apart the way
+  `do_install_release/3` tells them apart: the instruction at the *head* of the
+  script. Anywhere else it is an error rather than a transition —
+  `syntax_check_script/1` accepts only `restart_emulator` after the point of no
+  return.
+
+  **A marker that cannot be written refuses the install**, before
+  `install_release/1` is asked for anything, because the alternative is a reboot
+  that comes back on the version being upgraded away from with nothing saying so.
+  Clearing it, by contrast, is best-effort on purpose: a releases directory the
+  marker cannot be removed from is one it could not have been written into, and
+  that already refused.
+
+  **The report changes with it.** `installed/4` says the version was installed,
+  that the emulator is restarting, and that the version stays provisional until
+  it is committed — instead of "Now running", which is false for as long as the
+  reboot takes and which automation reads.
 
 Every one of them is a command entry point, so `Castle` is the command
 boundary: an operation that fails raises `Castle.Error` there, which is what
@@ -780,25 +856,72 @@ It is paired with a release whose check is satisfied, so that "refuses
 everything" cannot pass for "checks correctly", and with one carrying a shape
 Elixir does not produce, which has to be refused rather than skipped.
 
+The restart marker's tests are written the same way, and the discriminators are
+the same kind: `restart_planned?/3` is exercised by writing a real relup where
+`release_handler` reads one and asserting on the *file* — armed for a script
+carrying `restart_emulator`, from the from-release's downgrade section for a
+downgrade, and not armed for a hot script, for `restart_new_emulator` at the
+head, or when there is no relup at all. A relup with no entry for the running
+version is what makes the downgrade case a genuine second lookup rather than the
+first one succeeding by accident. The arming refusal is arranged by putting a
+*directory* at the marker's name, which is deterministic and needs no file modes
+— a fixture here may not turn on a mode that root or a filesystem can ignore —
+and what it stands for is a releases directory that cannot be written to. And
+`Stub.calls(:which_releases) == [[]]` on the successful install is now load
+bearing twice over: it says the record check happened in the call that acted,
+*and* that the classification did not ask a second time.
+
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
 `:e2e` suite ([#8](https://github.com/ausimian/castle/issues/8)), which
 exercises this code against a real release and asserts on the success messages
 each command prints. Those strings — `Unpacked <vsn> ok`,
 `Now running <vsn> (previously <other>).`, `Committed <vsn>. …` and the
-`releases/0` table — are a contract with that suite. Failure messages are not.
+`releases/0` table — are a contract with that suite. Failure messages are not,
+and neither is what a restart install reports: that message may not outlive the
+reboot it announces, so the `:e2e` suite asserts the exit status and the state
+the system ends up in and leaves the wording to the unit test here.
+
+The restart transition is covered end to end all the same, in both halves:
+Forecastle's `restart_upgrade_test.exs` drives a `--restart` relup through
+`unpack`/`install`/`commit` against a real supervised release, asserts the OS pid
+changes, kills the provisional release before committing to see it roll back, and
+installs again from the release that came back.
+
+It is also what finally covers the interaction between a materialised
+`sys.config` and a later cold boot of the same version, which used to be listed
+below as unverified. The provisional boot *is* that cold boot: it re-runs the
+target's own providers over the materialised file, with `SAMPLE_GREETING` changed
+underneath it, and answers with the new value. What lets it is that materialising
+leaves no `config_provider_booted` marker behind and preserves the header Mix
+wrote, so Elixir's pipeline is still armed in the file the launcher reads.
 
 ## Known limitations
 
-- **How the materialised `sys.config` and a later cold boot of the same version
-  interact is not verified.** Both write the same file. Materialisation resolves
-  from `sys.config.pristine` and leaves no `config_provider_booted` marker
-  behind, so a cold boot re-runs the providers over the materialised result —
-  which is what the issue expects, and what the header Mix wrote is preserved
-  for. That is now reachable, since
-  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) landed, but
-  nothing asserts it: Forecastle's `:e2e` suite installs and commits without
-  restarting afterwards. It belongs there, because it takes a booted release.
+- **Nothing in the release restarts it after an emulator restart, and that is
+  the design.** `init:reboot()` takes the OS process down, `bin/start` is inert,
+  and `HEART_COMMAND` is unset, so the external supervisor is the only thing that
+  brings the system back. A deployment started by hand from a shell therefore
+  stays down until somebody starts it — and comes back on the installed version
+  when they do, because the markers are still waiting. See forecastle#10 for why
+  a second restart authority was refused rather than added.
+- **A hard kill between arming the restart marker and completing the install
+  leaves both markers behind**, and the next start then boots the target. The
+  damage is bounded rather than absent: the target is unpacked with its
+  configuration materialised, so what happens is a cold boot of it rather than a
+  half-applied upgrade, and `releases/start_erl.data` still names the previous
+  permanent version, so the restart after that returns. Bounded is not closed.
+
+  There is no test that plants the pair by hand, and that is a decision rather
+  than an omission. Both halves of the bound are already asserted by the restart
+  `:e2e` suite — the provisional boot of a `restart_emulator` target *is* a cold
+  boot of it, and killing it before the commit is the case that shows
+  `start_erl.data` bringing the previous version back. What a planted pair would
+  add is a state OTP's records contradict: forging the markers for a version the
+  handler has no `tmp_current` for leaves the node running one release while
+  `which_releases/0` reports another, and pinning that would be pinning an
+  incoherence rather than a property. If this is ever closed, the thing to change
+  is what the marker carries, not what a test plants.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

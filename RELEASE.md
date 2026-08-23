@@ -112,11 +112,45 @@
   script that emits the marker before its applications are started defeats the
   check instead, since the marker is all there is to go on.
 
-  Nothing can build a relup that restarts the emulator until
-  [forecastle#4](https://github.com/ausimian/forecastle/issues/4), so the
-  restart transitions this addresses cannot be exercised end to end yet. The
-  hot-upgrade path is covered by Forecastle's end-to-end suite; the statuses
-  themselves are covered by unit tests here.
+  Both the hot-upgrade path and the emulator-restart path are covered end to end
+  by Forecastle's `:e2e` suite, which polls through a real reboot.
+- Upgrades that restart the emulator now work on a release supervised by
+  systemd, Docker, Kubernetes or anything else that owns starting the service.
+  `Castle.install/1` recognises such a transition from the relup before it asks
+  `:release_handler` for anything, and leaves a marker beside the release records
+  naming the version being installed. The launcher's `env.sh` fragment, which
+  Forecastle 1.0.0 contributes, consumes that marker on the next start and boots
+  the version it names.
+
+  Two files have to agree for that to happen, and the reason is worth stating:
+  `:release_handler` writes `releases/new_start_erl.data` *before* the reboot and
+  nothing ever removes it, so a preparation that failed part-way leaves a file
+  naming a version that was never installed. Castle's own marker is what says a
+  reboot was really asked for; it is written immediately before the install and
+  removed on every path where the install failed, and the launcher requires both
+  files and requires them to name one version. An install whose marker cannot be
+  written - a release root nothing may write to - is refused rather than
+  performed, because the alternative is a reboot that silently comes back on the
+  version it was upgrading away from.
+
+  What the install *reports* is different for such a transition, because
+  `install_release/1` replies the same `{ok, Vsn, Descr}` for a completed hot
+  upgrade and for one that is about to reboot. Rather than say "Now running", it
+  says that the version was installed, that the emulator is restarting, and that
+  the version stays provisional until it is committed - which is what
+  `releases/start_erl.data` still naming the previous version means. `bin/castle
+  install` goes on asking the system what it is running across the reboot, and
+  exits 0 once the installed version answers.
+
+  The rollback that provisional state buys is real and needs nothing:
+  `make_permanent/1` is the only thing that writes `releases/start_erl.data`, so
+  a provisional release that dies before `Castle.commit/1` is followed by an
+  ordinary start of the version that was permanent before.
+
+  The two-stage `restart_new_emulator` transition remains unsupported. It reboots
+  into a temporary hybrid release whose version directory holds a boot script and
+  a configuration and none of the launcher's own files, so there is nothing for a
+  launcher to boot; Forecastle refuses to generate one.
 
 ### Changed
 

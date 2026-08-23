@@ -44,7 +44,7 @@ defmodule Castle do
 
   def install(vsn) when is_binary(vsn) do
     materialise(vsn)
-    report!(Commands.install(vsn))
+    report!(Commands.install(vsn, rel_dir()))
   end
 
   def running(vsn) when is_binary(vsn) do

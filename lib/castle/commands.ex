@@ -5,6 +5,27 @@ defmodule Castle.Commands do
   # differ; it has said nothing, which is a different answer.
   @no_inode "the filesystem reports no inode numbers, so the two cannot be compared"
 
+  # The file `install/4` arms before a transition that reboots the emulator, and
+  # the launcher's `env.sh` fragment consumes on the next start. It sits beside
+  # the release records, and it is named to be unmistakable: nothing else writes
+  # it, and a human who finds one knows what it is for.
+  #
+  # It exists because `releases/new_start_erl.data` on its own is not evidence.
+  # `prepare_restart_new_emulator/7` writes that file *before* the reboot and
+  # nothing ever removes it, so a preparation that failed after writing it - and
+  # `transform_release/3` reconciles the release record without touching the
+  # marker - leaves a file naming a version that was never installed. The two
+  # together are the evidence: OTP's marker says which version, and this one says
+  # that Castle asked for the reboot that would boot it. The hook requires both,
+  # and requires them to name the same version.
+  @restart_marker "castle-restart-pending"
+
+  # The two instructions `release_handler` treats as "reboot the emulator", and
+  # what `do_install_release/3` does with each. Only the one-stage instruction is
+  # a transition the launcher can select the target of; see `restart_planned?/3`.
+  @one_stage :restart_emulator
+  @two_stage :restart_new_emulator
+
   # The implementation of each of Castle's commands, held apart from the
   # command boundary in `Castle` so that it can be exercised without a booted
   # release:
@@ -333,7 +354,16 @@ defmodule Castle.Commands do
   # it is the unpack or the install refusing, and what they need told is that it
   # did not happen.
   defp ensure_upgradable(refusal, handler) do
-    case running_release(handler) do
+    refuse_synthesised(refusal, running_release(handler))
+  end
+
+  # The same rule over a running release that has already been asked for.
+  # `install/4` needs it twice - the record check, and which relup entry the
+  # transition will be evaluated from - and `which_releases/0` must be asked once:
+  # two calls are two moments, which is the whole point of the check being inside
+  # the operation.
+  defp refuse_synthesised(refusal, running) do
+    case running do
       {_vsn, [_ | _]} ->
         :ok
 
@@ -477,33 +507,197 @@ defmodule Castle.Commands do
   upgraded at all, so there is no upgrade under way for it to strand, and what
   those operations would otherwise act on is the Erlang installation. Only the
   read-only `upgradable/1` and `releases/1` are without it.
+
+  `rel_dir` is where the restart marker is armed. It is an argument for the
+  reason `make_releases/3`'s is: nothing chooses it, `Castle.install/1` derives
+  it from `code:root_dir()`, and a test needs somewhere to look.
   """
-  @spec install(String.t(), module(), module()) :: result()
-  def install(vsn, handler \\ :release_handler, deployment \\ Castle.Deployment) do
-    with :ok <- ensure_own_erts("Cannot install #{vsn}", deployment),
-         :ok <- ensure_upgradable("Cannot install #{vsn}", handler) do
-      case handler.install_release(to_charlist(vsn)) do
-        {:ok, other_vsn, _descr} ->
-          {:ok, ["Now running #{vsn} (previously #{other_vsn})."]}
-
-        # The emulator, or one of kernel, stdlib and sasl, is being replaced, so
-        # the node reboots and the upgrade instructions run after it comes back.
-        # Nothing has failed.
-        {:continue_after_restart, other_vsn, _descr} ->
-          {:ok,
-           [
-             "Restarting to install #{vsn} (previously #{other_vsn}).",
-             "The upgrade continues once the emulator has restarted."
-           ]}
-
-        {:error, reason} ->
-          {:error, "Install of #{vsn} failed. #{inspect(reason)}"}
-
-        other ->
-          {:error, "Install of #{vsn} returned an unexpected result. #{inspect(other)}"}
-      end
+  @spec install(String.t(), Path.t(), module(), module()) :: result()
+  def install(vsn, rel_dir, handler \\ :release_handler, deployment \\ Castle.Deployment) do
+    with :ok <- ensure_own_erts("Cannot install #{vsn}", deployment) do
+      install_upgradable(vsn, rel_dir, handler)
     end
   end
+
+  # Everything after the ERTS guard, with the running release asked for once.
+  #
+  # The record check and the restart prediction are both about the release the
+  # system is running - `get_latest_release/1` is `current` if there is one and
+  # `permanent` otherwise, which is what `running_release/1` computes - and asking
+  # `which_releases/0` twice would be asking about two moments.
+  defp install_upgradable(vsn, rel_dir, handler) do
+    refusal = "Cannot install #{vsn}"
+    running = running_release(handler)
+    restart? = restart_planned?(vsn, rel_dir, running)
+
+    with :ok <- refuse_synthesised(refusal, running),
+         :ok <- arm_restart(restart?, vsn, rel_dir, refusal) do
+      installed(vsn, restart?, rel_dir, handler)
+    end
+  end
+
+  # `install_release/1` replies the same `{ok, Vsn, Descr}` for a hot upgrade and
+  # for one that is about to reboot, so what it says cannot tell them apart -
+  # which is why the transition is classified from the relup beforehand and the
+  # answer carried in here. Reporting a reboot as "now running" is a claim that is
+  # false for as long as the reboot takes, and automation reads it.
+  defp installed(vsn, restart?, rel_dir, handler) do
+    case handler.install_release(to_charlist(vsn)) do
+      {:ok, other_vsn, _descr} when restart? ->
+        {:ok,
+         [
+           "Installed #{vsn} (previously #{other_vsn}). The emulator is restarting.",
+           "#{vsn} is provisional until it is committed: #{other_vsn} is still the " <>
+             "version an ordinary restart boots."
+         ]}
+
+      {:ok, other_vsn, _descr} ->
+        {:ok, ["Now running #{vsn} (previously #{other_vsn})."]}
+
+      # The emulator, or one of kernel, stdlib and sasl, is being replaced, so
+      # the node reboots and the upgrade instructions run after it comes back.
+      # Nothing has failed here - but nothing selects the hybrid temporary
+      # release the reboot needs either, which is why no marker was armed for it.
+      # See `restart_planned?/3`.
+      {:continue_after_restart, other_vsn, _descr} ->
+        {:ok,
+         [
+           "Restarting to install #{vsn} (previously #{other_vsn}).",
+           "The upgrade continues once the emulator has restarted."
+         ]}
+
+      {:error, reason} ->
+        disarm(restart?, rel_dir)
+        {:error, "Install of #{vsn} failed. #{inspect(reason)}"}
+
+      other ->
+        disarm(restart?, rel_dir)
+        {:error, "Install of #{vsn} returned an unexpected result. #{inspect(other)}"}
+    end
+  end
+
+  ## The restart marker
+
+  # Whether the transition about to be installed reboots the emulator into a
+  # version the launcher can be told to boot.
+  #
+  # This is a prediction, and it is made from the same file `release_handler`
+  # will read: `do_get_rh_script/4` looks for the from-version in the target's
+  # own relup and then for the to-version in the from-release's, which is what
+  # `transition_script/3` does. It is not a second implementation of the state
+  # machine - nothing here writes a release record - it decides one thing, which
+  # is whether to arm the marker, and OTP remains authoritative for everything
+  # else.
+  #
+  # It has to be a prediction because the reply cannot answer it. A one-stage
+  # restart is replied to with `{ok, Vsn, Descr}`, exactly as a completed hot
+  # upgrade is, and `init:reboot()` has already been called by the time the reply
+  # arrives - so a marker armed unconditionally and cleared on `{ok, ...}` would
+  # be racing the shutdown, and losing that race silently loses the upgrade.
+  #
+  # The two instructions are told apart the way `do_install_release/3` tells them
+  # apart. `restart_new_emulator` at the head of the script is the two-stage
+  # transition, and it is deliberately *not* armed for: the marker OTP writes then
+  # names the temporary hybrid release, `__new_emulator__<current>`, whose version
+  # directory holds a `start.boot` and a `sys.config` and none of the launcher's
+  # own furniture - no `env.sh`, no `elixir`, no `vm.args` - so there is nothing
+  # for the launcher to boot. That transition is unsupported rather than
+  # half-supported; Forecastle refuses to generate one.
+  #
+  # Anywhere else in the script, `restart_new_emulator` is an error rather than a
+  # transition: `syntax_check_script/1` accepts only `restart_emulator` after the
+  # point of no return, and `eval/2` throwing the other atom lands in
+  # `eval_script/5`'s error branch. So it never reaches a reboot, and the install
+  # fails with the marker unarmed.
+  defp restart_planned?(_to_vsn, _rel_dir, nil), do: false
+
+  defp restart_planned?(to_vsn, rel_dir, {from_vsn, _apps}) do
+    case transition_script(rel_dir, to_vsn, from_vsn) do
+      [@two_stage | _] -> false
+      script when is_list(script) -> @one_stage in script
+      nil -> false
+    end
+  end
+
+  # The relup entry `release_handler` will evaluate, or `nil` if there is not one
+  # it can find either. A missing or unreadable relup is not this function's to
+  # report: `do_get_rh_script/4` throws `no_matching_relup` for it, the install
+  # fails, and the failure names the release rather than a marker nobody asked
+  # about.
+  defp transition_script(rel_dir, to_vsn, from_vsn) do
+    upgrade_script(rel_dir, to_vsn, from_vsn) || downgrade_script(rel_dir, to_vsn, from_vsn)
+  end
+
+  defp upgrade_script(rel_dir, to_vsn, from_vsn) do
+    case relup(rel_dir, to_vsn) do
+      {^to_vsn, ups, _downs} -> script_for(ups, from_vsn)
+      _other -> nil
+    end
+  end
+
+  defp downgrade_script(rel_dir, to_vsn, from_vsn) do
+    case relup(rel_dir, from_vsn) do
+      {^from_vsn, _ups, downs} -> script_for(downs, to_vsn)
+      _other -> nil
+    end
+  end
+
+  # Versions come back from a relup as charlists, so they are compared as
+  # strings - the same normalisation `running_release/1` and every message here
+  # already apply.
+  defp relup(rel_dir, vsn) do
+    case :file.consult(to_charlist(Path.join([rel_dir, vsn, "relup"]))) do
+      {:ok, [{relup_vsn, ups, downs}]} when is_list(ups) and is_list(downs) ->
+        {to_string(relup_vsn), ups, downs}
+
+      _unreadable ->
+        nil
+    end
+  end
+
+  defp script_for(entries, vsn) do
+    Enum.find_value(entries, fn
+      {from, _descr, script} when is_list(script) -> if to_string(from) == vsn, do: script
+      _malformed -> nil
+    end)
+  end
+
+  # Armed before `install_release/1` is asked for anything, so that the marker is
+  # in place before OTP writes its own and reboots. A failure to write it refuses
+  # the install rather than going ahead: the reboot would come back on whichever
+  # version `releases/start_erl.data` names, which is the one being upgraded
+  # away from, and the upgrade would be lost with nothing saying so.
+  defp arm_restart(false, _vsn, _rel_dir, _refusal), do: :ok
+
+  defp arm_restart(true, vsn, rel_dir, refusal) do
+    marker = Path.join(rel_dir, @restart_marker)
+
+    case File.write(marker, vsn <> "\n") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "#{refusal}: the upgrade to #{vsn} restarts the emulator, and #{marker} - " <>
+           "which is what tells the launcher to boot #{vsn} when the system comes back - " <>
+           "could not be written (#{:file.format_error(reason)}). Without it the restart " <>
+           "would come back on the version releases/start_erl.data names, losing the " <>
+           "upgrade."}
+    end
+  end
+
+  # Cleared on every path out of a failed install, because a marker left armed
+  # beside a `new_start_erl.data` the same failure may already have written is
+  # exactly the pair the hook acts on.
+  #
+  # The result is deliberately not looked at, and that is not laziness: a
+  # releases directory this cannot remove the marker from is one `arm_restart/4`
+  # could not have written it into, and that refuses the install before
+  # `install_release/1` is asked for anything. So reaching here at all means the
+  # marker was writable moments ago, and there is no state left worth branching
+  # on - only a state nothing could produce and no test could arrange.
+  defp disarm(false, _rel_dir), do: :ok
+  defp disarm(true, rel_dir), do: File.rm(Path.join(rel_dir, @restart_marker))
 
   @doc """
   Confirms that `vsn` is the release the system is running.
@@ -521,6 +715,13 @@ defmodule Castle.Commands do
   is - notably `:unpacked`, which is what a rolled-back continuation leaves the
   target as, and `:tmp_current`, which is written before the reboot a restart
   transition has yet to make.
+
+  A version the launcher booted provisionally, after a restart transition,
+  arrives here as `:current` too and needs nothing of its own: `transform_release/3`
+  writes the `tmp_current` record back as `unpacked` on disk, and `set_current/2`
+  makes it `current` in the record the handler holds, because `init:script_id()`
+  names it. So the same two conditions answer the same question across a reboot,
+  which is what lets `bin/castle install` poll through one.
 
   Being the running release is necessary but not sufficient, because a node
   that restarted into it can be seen part-way up. `release_handler` records the
@@ -600,6 +801,19 @@ defmodule Castle.Commands do
   promoting a version of the Erlang installation. Those two are the *records*,
   so they are the relocatable half - see `Castle.Deployment.root_dir/0` - but
   the version it would be promoting is the installation's either way.
+
+  **A version reached by a restart transition needs nothing extra here, and that
+  is measured rather than assumed.** `prepare_restart_new_emulator/7` persists
+  the target as `tmp_current` before the reboot, and on the boot that follows
+  `transform_release/3` writes it back as `unpacked` *on disk* while
+  `set_current/2` hands the handler a record in which it is `current` in memory -
+  because `init:script_id()` names it. `do_make_permanent/2` reads the in-memory
+  record and accepts any status but `unpacked`, `old` and `permanent`, so
+  `current` is exactly what it wants; `set_permanent_files/5` then writes
+  `releases/start_erl.data`, and `write_releases/3` corrects the on-disk record.
+  So the file that decides what an ordinary restart boots is written here and
+  nowhere else, which is the whole of the rollback property: until this runs, a
+  restart returns to the version that was permanent before.
   """
   @spec commit(String.t(), module(), module()) :: result()
   def commit(vsn, handler \\ :release_handler, deployment \\ Castle.Deployment) do

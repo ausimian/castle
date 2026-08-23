@@ -90,7 +90,7 @@ defmodule Castle.ErtsGuardTest do
                  "and the emulator's root are different directories - the deployment is " <>
                  "#{deployment} and the emulator runs in #{root_dir}. That is where " <>
                  ":release_handler extracts applications, resolves every lib/<app>-<vsn> " <>
-                 "it reads, and deletes erts-<vsn> from, because those paths are anchored " <>
+                 "it reads, and deletes erts-<erts_vsn> from, because those paths are anchored " <>
                  "to the emulator's root rather than to the deployment. Pointing Castle at " <>
                  "the deployment instead would only move the release records away from the " <>
                  "applications they describe. Relocating the records with RELDIR or the " <>

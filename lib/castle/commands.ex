@@ -165,7 +165,7 @@ defmodule Castle.Commands do
   # not Castle's choice of one - `Castle.Deployment.root_dir/0` sets out what it
   # anchors and what it does not, and is the only place that should. The half
   # this rests on is the applications: extraction, every `lib/<app>-<vsn>` the
-  # handler resolves, and the `erts-<vsn>` a removal deletes. Those cannot be
+  # handler resolves, and the `erts-<erts_vsn>` a removal deletes. Those cannot be
   # relocated, which is why relocating the *records* - the half that can be, with
   # `RELDIR` or `{sasl, releases_dir}` - is not a way out of this refusal.
   #
@@ -239,7 +239,7 @@ defmodule Castle.Commands do
     "#{refusal}: the deployment and the emulator's root are different " <>
       "directories - the deployment is #{release_root} and the emulator runs " <>
       "in #{root_dir}. That is where :release_handler extracts applications, " <>
-      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<vsn> from, " <>
+      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<erts_vsn> from, " <>
       "because those paths are anchored to the emulator's root rather than to " <>
       "the deployment. Pointing Castle at the deployment instead would only " <>
       "move the release records away from the applications they describe. " <>
@@ -1450,7 +1450,7 @@ defmodule Castle.Commands do
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2` -
   and of everything gated this is the operation with the most to lose by not
   being: `remove_release/1` *deletes*, and the library directories and
-  `erts-<vsn>` it takes away are resolved against `code:root_dir()` - the anchor
+  `erts-<erts_vsn>` it takes away are resolved against `code:root_dir()` - the anchor
   nothing can relocate - so on such a deployment it is the Erlang installation
   it would be asked to delete out of.
   """

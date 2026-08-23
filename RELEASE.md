@@ -363,7 +363,7 @@
   the reason, rather than quietly managing the Erlang installation it happens to
   be running on. Such a release ships no emulator, so it runs the system one, and
   `code:root_dir()` — the directory `:release_handler` extracts applications
-  into, resolves every `lib/<app>-<vsn>` against, and deletes `erts-<vsn>` from —
+  into, resolves every `lib/<app>-<vsn>` against, and deletes `erts-<erts_vsn>` from —
   is then the shared Erlang installation rather than the deployment. Left to itself, `make_releases/0` created that installation's
   `releases/RELEASES`, which usually fails for want of permission and, where it
   succeeds, puts the release records of unrelated deployments in one file;

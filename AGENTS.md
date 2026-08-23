@@ -315,7 +315,7 @@ Castle's job is configuration and release management on a running node.
   library directories *relatively* — `filename:join("lib", LibName)`, so the file
   stays relocatable — so every `lib/<app>-<vsn>` the handler reads, writes or
   deletes resolves there, as does the `extract_tar(Root, Tar)` an unpack goes
-  through and the `erts-<vsn>` a removal deletes. So a Castle that wrote to
+  through and the `erts-<erts_vsn>` a removal deletes. So a Castle that wrote to
   `$RELEASE_ROOT` would put the configuration where the handler never looks, and
   an upgrade would go on using applications under the installation — a silent
   divergence in place of a loud failure. Do not "fix" the guard that way.

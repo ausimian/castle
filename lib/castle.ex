@@ -579,8 +579,15 @@ defmodule Castle do
   Removes `vsn` from the system, and deletes what nothing else is using.
 
   `bin/castle remove <vsn>`. It takes away the version's own release directory,
-  every library directory no remaining release refers to, and the `erts-<vsn>`
-  if that version of the emulator is now unreferenced.
+  every library directory no remaining release refers to, and the
+  `erts-<erts_vsn>` of the emulator that release was built against, if no
+  remaining release still refers to it.
+
+  Note that the emulator directory is named for the *ERTS* version and not for
+  `vsn` — `do_remove_release/4` reads `erts_vsn` out of the release record and
+  compares it against the releases that are left. The two are unrelated numbers,
+  and normally different ones: a release at `0.1.1` may well be carrying
+  `erts-16.2`.
 
   It deletes rather than merely forgets, which is the point of having it: a
   deployment that never removes a superseded version only grows. Raises

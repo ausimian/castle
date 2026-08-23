@@ -519,16 +519,44 @@ Castle's job is configuration and release management on a running node.
   API surface is [#11](https://github.com/ausimian/castle/issues/11)'s to settle.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
-  ahead of `install` and `commit` so that it exists before the version is booted,
-  the record check inside `unpack` and `install`, and the ERTS guard inside all
-  of them but `releases/0`. The boundary composes
-  materialise-then-install, so a node that will be refused for its record
-  materialises the target's configuration before it hears so. That is what the
-  check costs by living inside the operation instead of in front of it, and it is
-  only work: materialising writes into the target's version directory, never to
-  the running system and never to a release record, and it is idempotent. Both
-  refusals fall before `install_release/1` is asked for anything, which is the
-  line that matters.
+  before `install` and `commit` hand it over, the record check inside `unpack`
+  and `install`, and the ERTS guard inside all of them but `releases/0`.
+
+  **`Castle.install/1` composes nothing, and it used to.** It called
+  `Commands.materialise/3` and then `Commands.install/4`, and that composition
+  was the bug: two callers both configured the target before either reached the
+  lock. Materialising is now the third step *inside* `Commands.install/5`, after
+  the record check and after the pending-marker refusal and before the marker is
+  armed — so a node that will be refused, for its record or for a pending restart
+  install, is refused without having configured anything. The note this replaces
+  called materialising "only work" on the grounds that it writes into the target's
+  version directory and is idempotent; it ends in a rename onto `sys.config`, so
+  it is not. See the restart-marker section for the whole of it.
+
+  **And that claim is now tested at the boundary, which is what
+  `Castle.install/2..5` is for.** `install` takes the releases directory, the
+  handler, the peer and the deployment as defaulted arguments, exactly as
+  `Commands.install/5` does, for one reason: a concurrency test that drives
+  `Commands.install/5` cannot see anything composed in `Castle.install/1`, so the
+  defect above was reintroducible with the whole suite green. One case in
+  `commands_test.exs` runs two concurrent callers through `Castle.install/5`
+  instead, and fails if a `materialise/3` reappears in front of the install. The
+  arity-1 form is unchanged and is still what `bin/castle` calls over `rpc`;
+  nothing about the deployment is chosen by a caller in a release, because nothing
+  in a release passes the extra arguments.
+
+  **`Castle.commit/1` composes nothing either, and the asymmetry this used to
+  describe is gone.** It said an ERTS-less deployment hears "Cannot configure"
+  from `commit` and "Cannot install" from `install`, and that the difference was
+  exact rather than untidy. It was exact, and it was also the visible symptom of
+  the same composition: `commit` materialised in front of the operation, so the
+  configuration step's guard answered first. `Commands.commit/5` now materialises
+  inside its own serialised region, so every command names itself.
+  `erts_guard_test.exs` pins that in the new direction — a "Cannot configure"
+  reappearing there would mean a composition had come back at the boundary.
+
+  Every refusal still falls before `install_release/1` is asked for anything,
+  which is the line that matters.
 - **`Castle.running/1`** — succeeds when the version it is given is the release
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
@@ -552,6 +580,16 @@ Castle's job is configuration and release management on a running node.
   that commits straight after installing would make a version that cannot boot
   the permanent one.
 
+  A version the launcher booted *provisionally*, after a transition that
+  restarted the emulator, arrives here as `current` and needs nothing of its
+  own — which is measured rather than assumed.
+  `prepare_restart_new_emulator/7` persists it as `tmp_current` before the
+  reboot; on the boot that follows, `transform_release/3` writes that back as
+  `unpacked` **on disk** while `set_current/2` hands the handler a record in
+  which it is `current` **in memory**, because `init:script_id()` names it. So
+  the same two conditions answer the same question across a reboot, which is
+  what lets `bin/castle install` poll through one.
+
   The marker is the whole of the evidence, so it inherits whatever the selected
   boot script does with it. `RELEASE_BOOT_SCRIPT` naming a hand-written script
   that never reaches `{progress, started}` will never be confirmed — `install`
@@ -563,6 +601,314 @@ Castle's job is configuration and release management on a running node.
   here claimed `systools_make:add_apply_upgrade/2`'s hard match on the trailing
   marker ruled this out. It does not: that builds the hybrid script for an
   emulator upgrade and says nothing about a script an operator supplies.)
+
+- **The restart marker** — `releases/castle-restart-pending`, armed by
+  `install/5` before `install_release/1` is asked for anything and cleared on
+  every path where the install failed. Forecastle's `env.sh` fragment consumes
+  it on the next start and boots the version it names. The two halves are
+  useless apart and landed together
+  ([#14](https://github.com/ausimian/castle/issues/14) and
+  [forecastle#10](https://github.com/ausimian/forecastle/issues/10)).
+
+  **Two files are the evidence, not one, and that is the point of this marker
+  existing at all.** `prepare_restart_new_emulator/7` writes
+  `releases/new_start_erl.data` *before* the reboot and nothing ever removes it —
+  `transform_release/3` reconciles the release *record* and does not touch the
+  file — so a preparation that failed after writing it leaves a file naming a
+  version that was never installed. On its own that file is not a boot
+  instruction. Castle's marker says a reboot was really asked for; the hook
+  requires both, and requires them to name one version.
+
+  **Agreeing on a version is not enough, and the first version of this shipped
+  believing it was.** Two files that name the same version do not establish that
+  one install produced them. The sequence that breaks it has no exotic step in
+  it: an attempt to X fails after OTP's file is written, the operator retries X,
+  the retry arms a fresh marker beside the stale file, and a manual or hard
+  restart *before the retry reaches `install_release/1`* then presents a matching
+  pair. The launcher boots X, which nothing installed, and OTP's records call it
+  `unpacked` — the node runs one release while `which_releases/0` reports another.
+  Back-to-back or concurrent installs broke it the other way, by overwriting and
+  disarming each other's marker.
+
+  **So the pair is owned by an install *attempt*, and four things make it so.**
+  `unclaimed/3` and `arm/4` are three of them and the order is the protocol; the
+  fourth is that there is only ever one caller in the install at all.
+
+  1. **One pending restart install at a time.** A marker already at the path
+     refuses the install rather than being adopted or replaced, which is what
+     keeps step 2 from clearing the `new_start_erl.data` that attempt's
+     preparation wrote. `publish/2` decides it a second time over, by refusing
+     rather than replacing.
+  2. **OTP's file is cleared before the marker is armed.** That is what closes
+     the window above: after it, `new_start_erl.data` existing means *this*
+     attempt's preparation wrote it. Removing it is safe —
+     `write_new_start_erl/3` goes through `file:write_file/2`, which creates the
+     file when it is absent. The order matters and must not be reversed: an
+     attempt that refused *after* clearing would take an already-requested
+     reboot away silently.
+  3. **The marker names the attempt that armed it**, on a second line, and
+     `disarm/3` removes it only if it still does. The marker's name is shared and
+     the marker is short-lived — *any* `start` or `daemon` of the deployment
+     consumes it, whether or not that start goes on to boot — so removing it by
+     name would take a later attempt's marker away. The attempt is the operating
+     system pid, the wall clock in nanoseconds and a serial: unique within a node
+     and across its restarts, which is as far as ownership has to reach, because
+     the marker never outlives the next start. It is not a secret and does not
+     need to be — anything able to forge it can write in the releases directory,
+     where it could write the marker itself. What it defends against is
+     confusion, not forgery. **The hook never reads it**: the version is the
+     first line, which is what `head -n 1` gives it, so the file carries this
+     without the shell parsing anything it did not before.
+  4. **One caller in the install at a time**, which is `Castle.Commands.serialised/2`
+     and the whole of what makes the first three mean anything across processes.
+
+  **Steps 1 to 3 are one caller's sequence, and the first version of this
+  believed that `release_handler` serialising `install_release/1` was enough to
+  make them a protocol. It is not: that serialisation is *downstream* of all of
+  them.** Two callers both read the running release, both classify it and both
+  pass step 1, because none of that has published anything yet. Step 1 reversed
+  with step 2 is then no protection at all — the loser reaches step 2 *after* the
+  winner's `install_release/1` has written `new_start_erl.data`, deletes it, and
+  the winner's reboot comes back on the permanent release while the loser reports
+  that nothing has been changed. An operator sees a timeout and a false
+  reassurance.
+
+  **Do not answer this by reordering the protocol.** Publishing before clearing
+  leaves a window in which the marker pairs with a *stale* `new_start_erl.data`,
+  and the hook then boots a version nothing installed — which is worse than
+  losing a reboot, and is what step 2's position exists to prevent. The order is
+  right for one caller; the fix is that there is one caller.
+
+  **The serialised region is the whole install, not just the arming**, because the
+  classification is a prediction about the running release: an install that
+  completes between `restart_planned?/3` and `install_release/1` moves the
+  from-version, so `do_get_rh_script/4` evaluates a different relup entry and the
+  armed state disagrees with the transition OTP selects. So the running-release
+  read, the classification, the arming, `install_release/1` and the disarming are
+  all inside it. The ERTS guard is the one part deliberately outside — it reads
+  two directories and refuses without touching anything, and a refusal has no
+  reason to wait.
+
+  **It is `:global.trans/3` over `[node()]`, and the mechanism was chosen rather
+  than assumed.** `global_name_server` is a kernel process running whether or not
+  distribution is, and `set_lock/2` restricted to `[node()]` talks to the local
+  one only — so this works on a node with `is_alive() == false`, which is the
+  ordinary case for a release that configures no distribution, and is the case it
+  was measured on. `trans/3` releases the lock in an `after` and `global` monitors
+  the holder besides, so a caller that dies releases it instead of wedging every
+  later install; retries are `infinity`, so there is no `aborted` to have to mean
+  something by. The alternative was a process of Castle's own, and it is a worse
+  trade: these modules are deliberately stateless and run inline in whatever
+  process asked, so a lock server would be a new entry in the *managed* system's
+  supervision tree, with a lifetime and a restart strategy, to serialise a command
+  that runs a handful of times in a deployment's life.
+
+  `[node()]` rather than the default `[node() | nodes()]` because every caller
+  arrives on the running node — `bin/castle` is `rpc`, and the launcher's preboot
+  only calls `make_releases/0` — so this node is the whole set of callers. A
+  cluster-wide lock would make an install wait on nodes that share nothing with
+  the deployment, and make a network partition its business, and it still would
+  not cover a caller in some other VM. **That is the boundary and it should be
+  said plainly:** a second VM writing into this releases directory is outside the
+  lock, and what defends the marker there is the filesystem half alone —
+  `publish/2` refusing rather than replacing — which is no worse than before and
+  no better. It waits rather than refusing, and the waiter then meets step 1 and
+  is told a restart install is pending: the same message as before, said about a
+  pair that is complete instead of said while taking half of it away.
+
+  **`install` and `commit` take it; `unpack` and `remove` do not.** Those two arm
+  nothing and hold no two-file invariant of their own, and `release_handler`
+  serialising its own record writes is the whole of what they need.
+
+  `commit` was left out at first, on the argument that putting it behind an
+  install "waiting on a reboot" would be a deadlock dressed as caution. **That
+  was wrong, and the error was about when the lock is held rather than about
+  commit.** An install never holds it across a reboot: `install_release/1`
+  replies *before* `init:reboot()`, the reboot runs in `release_handler`'s own
+  process, so `Commands.install/5` returns and its `trans` releases while the
+  system is still up — and after a restart transition the VM that held the lock
+  is gone entirely. `bin/castle install` then polls `Castle.running/1` over
+  separate rpcs that take no lock at all. The only thing a commit can wait for is
+  a *hot* install still inside `install_release/1`, and waiting there is correct:
+  committing part-way through an upgrade is the thing not to do.
+
+  What the omission left open was reachable and is the failure this protocol
+  exists to prevent. A duplicate install of the version being committed
+  materialises between `commit`'s two steps; the commit succeeds; that install
+  then fails as already installed; and *its* configuration is what the newly
+  permanent release boots on the next restart. A failed caller deciding what a
+  successful one boots, through the one operation left outside the region.
+
+  **Materialising the target's configuration is inside the region, and the
+  argument for keeping it outside was wrong.** That argument was: it writes only
+  into the target's own version directory, its own primitives refuse rather than
+  replace, and holding this lock across a peer VM's boot would put every install
+  behind another's configuration step. The middle claim is false about the step
+  that matters. The staging refuses rather than replaces and
+  `sys.config.pristine` refuses rather than replaces, but the *last* thing
+  materialising does is rename the resolved configuration onto `sys.config` — a
+  replace by design, and necessarily so, because that is the file
+  `release_handler` reads. So two callers materialising before either reached the
+  lock meant the loser's providers could replace the configuration the winner's
+  provisional release was about to boot, and the loser was then refused for the
+  winner's marker: a refused install decided what a successful one booted. That
+  providers may answer differently across evaluations is not a hypothetical — it
+  is the entire reason `sys.config.pristine` exists.
+
+  The third claim is true and is not a reason. It is a throughput argument about
+  concurrent installs, and this protocol refuses concurrent installs anyway; an
+  install that waits is slow, and an install whose configuration is somebody
+  else's is wrong.
+
+  **Inside the region is not enough on its own — it has to be after the
+  refusals.** `Commands.install_upgradable/5` runs the record check, then
+  `unclaimed/3`, then materialises, then arms. A caller refused for a pending
+  restart install must be refused *before* it configures anything, because the
+  version it would be configuring is the one the pending install's reboot is
+  about to boot. Moving the materialisation inside the lock while leaving it in
+  front of `unclaimed/3` fixes nothing, and there is a test whose only job is to
+  fail against exactly that arrangement.
+
+  **`commit` materialises inside the same region, and the argument for leaving it
+  outside was wrong twice over.** It went: commit is not the same case, because it
+  makes permanent a version this node already installed and is running, so there
+  is no marker, no reboot and no window between a configuration and a boot of it —
+  and putting it behind the install lock would be the deadlock above anyway.
+
+  The first half is true and does not license the second. The window is not
+  between a configuration and a *boot*; it is between commit's own two steps. A
+  duplicate install of the version being committed materialises there, the commit
+  succeeds, that install fails as already installed, and its configuration is what
+  the newly permanent release boots on the next restart. And the deadlock does not
+  exist — see above: an install never holds this lock across a reboot, so the only
+  thing commit can wait for is a hot install mid-`install_release/1`, which is
+  exactly when it should wait.
+
+  So `Commands.commit/5` takes `rel_dir` and materialises inside `serialised/2`,
+  the way `install` does, and `Castle.commit/1` composes nothing. The two renames
+  onto one `sys.config` are now ordered wherever they meet.
+
+  **It is published the way `sys.config.pristine` is** — staged in an owner-only
+  working directory and hard-linked into place — and for the same two reasons a
+  link was chosen there. A link publishes a file that is already complete, so no
+  start can read a marker that is empty or half written; and it refuses rather
+  than replaces, so the loser of a race is told instead of silently taking the
+  marker over. An exclusive create in place has neither property: it makes
+  *creation* atomic and leaves the file empty between the open and the write, and
+  a death in that window leaves an empty marker that blocks every later attempt.
+  `Castle.Commands` therefore calls `Castle.Peer.work_dir/1`,
+  `write_private/2` and `publish/2` **directly**, not through the injected module
+  `materialise/3` uses: those start no VM, there is nothing about them a stub
+  could stand for, and the guarantee is the point.
+
+  Consuming them is Forecastle's, and what is atomic there is the *claim*: the
+  pending marker is taken by rename, so exactly one start can act on the pair,
+  and OTP's file is then read and removed separately. The two removals are not
+  one operation and cannot be made one — no POSIX call renames two files
+  together. What that costs is bounded by the order: the marker goes first, so an
+  interruption anywhere after it leaves no marker and the next start boots the
+  permanent version. The selection is lost, never duplicated, and never applied
+  to a version nothing installed. Do not write that both are consumed
+  atomically: this note said it, Forecastle's `AGENTS.md` said it, and
+  Forecastle's release note said it, and it was false in all three.
+
+  **It is armed from the relup, and it has to be, because the reply cannot answer
+  the question.** `restart_emulator` is replied to with `{ok, Vsn, Descr}` —
+  exactly what a completed hot upgrade replies — and `init:reboot()` has already
+  been called by the time the reply arrives. So a marker armed unconditionally
+  and cleared on `{ok, ...}` would be racing a shutdown, and losing that race
+  loses the upgrade silently. `restart_planned?/3` therefore reads the same file
+  `release_handler` will read: `do_get_rh_script/4` looks for the from-version in
+  the target's own relup and then for the to-version in the from-release's
+  downgrade section, and the from-version is the release the system is running,
+  which is what `get_latest_release/1` selects and what `running_release/1`
+  already computes. **`which_releases/0` is asked once** and the answer used for
+  both the record check and this, for the reason the record check lives inside
+  the operation: two calls are two moments.
+
+  This is a prediction and not a second state machine. Nothing here writes a
+  release record, and it decides exactly one thing — whether to arm. Being wrong
+  either way is bounded: unarmed, the reboot returns on the permanent version and
+  `install` reports that the version never became the running one; armed without
+  a reboot, the hook consumes the marker on the next start and finds nothing to
+  correlate it with.
+
+  **The two-stage `restart_new_emulator` is deliberately not armed for**, and the
+  reason is not that it is out of scope. The marker OTP writes for it names the
+  *temporary hybrid* release, `__new_emulator__<current>`, and
+  `new_emulator_make_hybrid_boot/6` gives that version directory a `start.boot`
+  and a `sys.config` and none of the launcher's own furniture — no `env.sh`, no
+  `elixir`, no `vm.args`. There is nothing there for a launcher to boot, so
+  arming would point it at a version it cannot start. It is told apart the way
+  `do_install_release/3` tells them apart: the instruction at the *head* of the
+  script. Anywhere else it is an error rather than a transition —
+  `syntax_check_script/1` accepts only `restart_emulator` after the point of no
+  return.
+
+  **A marker that cannot be armed refuses the install**, before
+  `install_release/1` is asked for anything, and so does a stale
+  `new_start_erl.data` that cannot be cleared — because the alternative in both
+  cases is a reboot that comes back on the wrong version with nothing saying so.
+
+  **Settling the marker afterwards happens on every way out, including the ones
+  that do not return, and failing to settle it is reported.** Both halves of that
+  replaced something weaker.
+
+  The region is `Commands.installed/5`, and it is an *implicit* `try` — the
+  function body, with `catch` and `else` clauses, which is the form
+  `credo --strict` asks for. It used to be a bare `case` over the reply with
+  `disarm` in the two failing branches, so an exit, a throw or a raise out of
+  `install_release/1` went past both: the marker stayed armed, and where
+  `prepare_restart_new_emulator/7` had already written `new_start_erl.data` the
+  pair was complete and the next start booted a version whose install had blown
+  up. That is the hazard the whole protocol exists to prevent, reintroduced
+  through the one path that is not a return. It is `catch`/`else` and **not**
+  `after`: an `after` cannot see which way the block went, so it would disarm the
+  successful restart install too, taking away the marker whose entire purpose is
+  to outlive the call. There is a test for that.
+
+  An exception is re-raised unchanged once the marker is settled — `Castle` is
+  the boundary that raises, `Kernel.CLI` catches on the node and the calling VM
+  re-raises, and Castle has nothing to add to an exception out of
+  `release_handler` that is worth losing the stacktrace for. The one exception to
+  that is a marker it could not settle, where the exception is folded into the
+  message instead, because that is the fact an operator most needs and a
+  stacktrace is where it would be buried.
+
+  Clearing the marker used to be best-effort on the argument that a releases
+  directory the marker cannot be removed from is one it could not have been
+  linked into, so the install would already have refused. **That holds only if
+  nothing changed in between, and `install_release/1` runs in between** — for as
+  long as an upgrade takes, with the system's own code being replaced. Worse, an
+  *unreadable* marker was classified as another attempt's and left alone, which
+  reads as caution and is not: a marker that cannot be read is no evidence about
+  whose it is, and the file it might be is the one the next start acts on.
+
+  So `disarm/3` has four answers and two of them are failures. **Ours** is
+  removed, and a removal that fails is reported. **Theirs** is left, which is a
+  success — a later attempt's marker is a reboot still owed. **Gone** is a start
+  of the deployment having consumed it, which is the outcome that was wanted, so
+  `:enoent` from either the read or the removal is success. **Unverifiable** is
+  reported: Castle will not remove a marker it cannot show is its own, and will
+  not pretend the question was answered. What the operator is told names the
+  file, says `new_start_erl.data` may already be beside it, says that an ordinary
+  restart will therefore boot the version the install did not finish, and asks
+  for the marker to be removed before the system is restarted.
+
+  The read and the removal go through `Castle.Deployment.read/1` and `rm/1`, for
+  the reason `stat/1` is there: the answers that decide what Castle *says* are
+  the failing ones, and every fixture that makes a `read` or `rm` fail on a
+  regular file in a writable directory does it with a mode, which root and some
+  filesystems ignore — so the fixture would only sometimes describe the state it
+  names and would pass either way. That seam is for outcomes Castle has to speak
+  about and cannot cause; it is **not** a general filesystem seam, and the
+  primitives that *publish* the marker stay called directly for the reason given
+  above.
+
+  **The report changes with it.** `reported/5` says the version was installed,
+  that the emulator is restarting, and that the version stays provisional until
+  it is committed — instead of "Now running", which is false for as long as the
+  reboot takes and which automation reads.
 
 Every one of them is a command entry point, so `Castle` is the command
 boundary: an operation that fails raises `Castle.Error` there, which is what
@@ -584,7 +930,7 @@ module.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
-| `lib/castle/deployment.ex` | The two environment facts the ERTS guard rests on, and nothing else |
+| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`read`/`rm` whose *failures* decide what a refusal says |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
 | `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
@@ -780,25 +1126,194 @@ It is paired with a release whose check is satisfied, so that "refuses
 everything" cannot pass for "checks correctly", and with one carrying a shape
 Elixir does not produce, which has to be refused rather than skipped.
 
+The restart marker's tests are written the same way, and the discriminators are
+the same kind: `restart_planned?/3` is exercised by writing a real relup where
+`release_handler` reads one and asserting on the *file* — armed for a script
+carrying `restart_emulator`, from the from-release's downgrade section for a
+downgrade, and not armed for a hot script, for `restart_new_emulator` at the
+head, or when there is no relup at all. A relup with no entry for the running
+version is what makes the downgrade case a genuine second lookup rather than the
+first one succeeding by accident. Both arming refusals are arranged by putting a
+*directory* where a file has to be — at the marker's name for the one, at
+`new_start_erl.data` for the other — which is deterministic and needs no file
+modes, since a fixture here may not turn on a mode that root or a filesystem can
+ignore. And `Stub.calls(:which_releases) == [[]]` on the successful install is now
+load bearing twice over: it says the record check happened in the call that acted,
+*and* that the classification did not ask a second time.
+
+**The attempt-ownership tests are about states that only exist while
+`install_release/1` is in flight**, so `Castle.ReleaseHandlerStub` accepts a
+*function* as a reply and calls it with the arguments. That is the only seam
+between the arming and the disarming, and it is what makes three otherwise
+unobservable things assertable: a preparation that writes `new_start_erl.data`
+and *then* fails, so that a same-version retry can be shown to clear it rather
+than pair with it; the filesystem as a hard restart before the reboot would find
+it, which is the marker alone and no pair; and a marker replaced between the
+arming and the disarming, so that `disarm/3` can be shown to leave a marker it
+did not write. None of those has an end state that distinguishes it — a
+successful install leaves the marker armed either way, and a failed one leaves it
+gone either way — which is the same reason `Castle.Peer`'s primitives are public.
+A marker already at the path needs no seam of its own: it is a pending attempt,
+and what is asserted is that the install is refused, that `install_release/1` was
+never called, and that *neither* the marker nor OTP's file was touched — the
+second half being the ordering that keeps a refusal from destroying a pending
+attempt's evidence.
+
+**Two real callers do need one, and the seam is `which_releases/0` rather than
+`install_release/1`.** The state that used to be reachable is two callers past the
+running-release lookup and neither of them armed, so what has to be held open is
+the *front* of the serialised region — and the lookup is both the first thing in
+it and the last thing before anything is written. So `installer/3` runs
+`install/5` in a task of its own with a `which_releases/0` that reports where it
+got to and, optionally, waits to be released; a second caller is started while the
+first is held there, and the discriminator is that its lookup never happens
+(`refute_receive {:looked_up, :second}`). `Task.await` and `assert_receive` carry
+generous timeouts because `global`'s lock retry backs off by up to a second or
+two, and every stub reply and call record lives in the *task's* process
+dictionary, so a caller answers with its own `Stub.calls(:install_release)` and
+its own `PeerStub.calls()` rather than the test reading them.
+
+Four of them. The second is the other direction — a failed first install hands the
+region on, and the waiter arms its own marker. The third is not about the marker
+at all: one relup for 1.2.3 whose transition from 1.2.2 is hot and from 1.2.1
+restarts the emulator, installed concurrently by two callers running different
+versions. It says the classification belongs to the caller that made it — the
+second half of why the region reaches past the arming — and that the hot caller
+neither adopts nor disarms the marker the restarting one is waiting on.
+
+**The fourth is about the configuration, and it is the one that needs providers
+whose results can be told apart.** `Castle.PeerStub` therefore accepts a
+*function* reply, like `Castle.ReleaseHandlerStub` does, so a caller's
+materialisation can write a distinguishable `sys.config` into the version
+directory — which is what the real one ends by renaming into place. Two callers
+are given different ones, the first is held at the lookup and goes on to arm and
+"reboot", the second is refused for the pending marker, and the assertions are
+that the second's peer was **never called** (`PeerStub.calls() == []`) and that
+the target is left holding the first's configuration. With both callers answering
+`{:ok, []}` there is nothing to see: the end state is identical whichever of them
+ran, which is exactly why the composition survived three rounds of review. Note
+what this test fails against, because it is the point of it — not just
+materialising outside the lock, but materialising *inside* the lock and in front
+of `unclaimed/3`, which is the fix that looks sufficient and is not.
+
+**It is also the one case that runs through `Castle.install/5` rather than
+`Commands.install/5`, and that is not a detail.** The defect was a composition in
+`Castle.install/1`, so a case that only ever called `Commands.install/5` was
+asserting about a function the defect was not in: putting `materialise/3` back in
+front of the install left it green. `installer/3` takes `through: :boundary` for
+this one, which runs the command boundary — so the two callers are two `rpc`s,
+which is what they are in a deployment. The boundary prints what succeeded and
+raises what failed, so `invoke/2` puts both back into the shape
+`Commands.install/5` returns: `with_io/1` inside the task, because that is whose
+group leader has to be swapped, and an implicit-`try` `attempt/1` to turn
+`Castle.Error` back into an `{:error, message}`. Every other case here stays on
+`Commands.install/5`, which is the right level for a claim about the serialised
+region itself.
+
+**The exception path has tests of its own, and the seam is
+`Castle.ReleaseHandlerStub`'s function reply again.** A raise, an exit and a
+throw out of `install_release/1`, each asserted to leave no marker behind, with
+`new_start_erl.data` written first in the raise case so that what survives would
+be the complete pair. A fourth asserts the opposite for a *successful* restart
+install — the marker stays — which is what forbids `try/after` in place of
+`catch`/`else`, since an `after` cannot tell the two apart and no other assertion
+here would notice.
+
+**Being unable to settle the marker is reached through `Castle.DeploymentStub`,
+not through a mode.** `stub_read/1` and `stub_rm/1` take a reply or a function of
+the path, so a refusal can be scoped to the marker alone while everything else the
+install touches goes through the real `File`. Unstubbed, both are the real thing,
+for the reason `stub_stat/1` is: a fixture that only sometimes turns on the state
+it names is a test that only sometimes tests anything. The four cases are a
+removal refused with `:eacces`, a read refused with `:eio`, both of those *and* a
+raise from `install_release/1` — where the exception has to be folded into the
+message rather than let out — and the quiet one, a marker a start of the
+deployment consumed, where `:enoent` must not be reported as a failure. That last
+one is what keeps the reporting from being noise on an ordinary interrupted
+install. The `DeploymentStub` in these is given `nil` for both roots, so the ERTS
+guard is inert exactly as it is under `mix test` with no `RELEASE_ROOT`.
+
+Every install case now names a `configured(dir)` — the version directory unpacked
+and a peer that says it configured it — because materialising is a step of the
+install rather than something composed in front of it. That is deliberate rather
+than an inconvenience: a case that did not say what the peer did would not have
+said what the version it installed is configured with. The ERTS-guard cases pass
+an **unstubbed** `Castle.PeerStub` instead, which raises if it is reached, so
+"refuses without starting a peer" is asserted by the guard holding rather than by
+a separate look.
+
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
 `:e2e` suite ([#8](https://github.com/ausimian/castle/issues/8)), which
 exercises this code against a real release and asserts on the success messages
 each command prints. Those strings — `Unpacked <vsn> ok`,
 `Now running <vsn> (previously <other>).`, `Committed <vsn>. …` and the
-`releases/0` table — are a contract with that suite. Failure messages are not.
+`releases/0` table — are a contract with that suite. Failure messages are not,
+and neither is what a restart install reports: that message may not outlive the
+reboot it announces, so the `:e2e` suite asserts the exit status and the state
+the system ends up in and leaves the wording to the unit test here.
+
+The restart transition is covered end to end all the same, in both halves:
+Forecastle's `restart_upgrade_test.exs` drives a `--restart` relup through
+`unpack`/`install`/`commit` against a real supervised release, asserts the OS pid
+changes, kills the provisional release before committing to see it roll back, and
+installs again from the release that came back.
+
+It is also what finally covers the interaction between a materialised
+`sys.config` and a later cold boot of the same version, which used to be listed
+below as unverified. The provisional boot *is* that cold boot: it re-runs the
+target's own providers over the materialised file, with `SAMPLE_GREETING` changed
+underneath it, and answers with the new value. What lets it is that materialising
+leaves no `config_provider_booted` marker behind and preserves the header Mix
+wrote, so Elixir's pipeline is still armed in the file the launcher reads.
 
 ## Known limitations
 
-- **How the materialised `sys.config` and a later cold boot of the same version
-  interact is not verified.** Both write the same file. Materialisation resolves
-  from `sys.config.pristine` and leaves no `config_provider_booted` marker
-  behind, so a cold boot re-runs the providers over the materialised result —
-  which is what the issue expects, and what the header Mix wrote is preserved
-  for. That is now reachable, since
-  [forecastle#6](https://github.com/ausimian/forecastle/issues/6) landed, but
-  nothing asserts it: Forecastle's `:e2e` suite installs and commits without
-  restarting afterwards. It belongs there, because it takes a booted release.
+- **Nothing in the release restarts it after an emulator restart, and that is
+  the design.** `init:reboot()` takes the OS process down, `bin/start` is inert,
+  and `HEART_COMMAND` is unset, so the external supervisor is the only thing that
+  brings the system back. A deployment started by hand from a shell therefore
+  stays down until somebody starts it — and comes back on the installed version
+  when they do, because the markers are still waiting. See forecastle#10 for why
+  a second restart authority was refused rather than added.
+- **A hard kill during a restart install can only lose the reboot, not misapply
+  it** — and where the pair survives such a kill, booting the target is right
+  rather than tolerated. Which window it lands in decides which:
+
+  Between the arming and `prepare_restart_new_emulator/7`, only the marker
+  exists — OTP's file was cleared on the way in — so there is no pair, the next
+  start boots the permanent version, and the marker is consumed and discarded.
+  After `prepare_restart_new_emulator/7`, both exist, and so does a
+  `tmp_current` record for the target: the relup was evaluated in the VM that
+  died, the target is unpacked with its configuration materialised, and
+  `transform_release/3` will make it `current` on the way up. That is the state
+  the reboot was going to produce, so the next start producing it is the
+  protocol working. `releases/start_erl.data` still names the previous permanent
+  version either way, so nothing is committed by a crash.
+
+  There is still no test that plants the pair by hand, and that is a decision
+  rather than an omission. What a planted pair adds is a state OTP's records
+  contradict — forging the markers for a version the handler has no
+  `tmp_current` for leaves the node running one release while `which_releases/0`
+  reports another — so pinning it would pin an incoherence. What *is* pinned is
+  the state each window leaves: a unit test observes the filesystem from inside
+  `install_release/1` and finds the marker alone, and the restart `:e2e` suite
+  covers the far window by killing the provisional release before the commit.
+- **Serialising the install is node-local, so a second VM writing into the same
+  releases directory is outside it.** `Castle.Commands.serialised/2` locks over
+  `[node()]`, which is exact for every caller Castle has — `bin/castle` is `rpc`,
+  and the launcher's preboot step calls only `make_releases/0` — but it is a
+  statement about callers rather than about the directory. Something else running
+  `Castle.install/1` in a VM of its own against the same deployment gets the
+  filesystem half of the protocol and nothing more: `publish/2` refuses rather
+  than replaces, so the marker cannot be silently taken over, and the window the
+  lock closes — two callers both past `unclaimed/3` before either publishes — is
+  open again between them. Widening the lock does not fix it; a lock the
+  filesystem holds would, at the price of a stale one after a hard kill blocking
+  every later install. Nothing is known to do this, and Castle does not detect
+  it. It is the one limitation here that a lock cannot narrow, which is why the
+  filesystem half of the protocol — `publish/2` refusing rather than replacing —
+  has to stand on its own.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

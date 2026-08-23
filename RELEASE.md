@@ -112,11 +112,119 @@
   script that emits the marker before its applications are started defeats the
   check instead, since the marker is all there is to go on.
 
-  Nothing can build a relup that restarts the emulator until
-  [forecastle#4](https://github.com/ausimian/forecastle/issues/4), so the
-  restart transitions this addresses cannot be exercised end to end yet. The
-  hot-upgrade path is covered by Forecastle's end-to-end suite; the statuses
-  themselves are covered by unit tests here.
+  Both the hot-upgrade path and the emulator-restart path are covered end to end
+  by Forecastle's `:e2e` suite, which polls through a real reboot.
+- Upgrades that restart the emulator now work on a release supervised by
+  systemd, Docker, Kubernetes or anything else that owns starting the service.
+  `Castle.install/1` recognises such a transition from the relup before it asks
+  `:release_handler` for anything, and leaves a marker beside the release records
+  naming the version being installed. The launcher's `env.sh` fragment, which
+  Forecastle 1.0.0 contributes, consumes that marker on the next start and boots
+  the version it names.
+
+  Two files have to agree for that to happen, and the reason is worth stating:
+  `:release_handler` writes `releases/new_start_erl.data` *before* the reboot and
+  nothing ever removes it, so a preparation that failed part-way leaves a file
+  naming a version that was never installed. Castle's own marker is what says a
+  reboot was really asked for; it is written immediately before the install and
+  removed on every path where the install failed, and the launcher requires both
+  files and requires them to name one version. An install whose marker cannot be
+  written - a release root nothing may write to - is refused rather than
+  performed, because the alternative is a reboot that silently comes back on the
+  version it was upgrading away from.
+
+  Agreeing on a version is not on its own enough, so the pair belongs to one
+  install *attempt* rather than to a version. Any `new_start_erl.data` left by an
+  earlier attempt is cleared before a new marker is armed - otherwise a retry of
+  the same version would arm a marker beside a file it did not write, and a
+  restart before the retry reached `:release_handler` would boot a version that
+  nothing had installed.
+
+  Only one install runs on the node at a time, and that is what makes the
+  clearing mean anything: two of them could otherwise both decide to arm before
+  either had, and the second would clear the `new_start_erl.data` the first one's
+  reboot depends on - leaving the first system to come back on the version it was
+  upgrading away from, while the second reported that nothing had been changed.
+  An install that has to wait waits, and then finds the first one's marker.
+
+  What is serialised is `Castle.install/1` itself, and that includes
+  materialising the target's configuration. It is worth saying which parts, since
+  "the whole operation" was claimed here while the configuration step was still
+  outside: materialising ends by renaming a resolved configuration onto the
+  target's `sys.config`, so two callers doing it before either reached the lock
+  meant the loser's config providers - evaluated in a VM of their own, with
+  whatever environment that caller had - could replace the configuration the
+  winner's provisional release was about to boot, after which the loser was
+  refused for the winner's marker. The install that was refused decided what the
+  install that succeeded booted. Configuration providers are not obliged to
+  produce the same answer twice, which is the reason `sys.config.pristine` exists
+  in the first place.
+
+  So the region now runs from the release-record lookup through the
+  configuration step to `install_release/1` and the marker being settled, and a
+  caller that is going to be told a restart install is pending is told *before*
+  it configures anything. Only the ERTS guard is outside, because it reads two
+  directories and refuses without touching anything.
+
+  `commit` is serialised the same way, and for a reason that is not obvious: it
+  configures the version too, so a duplicate install of the version being
+  committed could configure it between commit's two steps - the commit would
+  succeed, that install would then fail as already installed, and its
+  configuration would be what the newly permanent release booted on the next
+  restart. A failed caller deciding what a successful one boots. `unpack` and
+  `remove` are not serialised: they configure nothing and arm nothing.
+
+  Which kind of transition an install is, is decided from the release the system
+  is running, and another install completing in between would change that answer -
+  which is the other reason the region reaches past the arming.
+
+  A restart install while another one is already pending
+  is refused rather than allowed to take over its marker, saying so and changing
+  nothing; the marker is consumed by the next start of the deployment, so a
+  restart clears one left behind by an install that was interrupted. And the
+  marker records which attempt armed it, so a failed install removes only its own
+  - a start of the deployment consumes the marker whether or not it goes on to
+  boot, so the file at that path when an install fails is not necessarily the one
+  that install wrote. It is published by linking a file that is already complete
+  into place, the way the pristine configuration above is, so no start can read a
+  marker that is half written and a race is refused rather than silently won.
+
+  The marker is settled on **every** way out of the install, including the ones
+  that do not return: an exit, a throw or a raise out of `install_release/1` is
+  caught, the marker dealt with, and the failure then let out unchanged. Before,
+  only a returned error cleared it - so an exception left the marker armed, and
+  where `:release_handler` had already written its own file the pair was complete
+  and the next start booted a version whose install had blown up.
+
+  And an install that cannot settle its marker now **says so, and says what it
+  means**, rather than reporting the original failure alone. A marker Castle
+  could not remove, or could not read well enough to tell whether it was still
+  its own, is a live instruction to the next start of that system: the failure
+  message names the file, says that `new_start_erl.data` may already be beside
+  it, says that an ordinary restart will therefore boot the version the install
+  did not finish, and asks for the marker to be removed first. Clearing it used
+  to be best effort on the argument that a directory the marker cannot be removed
+  from is one it could not have been linked into - which holds only if nothing
+  changed in between, and `install_release/1` runs in between.
+
+  What the install *reports* is different for such a transition, because
+  `install_release/1` replies the same `{ok, Vsn, Descr}` for a completed hot
+  upgrade and for one that is about to reboot. Rather than say "Now running", it
+  says that the version was installed, that the emulator is restarting, and that
+  the version stays provisional until it is committed - which is what
+  `releases/start_erl.data` still naming the previous version means. `bin/castle
+  install` goes on asking the system what it is running across the reboot, and
+  exits 0 once the installed version answers.
+
+  The rollback that provisional state buys is real and needs nothing:
+  `make_permanent/1` is the only thing that writes `releases/start_erl.data`, so
+  a provisional release that dies before `Castle.commit/1` is followed by an
+  ordinary start of the version that was permanent before.
+
+  The two-stage `restart_new_emulator` transition remains unsupported. It reboots
+  into a temporary hybrid release whose version directory holds a boot script and
+  a configuration and none of the launcher's own files, so there is nothing for a
+  launcher to boot; Forecastle refuses to generate one.
 
 ### Changed
 
@@ -127,6 +235,11 @@
   release built by Mix that is the file OTP writes; a deployment that sets
   `RELDIR` or the `sasl` `releases_dir` parameter moves the release records
   elsewhere, and Castle does not yet follow them.
+- `Castle.install/1` accepts four further arguments, all defaulted, naming the
+  releases directory and the modules it talks to. `Castle.install("1.2.3")` is
+  unchanged and is still what `bin/castle` calls; the arguments exist so that
+  concurrent installs can be exercised through the function an operator actually
+  invokes, rather than one layer below it.
 - `unpack/1`, `install/1`, `commit/1`, `remove/1` and
   `make_releases/0` now fail when the operation fails, instead of printing the
   reason and returning normally. These are invoked over `bin/castle`, which

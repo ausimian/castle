@@ -37,11 +37,23 @@ defmodule Castle.ErtsGuardTest do
       # :release_handler - which is the point. Without the guard, make_releases/0
       # would find the Erlang installation's own releases/RELEASES and report
       # success, and remove/1 would be asking the handler to delete out of it.
+      #
+      # **Every command now names itself, and there is no asymmetry left to pin.**
+      # There was one: `commit` used to answer "Cannot configure", because
+      # `Castle.commit/1` composed `materialise/3` in front of the operation and
+      # the configuration step's guard was the first one it met. That composition
+      # is gone - it was racy, and `Commands.commit/5` materialises inside its own
+      # serialised region now, behind its own guard - so what an operator asked
+      # for is what the refusal names, for `commit` exactly as for `install`.
+      #
+      # This is the visible half of that move, and it is worth pinning in this
+      # direction rather than deleting: a "Cannot configure" reappearing here
+      # would mean a composition had come back at the boundary.
       refusals = [
         {&Castle.make_releases/0, "Cannot create"},
         {fn -> Castle.unpack("9.9.9") end, "Cannot unpack 9.9.9"},
-        {fn -> Castle.install("9.9.9") end, "Cannot configure 9.9.9"},
-        {fn -> Castle.commit("9.9.9") end, "Cannot configure 9.9.9"},
+        {fn -> Castle.install("9.9.9") end, "Cannot install 9.9.9"},
+        {fn -> Castle.commit("9.9.9") end, "Cannot commit 9.9.9"},
         {fn -> Castle.remove("9.9.9") end, "Cannot remove 9.9.9"}
       ]
 

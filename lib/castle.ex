@@ -33,8 +33,10 @@ defmodule Castle do
 
     * A command that succeeds prints what it has to report, and returns `:ok`.
       The report is the output rather than the return value: there is nothing in
-      `:ok` to inspect, and the commands that are questions succeed with
-      nothing to say at all.
+      `:ok` to inspect. What there is to print varies by command and not by
+      kind - `upgradable/0` and `running/1` are questions that answer by not
+      raising and print nothing at all, while `releases/0` is a question whose
+      answer *is* its output, a line for every release the system knows about.
 
     * A command that fails raises, and what it raises is not always
       `Castle.Error`. A refusal the command made itself, and an error
@@ -337,10 +339,15 @@ defmodule Castle do
   `bin/castle unpack <vsn>`, which builds the argument as
   `<release name>-<vsn>` - `name` is the tarball's name without its `.tar.gz`
   suffix, the way `:release_handler.unpack_release/1` takes it, and not a bare
-  version. The tarball itself has to have been copied into the release directory
-  `:release_handler` reads first — `releases/` under the deployment root, unless
-  `RELDIR` or the `sasl` `releases_dir` parameter names another one, in which
-  case the handler looks there and only there. It is the `<name>-<vsn>.tar.gz`
+  version. The tarball itself has to have been copied into `releases/` under the
+  deployment root, and that is the only release directory Castle resolves: it
+  joins the name onto `code:root_dir()` and consults neither `RELDIR` nor the
+  `sasl` `releases_dir` parameter. Setting either is not supported, and does not
+  merely go unread - it moves the directory `:release_handler` unpacks into and
+  keeps its records in, while the guard that reads the target's `.rel` and the
+  step that writes the target's configuration both still resolve
+  `<root>/releases/<vsn>`. The two stop agreeing on where a version lives, so
+  such a deployment cannot complete an upgrade. It is the `<name>-<vsn>.tar.gz`
   that `mix release`'s `:tar` step packs, which is why `customize/1` defaults
   `:steps` to include it.
 

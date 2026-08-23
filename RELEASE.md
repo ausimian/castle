@@ -138,7 +138,19 @@
   earlier attempt is cleared before a new marker is armed - otherwise a retry of
   the same version would arm a marker beside a file it did not write, and a
   restart before the retry reached `:release_handler` would boot a version that
-  nothing had installed. A restart install while another one is already pending
+  nothing had installed.
+
+  Only one install runs on the node at a time, and that is what makes the
+  clearing mean anything: two of them could otherwise both decide to arm before
+  either had, and the second would clear the `new_start_erl.data` the first one's
+  reboot depends on - leaving the first system to come back on the version it was
+  upgrading away from, while the second reported that nothing had been changed.
+  An install that has to wait waits, and then finds the first one's marker. What
+  is serialised is the whole operation and not only the arming: which kind of
+  transition an install is, is decided from the release the system is running,
+  and another install completing in between would change that answer.
+
+  A restart install while another one is already pending
   is refused rather than allowed to take over its marker, saying so and changing
   nothing; the marker is consumed by the next start of the deployment, so a
   restart clears one left behind by an install that was interrupted. And the

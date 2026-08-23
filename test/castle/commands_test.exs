@@ -498,6 +498,118 @@ defmodule Castle.CommandsTest do
     end
   end
 
+  # The three steps of `arm_restart/4` are one caller's sequence, and two callers
+  # can run it at once: `release_handler` serialises `install_release/1`, but that
+  # is downstream of the read, the classification and the arming, so both callers
+  # get past the marker check before either publishes. The loser then clears the
+  # winner's `new_start_erl.data` after the winner's preparation wrote it, the
+  # winner's reboot comes back on the permanent release, and the loser says
+  # nothing has been changed while having changed it.
+  #
+  # So the whole install is serialised on the node, and these are about the region
+  # rather than about the marker: what they hold is that a second caller cannot
+  # get as far as the *lookup* while the first is inside.
+  describe "the restart marker, with two callers" do
+    @tag :tmp_dir
+    test "serialises them, so both cannot pass the initial lookup", %{tmp_dir: dir} do
+      # The barrier is `which_releases/0`, which is the first thing inside the
+      # region and the only seam in front of the arming - so a caller held there
+      # has taken the region and armed nothing, which is exactly the state two of
+      # them used to be able to occupy at once. Messages rather than sleeps: what
+      # is asserted is an order, and a test that waits for one is a test that
+      # sometimes asserts nothing.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      first = installer(dir, "1.2.2", as: :first, hold: true, install: prepares_then_reboots(dir))
+      assert_receive {:looked_up, :first}
+
+      second = installer(dir, "1.2.2", as: :second)
+      assert_receive {:started, :second}
+
+      # The discriminator, and the whole of what the region buys. Without it the
+      # second caller reads the running release, classifies the same transition
+      # and passes `unclaimed/2` here, while the first is still in front of its
+      # own arming - after which one of them destroys the other's evidence.
+      refute_receive {:looked_up, :second}, 200
+
+      send(first.pid, :proceed)
+      assert {{:ok, lines}, [[~c"1.2.3"]]} = Task.await(first, 30_000)
+      assert Enum.join(lines, " ") =~ "The emulator is restarting."
+
+      # Only now does the second caller look, and what it finds is a marker beside
+      # the file OTP's preparation wrote - a finished attempt waiting for its
+      # reboot. It is refused, which is the message it would have been given
+      # before as well; the difference is that it is now said about a pair that is
+      # complete rather than said while taking half of it away.
+      assert_receive {:looked_up, :second}, 10_000
+      assert {{:error, message}, []} = Task.await(second, 30_000)
+      assert message =~ "a restart install is pending - it names 1.2.3"
+
+      assert armed_version(dir) == "1.2.3"
+
+      assert File.exists?(provisional(dir)),
+             "the waiting caller cleared the reboot's own new_start_erl.data"
+    end
+
+    @tag :tmp_dir
+    test "hands the region on when the first install fails", %{tmp_dir: dir} do
+      # The other direction, and what says the region is given up on every way
+      # out rather than only on the happy one: a failed install disarms, so the
+      # caller that was waiting finds the path free and arms its own marker.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      failing = {:error, {:bad_relup_file, ~c"relup"}}
+      first = installer(dir, "1.2.2", as: :first, hold: true, install: failing)
+      assert_receive {:looked_up, :first}
+
+      second = installer(dir, "1.2.2", as: :second, install: prepares_then_reboots(dir))
+      assert_receive {:started, :second}
+      refute_receive {:looked_up, :second}, 200
+
+      send(first.pid, :proceed)
+      assert {{:error, _}, [[~c"1.2.3"]]} = Task.await(first, 30_000)
+      assert {{:ok, _}, [[~c"1.2.3"]]} = Task.await(second, 30_000)
+
+      assert armed_version(dir) == "1.2.3"
+    end
+
+    @tag :tmp_dir
+    test "classifies each of them from the release it found running", %{tmp_dir: dir} do
+      # One relup, two answers. From 1.2.1 the transition to 1.2.3 restarts the
+      # emulator and from 1.2.2 it is hot, so what the classification decides
+      # depends on the release the caller found running - and an install that
+      # completed in between would move it, arming a marker for a reboot OTP will
+      # not make or taking a reboot with none armed. Which is the second reason
+      # the region reaches past the arming to `install_release/1`.
+      relup!(
+        dir,
+        "1.2.3",
+        [{~c"1.2.2", [], [{:apply, {:m, :f, []}}]}, {~c"1.2.1", [], [:restart_emulator]}],
+        []
+      )
+
+      restarting =
+        installer(dir, "1.2.1", as: :restarting, hold: true, install: prepares_then_reboots(dir))
+
+      assert_receive {:looked_up, :restarting}
+
+      hot = installer(dir, "1.2.2", as: :hot)
+      assert_receive {:started, :hot}
+      refute_receive {:looked_up, :hot}, 200
+
+      send(restarting.pid, :proceed)
+      assert {{:ok, lines}, _} = Task.await(restarting, 30_000)
+      assert Enum.join(lines, " ") =~ "The emulator is restarting."
+      armed = File.read!(marker(dir))
+
+      # The hot caller arms nothing of its own, so it neither adopts nor disarms
+      # the marker the restarting one left: the reboot that is still owed happens
+      # on the version that asked for it.
+      assert {{:ok, ["Now running 1.2.3 (previously 1.2.2)."]}, _} = Task.await(hot, 30_000)
+      assert File.read!(marker(dir)) == armed
+    end
+  end
+
   describe "running/3" do
     test "confirms the version an install has made current" do
       handler =
@@ -811,16 +923,58 @@ defmodule Castle.CommandsTest do
   # What a node reports once its boot script has run to the end.
   defp booted, do: InitStub.stub({:starting, :started})
 
+  # What `which_releases/0` reports for a node running `vsn` on a record it read
+  # from a RELEASES file: it names applications, so the check `unpack/3` and
+  # `install/3` make passes.
+  defp running_record(vsn) do
+    [{~c"sample", to_charlist(vsn), [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}]
+  end
+
   # A handler whose running release was read from a RELEASES file, so it names
   # applications and the check unpack/3 and install/3 make passes, with `fun`
   # answering `reply`.
   defp real_record(fun, reply) do
-    Stub.stub(:which_releases, [
-      {~c"sample", ~c"1.2.2", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
-    ])
-
+    Stub.stub(:which_releases, running_record("1.2.2"))
     Stub.stub(fun, reply)
   end
+
+  # An `install/4` of 1.2.3 in a task of its own, from a node running `from`,
+  # reporting where it got to over messages so that two of them can be
+  # interleaved deterministically. It answers `{result, install_release calls}`,
+  # because both are per-process: `Castle.ReleaseHandlerStub` keeps its replies
+  # and its record of calls in the dictionary of whichever process called it, and
+  # here that is the task rather than the test.
+  #
+  # `hold: true` stops the caller inside `which_releases/0` until it is sent
+  # `:proceed`. That is the seam the interleaving needs: the first thing the
+  # serialised region does and the last one before the marker is armed.
+  defp installer(rel_dir, from, opts) do
+    test = self()
+    name = Keyword.fetch!(opts, :as)
+    lookup = lookup(test, name, from, Keyword.get(opts, :hold, false))
+    reply = Keyword.get(opts, :install, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+    Task.async(fn ->
+      Stub.stub(:which_releases, lookup)
+      Stub.stub(:install_release, reply)
+
+      send(test, {:started, name})
+
+      {Commands.install("1.2.3", rel_dir, Stub), Stub.calls(:install_release)}
+    end)
+  end
+
+  # The `which_releases/0` a caller is given: it says that the lookup happened
+  # and, when the caller is the one being held, waits there until it is let go.
+  defp lookup(test, name, from, hold?) do
+    fn _args ->
+      send(test, {:looked_up, name})
+      if hold?, do: await_proceed()
+      running_record(from)
+    end
+  end
+
+  defp await_proceed, do: receive(do: (:proceed -> :ok))
 
   # The same, for a node whose record release_handler synthesised because it
   # could not read RELEASES: the application list is empty. `fun` is registered
@@ -865,6 +1019,18 @@ defmodule Castle.CommandsTest do
     fn _args ->
       File.write!(provisional(rel_dir), "16.0 #{vsn}")
       {:error, {:bad_relup_file, ~c"relup"}}
+    end
+  end
+
+  # The same preparation, succeeding: `new_start_erl.data` written and the reply a
+  # one-stage restart is given, which is the one a completed hot upgrade is given
+  # too. That is the state a second caller must not be able to take apart - the
+  # marker and OTP's file, both this attempt's, waiting for a reboot that has been
+  # asked for and has not happened yet.
+  defp prepares_then_reboots(rel_dir) do
+    fn [vsn] ->
+      File.write!(provisional(rel_dir), "16.0 #{vsn}")
+      {:ok, ~c"1.2.2", ~c"upgrade"}
     end
   end
 

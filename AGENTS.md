@@ -602,20 +602,21 @@ Castle's job is configuration and release management on a running node.
   Back-to-back or concurrent installs broke it the other way, by overwriting and
   disarming each other's marker.
 
-  **So the pair is owned by an install *attempt*, and three things make it so.**
-  `arm_restart/4` is the whole of it and the order is the protocol.
+  **So the pair is owned by an install *attempt*, and four things make it so.**
+  `arm_restart/4` is three of them and the order is the protocol; the fourth is
+  that there is only ever one caller in the install at all.
 
   1. **One pending restart install at a time.** A marker already at the path
-     refuses the install rather than being adopted or replaced. `publish/2`
-     decides it, by refusing rather than replacing; the `lstat` first is what
-     keeps step 2 from destroying a pending attempt's evidence, since anything in
-     flight holds the marker from before its own step 2 until its `disarm/2`.
+     refuses the install rather than being adopted or replaced, which is what
+     keeps step 2 from clearing the `new_start_erl.data` that attempt's
+     preparation wrote. `publish/2` decides it a second time over, by refusing
+     rather than replacing.
   2. **OTP's file is cleared before the marker is armed.** That is what closes
      the window above: after it, `new_start_erl.data` existing means *this*
      attempt's preparation wrote it. Removing it is safe —
      `write_new_start_erl/3` goes through `file:write_file/2`, which creates the
      file when it is absent. The order matters and must not be reversed: an
-     attempt that refused *after* clearing would take a concurrent install's
+     attempt that refused *after* clearing would take an already-requested
      reboot away silently.
   3. **The marker names the attempt that armed it**, on a second line, and
      `disarm/2` removes it only if it still does. The marker's name is shared and
@@ -630,6 +631,72 @@ Castle's job is configuration and release management on a running node.
      confusion, not forgery. **The hook never reads it**: the version is the
      first line, which is what `head -n 1` gives it, so the file carries this
      without the shell parsing anything it did not before.
+  4. **One caller in the install at a time**, which is `Castle.Commands.serialised/2`
+     and the whole of what makes the first three mean anything across processes.
+
+  **Steps 1 to 3 are one caller's sequence, and the first version of this
+  believed that `release_handler` serialising `install_release/1` was enough to
+  make them a protocol. It is not: that serialisation is *downstream* of all of
+  them.** Two callers both read the running release, both classify it and both
+  pass step 1, because none of that has published anything yet. Step 1 reversed
+  with step 2 is then no protection at all — the loser reaches step 2 *after* the
+  winner's `install_release/1` has written `new_start_erl.data`, deletes it, and
+  the winner's reboot comes back on the permanent release while the loser reports
+  that nothing has been changed. An operator sees a timeout and a false
+  reassurance.
+
+  **Do not answer this by reordering the protocol.** Publishing before clearing
+  leaves a window in which the marker pairs with a *stale* `new_start_erl.data`,
+  and the hook then boots a version nothing installed — which is worse than
+  losing a reboot, and is what step 2's position exists to prevent. The order is
+  right for one caller; the fix is that there is one caller.
+
+  **The serialised region is the whole install, not just the arming**, because the
+  classification is a prediction about the running release: an install that
+  completes between `restart_planned?/3` and `install_release/1` moves the
+  from-version, so `do_get_rh_script/4` evaluates a different relup entry and the
+  armed state disagrees with the transition OTP selects. So the running-release
+  read, the classification, the arming, `install_release/1` and the disarming are
+  all inside it. The ERTS guard is the one part deliberately outside — it reads
+  two directories and refuses without touching anything, and a refusal has no
+  reason to wait.
+
+  **It is `:global.trans/3` over `[node()]`, and the mechanism was chosen rather
+  than assumed.** `global_name_server` is a kernel process running whether or not
+  distribution is, and `set_lock/2` restricted to `[node()]` talks to the local
+  one only — so this works on a node with `is_alive() == false`, which is the
+  ordinary case for a release that configures no distribution, and is the case it
+  was measured on. `trans/3` releases the lock in an `after` and `global` monitors
+  the holder besides, so a caller that dies releases it instead of wedging every
+  later install; retries are `infinity`, so there is no `aborted` to have to mean
+  something by. The alternative was a process of Castle's own, and it is a worse
+  trade: these modules are deliberately stateless and run inline in whatever
+  process asked, so a lock server would be a new entry in the *managed* system's
+  supervision tree, with a lifetime and a restart strategy, to serialise a command
+  that runs a handful of times in a deployment's life.
+
+  `[node()]` rather than the default `[node() | nodes()]` because every caller
+  arrives on the running node — `bin/castle` is `rpc`, and the launcher's preboot
+  only calls `make_releases/0` — so this node is the whole set of callers. A
+  cluster-wide lock would make an install wait on nodes that share nothing with
+  the deployment, and make a network partition its business, and it still would
+  not cover a caller in some other VM. **That is the boundary and it should be
+  said plainly:** a second VM writing into this releases directory is outside the
+  lock, and what defends the marker there is the filesystem half alone —
+  `publish/2` refusing rather than replacing — which is no worse than before and
+  no better. It waits rather than refusing, and the waiter then meets step 1 and
+  is told a restart install is pending: the same message as before, said about a
+  pair that is complete instead of said while taking half of it away.
+
+  Only `install` takes it. `unpack`, `commit` and `remove` arm nothing and hold no
+  two-file invariant of their own — `release_handler` serialising its own record
+  writes is the whole of what they need — and putting `commit` behind an install
+  that is waiting on a reboot would be a deadlock dressed as caution. The
+  materialisation `Castle.install/1` does *first* is outside it too, and
+  deliberately: it writes into the target's own version directory and touches no
+  release record, its own primitives already refuse rather than replace, and
+  holding this lock across a peer VM's boot would put every install behind
+  another's configuration step. Nothing about the marker protocol depends on it.
 
   **It is published the way `sys.config.pristine` is** — staged in an owner-only
   working directory and hard-linked into place — and for the same two reasons a
@@ -944,11 +1011,36 @@ arming and the disarming, so that `disarm/2` can be shown to leave a marker it
 did not write. None of those has an end state that distinguishes it — a
 successful install leaves the marker armed either way, and a failed one leaves it
 gone either way — which is the same reason `Castle.Peer`'s primitives are public.
-The concurrency case needs no seam: a marker already at the path is a pending
-attempt, and what is asserted is that the install is refused, that
-`install_release/1` was never called, and that *neither* the marker nor OTP's file
-was touched — the second half being the ordering that keeps a refusal from
-destroying a concurrent install's evidence.
+A marker already at the path needs no seam of its own: it is a pending attempt,
+and what is asserted is that the install is refused, that `install_release/1` was
+never called, and that *neither* the marker nor OTP's file was touched — the
+second half being the ordering that keeps a refusal from destroying a pending
+attempt's evidence.
+
+**Two real callers do need one, and the seam is `which_releases/0` rather than
+`install_release/1`.** The state that used to be reachable is two callers past the
+running-release lookup and neither of them armed, so what has to be held open is
+the *front* of the serialised region — and the lookup is both the first thing in
+it and the last thing before the marker is armed. So `installer/3` runs
+`install/4` in a task of its own with a `which_releases/0` that reports where it
+got to and, optionally, waits to be released; a second caller is started while the
+first is held there, and the discriminator is that its lookup never happens
+(`refute_receive {:looked_up, :second}`). That is the only kind of assertion
+available, and it is honest about why: the end state is the *same* either way —
+the second caller is refused for a marker it finds and changes nothing — because
+the interleaving that destroys evidence needs a caller suspended between step 1
+and step 2, which has no seam and needs none once there cannot be two.
+`Task.await` and `assert_receive` carry generous timeouts because `global`'s lock
+retry backs off by up to a second or two, and every stub reply and call record
+lives in the *task's* process dictionary, so a caller answers with its own
+`Stub.calls(:install_release)` rather than the test reading them.
+
+Three of them, and the third is not about the marker: one relup for 1.2.3 whose
+transition from 1.2.2 is hot and from 1.2.1 restarts the emulator, installed
+concurrently by two callers running different versions. It says the classification
+belongs to the caller that made it — which is the second half of why the region
+reaches past the arming — and that the hot caller neither adopts nor disarms the
+marker the restarting one is waiting on.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -1007,6 +1099,19 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   the state each window leaves: a unit test observes the filesystem from inside
   `install_release/1` and finds the marker alone, and the restart `:e2e` suite
   covers the far window by killing the provisional release before the commit.
+- **Serialising the install is node-local, so a second VM writing into the same
+  releases directory is outside it.** `Castle.Commands.serialised/2` locks over
+  `[node()]`, which is exact for every caller Castle has — `bin/castle` is `rpc`,
+  and the launcher's preboot step calls only `make_releases/0` — but it is a
+  statement about callers rather than about the directory. Something else running
+  `Castle.install/1` in a VM of its own against the same deployment gets the
+  filesystem half of the protocol and nothing more: `publish/2` refuses rather
+  than replaces, so the marker cannot be silently taken over, and the window the
+  lock closes — two callers both past `unclaimed/2` before either publishes — is
+  open again between them. Widening the lock does not fix it; a lock the
+  filesystem holds would, at the price of a stale one after a hard kill blocking
+  every later install. Nothing is known to do this, and Castle does not detect
+  it.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

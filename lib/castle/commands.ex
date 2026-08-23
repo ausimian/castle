@@ -37,6 +37,12 @@ defmodule Castle.Commands do
   # to one *attempt*, which is `@provisional_marker` being cleared before the
   # marker is armed, the marker being published exclusively, and the marker
   # naming the attempt that wrote it. See `arm_restart/4`.
+  #
+  # Those three are about one caller's sequence, and they are not on their own
+  # enough either: two callers can run the sequence at once, and then the loser
+  # clears the winner's `@provisional_marker` after the winner has written it.
+  # So the whole of the install - including the read and the classification in
+  # front of it - is serialised on this node. See `serialised/2`.
   @restart_marker "castle-restart-pending"
 
   # OTP's half of the pair, written by `prepare_restart_new_emulator/7` and
@@ -540,20 +546,106 @@ defmodule Castle.Commands do
   another such install is still pending - see `arm_restart/4`. One at a time is
   the price of the marker being evidence about a particular install rather than
   about a version.
+
+  Two installs cannot be under way on this node at once at all - see
+  `serialised/2`. The refusal above is what the second one is then told, once the
+  first has finished and its marker is complete.
   """
   @spec install(String.t(), Path.t(), module(), module()) :: result()
   def install(vsn, rel_dir, handler \\ :release_handler, deployment \\ Castle.Deployment) do
     with :ok <- ensure_own_erts("Cannot install #{vsn}", deployment) do
-      install_upgradable(vsn, rel_dir, handler)
+      serialised(rel_dir, fn -> install_upgradable(vsn, rel_dir, handler) end)
     end
   end
 
-  # Everything after the ERTS guard, with the running release asked for once.
+  ## One install at a time
+
+  # The resource two callers contend for: this module's install of this
+  # deployment. `rel_dir` is in it because that is the deployment - there is one
+  # per node, so it changes nothing in a release, and it is what lets the unit
+  # suite stay async, each test contending only for its own `tmp_dir`.
+  @install_lock {__MODULE__, :install}
+
+  # Everything after the ERTS guard, run with no other caller in it.
+  #
+  # **The three steps of `arm_restart/4` are correct for one caller and say
+  # nothing across processes, and `release_handler` serialising `install_release/1`
+  # does not close that.** Its serialisation is *downstream* of the whole
+  # protocol: two callers can both read the running release, both classify it,
+  # and both pass `unclaimed/2`, because all of that happens before either of
+  # them publishes anything. Refusing before clearing then buys nothing. The
+  # loser's `clear_provisional/3` runs after the winner's `install_release/1`
+  # has written `new_start_erl.data`, so it deletes the winner's live evidence;
+  # the winner's reboot comes back on the permanent release, `install` waits for
+  # a version that never becomes the running one, and the operator is told
+  # "Nothing has been changed" by the process that changed it.
+  #
+  # **Do not reorder the protocol to avoid that.** Publishing before clearing
+  # leaves a window in which the marker pairs with a *stale* `new_start_erl.data`,
+  # and the hook then boots a version nothing installed - which is worse than
+  # losing a reboot, and is the thing `arm_restart/4`'s order exists to prevent.
+  # The order is right; what was missing is that only one caller may be in it.
+  #
+  # The region has to reach further than the arming, for a second reason.
+  # `restart_planned?/3` is a prediction about the release the system is running,
+  # and an install that completes between it and `install_release/1` changes what
+  # `do_get_rh_script/4` will select: a concurrent hot upgrade moves the
+  # from-version, so a marker gets armed for a reboot OTP does not make, or a
+  # reboot happens with none armed. So the read, the classification, the arming,
+  # `install_release/1` and the disarming are all in here, and the ERTS guard -
+  # which reads two directories and can refuse without touching anything - is the
+  # only part deliberately left outside.
+  #
+  # `:global.trans/3` and no process of Castle's own, which is the point of
+  # choosing it:
+  #
+  #   * `global_name_server` is a kernel process and is running whether or not
+  #     distribution is, and `set_lock/2` over `[node()]` talks to the local one
+  #     only. So this works on a node with `is_alive() == false`, which is the
+  #     ordinary case for a release that configures no distribution and the case
+  #     it was measured on. Nothing here needs a node name, epmd or a cookie.
+  #   * `trans/3` releases the lock in an `after`, and `global` monitors the
+  #     holder besides, so a caller that dies - an rpc whose far end went away -
+  #     releases it instead of wedging every later install.
+  #   * the alternative was a supervised process of Castle's own, and it is a
+  #     worse trade. The modules here are deliberately stateless and every
+  #     function runs inline in whatever process asked; a lock server would be a
+  #     new thing in the *managed* system's supervision tree, with a lifetime and
+  #     a restart strategy of its own, to serialise a command that runs a handful
+  #     of times in a deployment's life.
+  #
+  # `[node()]` rather than the default `[node() | nodes()]` is deliberate. Every
+  # caller arrives here in the running node - `bin/castle` reaches it by `rpc`,
+  # and the launcher's preboot step only calls `make_releases/0` - so this node is
+  # the whole set of callers. A cluster-wide lock would make an install wait on
+  # nodes that share nothing with this deployment and make a partition its
+  # business, and it still would not cover a caller in some other VM. That is the
+  # boundary, said plainly: a second VM writing into this releases directory is
+  # outside the lock, and what is left there is the filesystem half - `publish/2`
+  # refusing rather than replacing - which is no worse than it was.
+  #
+  # It waits rather than refusing. An install that waited is a slow install; one
+  # refused because another was in flight is a failed one. The waiter goes on to
+  # find the winner's marker and be told that a restart install is pending, which
+  # is the message it would have got anyway - only now it is said about evidence
+  # that is complete, rather than said while destroying it.
+  #
+  # Retries are `infinity`, which `trans/3` is, so `set_lock/3` cannot answer
+  # `false` and there is no `aborted` for this to have to mean something by.
+  defp serialised(rel_dir, install) do
+    :global.trans({{@install_lock, rel_dir}, self()}, install, [node()])
+  end
+
+  # The install itself, with the running release asked for once, and the whole of
+  # what `serialised/2` holds the region open for.
   #
   # The record check and the restart prediction are both about the release the
   # system is running - `get_latest_release/1` is `current` if there is one and
   # `permanent` otherwise, which is what `running_release/1` computes - and asking
-  # `which_releases/0` twice would be asking about two moments.
+  # `which_releases/0` twice would be asking about two moments. Asking it once is
+  # not enough on its own: another caller's install can move the answer between
+  # the one question and the install that acts on it, which is the other half of
+  # why this whole function is inside the region rather than just the arming.
   defp install_upgradable(vsn, rel_dir, handler) do
     refusal = "Cannot install #{vsn}"
     running = running_release(handler)
@@ -699,13 +791,22 @@ defmodule Castle.Commands do
   #   1. **Refuse if a marker is already there.** One pending restart install at
   #      a time. Two attempts sharing one name overwrite and disarm each other,
   #      and the survivor's marker says nothing about which of them - if either -
-  #      reached `install_release/1`. `publish/2` is what actually decides this,
-  #      by refusing rather than replacing; the look first is what keeps step 2
-  #      from destroying a pending attempt's evidence, since anything in flight
-  #      holds the marker from before its own step 2 until its `disarm/2`. A
-  #      marker that appears between the look and the publish belongs to an
-  #      attempt that has not reached `install_release/1` yet, so there is
-  #      nothing of its to destroy.
+  #      reached `install_release/1`. So a marker at the path is a *finished*
+  #      attempt's, waiting for the reboot it asked for, and this refusal is what
+  #      keeps step 2 from clearing the `new_start_erl.data` that attempt's
+  #      preparation wrote. `publish/2` decides it a second time over, by
+  #      refusing rather than replacing.
+  #
+  #      **What makes it true that the marker belongs to a finished attempt is
+  #      `serialised/2` and not this look.** An earlier version of this argued
+  #      that a marker appearing between the `lstat` and the publish belonged to
+  #      an attempt that had not reached `install_release/1` yet, so there was
+  #      nothing of its to destroy. That was the hole: two callers reach this
+  #      check before either publishes, so both pass it, and the one that gets
+  #      here second clears the first's file out from under a reboot that is
+  #      already on its way. Do not reason about this step in isolation again -
+  #      it is one caller's half of a rule whose other half is that there is only
+  #      ever one.
   #   2. **Clear OTP's file.** `prepare_restart_new_emulator/7` writes
   #      `releases/new_start_erl.data` and nothing removes it, so one left by an
   #      earlier failure would pair with the marker armed next and boot a version
@@ -725,8 +826,13 @@ defmodule Castle.Commands do
   #      every later attempt.
   #
   # Steps 1 and 2 are in that order and must stay in it. Reversed, an attempt
-  # would refuse *after* clearing OTP's file, which is how a concurrent install
-  # loses its reboot silently.
+  # would refuse *after* clearing OTP's file, which is how an install that has
+  # already been asked for loses its reboot silently.
+  #
+  # This runs with no other caller in the install at all - `serialised/2` - and
+  # that is what the step 1 note above rests on. Neither replaces the other: the
+  # serialisation is why the marker means a finished attempt, and the order of
+  # these steps is why a refusal for any *other* reason still changes nothing.
   #
   # A failure at any step refuses the install rather than going ahead: the reboot
   # would come back on whichever version `releases/start_erl.data` names, which
@@ -837,7 +943,10 @@ defmodule Castle.Commands do
   # between them is still removed. That window is two adjacent statements wide
   # and there is no POSIX operation that closes it - unlinking is by name, and no
   # name carries its identity. What it costs if it is ever hit is a lost reboot,
-  # which is the direction the whole protocol fails in.
+  # which is the direction the whole protocol fails in. It also takes something
+  # outside this node to hit at all now: this runs inside `serialised/2`, so the
+  # re-arming cannot be another install here, and what is left is a start of the
+  # deployment consuming the marker and some other VM arming one.
   #
   # The result of the removal is deliberately not looked at: a releases directory
   # this cannot remove the marker from is one `publish_marker/4` could not have

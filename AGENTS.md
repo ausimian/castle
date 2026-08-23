@@ -1538,13 +1538,32 @@ list is module names rather than a pattern: a regex over `Stub` would swallow a
 production module spelled that way, which is the one thing an exclusion must not
 do.
 
-**It is part of `mix precommit`**, which is what makes the threshold a gate
-rather than a number in a comment. Nothing else runs it: CI's `test` matrix runs
-a plain `mix test`, and CI's `precommit` job is pinned to Elixir 1.19 / OTP 28.
-So the *only* place this number is checked against the rest of the `~> 1.18`
-range is a contributor's own machine, in the gate this project makes mandatory —
-which is exactly where a false failure does the most damage, because the lesson
-it teaches is to stop running the gate.
+**Three things check the floor, and they are not checking the same thing.**
+
+* **`mix precommit`** runs `test --cover`, which is what makes the threshold a
+  gate rather than a number in a comment. It runs on whatever Elixir the
+  contributor happens to have, so this is where the floor meets the `~> 1.18`
+  range in practice — and where a false failure does the most damage, because
+  the lesson it teaches is to stop running the gate.
+* **CI's `precommit` job** runs the same alias pinned to Elixir 1.19 / OTP 28.
+  That is the reading the rest of this section quotes.
+* **One cell of CI's `test` matrix** — the newest Elixir, currently 1.20 /
+  OTP 29 — exports coverage and then runs `mix test.coverage`. It is the lowest
+  reporter, so it trips first: a canary for attribution drift rather than a
+  second opinion on the figure. Every other cell stays on a plain `mix test`
+  deliberately, because seven readings that disagree by version are noise.
+
+That cell is **two steps rather than one `mix test --cover`**, so the step that
+goes red names what broke without anyone opening the log: exporting coverage
+cannot fail on the threshold, and `mix test.coverage` cannot fail on a test. Its
+job name carries `+ coverage floor` for the same reason. Move the `cover: true`
+flag when the matrix's newest cell moves on.
+
+None of that existed until the floor had already failed a clean tree on 1.20 and
+CI had stayed green through it, because the matrix ran a plain `mix test` and the
+one job that checked the threshold was pinned to the version that agreed with
+it. A gate checked only on the maintainer's toolchain is a gate that discovers
+its own bugs through other people.
 
 **The figure is not the same on every supported toolchain, and the threshold has
 to be a floor across them rather than a reading from one.** Measured, one cell

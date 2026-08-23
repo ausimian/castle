@@ -315,7 +315,7 @@ Castle's job is configuration and release management on a running node.
   library directories *relatively* — `filename:join("lib", LibName)`, so the file
   stays relocatable — so every `lib/<app>-<vsn>` the handler reads, writes or
   deletes resolves there, as does the `extract_tar(Root, Tar)` an unpack goes
-  through and the `erts-<vsn>` a removal deletes. So a Castle that wrote to
+  through and the `erts-<erts_vsn>` a removal deletes. So a Castle that wrote to
   `$RELEASE_ROOT` would put the configuration where the handler never looks, and
   an upgrade would go on using applications under the installation — a silent
   divergence in place of a loud failure. Do not "fix" the guard that way.
@@ -382,6 +382,15 @@ Castle's job is configuration and release management on a running node.
   `filename:join(Root, "erts-" ++ EVsn)`. Relocating the records moves the
   bookkeeping and leaves the applications themselves being extracted into, read
   from and deleted out of the emulator's root.
+
+  `EVsn` there is the *ERTS* version out of the release record, not the release
+  version, and `do_remove_release/4` deletes that directory only when no
+  remaining release refers to the same emulator. The two are unrelated numbers
+  and normally different ones - a release at `0.1.1` carrying `erts-16.2` - so
+  prose must not reuse `<vsn>` for both. Writing `erts-<vsn>` beside
+  `lib/<app>-<vsn>` reads as one version and names a directory that generally
+  does not exist; it had got into `remove/1`'s `@doc` and into the ERTS guard's
+  refusal message, which ships. Say `erts-<erts_vsn>`.
 
   **The comparison has three answers, not two.** `compare_dirs/2` is
   `Path.expand/1` on both and then a `stat` on device and inode, and it returns
@@ -515,8 +524,11 @@ Castle's job is configuration and release management on a running node.
   more: a diagnostic, not a gate, and nothing has to call it. It stays because
   the state it reports is otherwise invisible — the file can be present while the
   record the node works from was synthesised — so an operator needs a way to ask
-  that does not unpack or install anything. Whether it belongs in the documented
-  API surface is [#11](https://github.com/ausimian/castle/issues/11)'s to settle.
+  that does not unpack or install anything.
+  [#11](https://github.com/ausimian/castle/issues/11) settled that it belongs in
+  the documented surface, and for that same reason: `bin/castle upgradable` is
+  how an operator asks, and a diagnostic nobody is told about is one nobody
+  thinks to ask.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
   before `install` and `commit` hand it over, the record check inside `unpack`
@@ -911,19 +923,123 @@ Castle's job is configuration and release management on a running node.
   reboot takes and which automation reads.
 
 Every one of them is a command entry point, so `Castle` is the command
-boundary: an operation that fails raises `Castle.Error` there, which is what
-leaves a non-zero exit status behind for the shell that asked for it. Raising,
-not halting — the expression runs on the *running* node, so halting would take
-down the system under management; `Kernel.CLI` catches on the node and
-re-raises in the calling VM, and only that VM exits. `Castle.Commands` holds
-the operations themselves, returning their outcome instead of acting on the
-process, which is what makes them testable.
+boundary: an operation that fails raises there, which is what leaves a non-zero
+exit status behind for the shell that asked for it. Raising, not halting — the
+expression runs on the *running* node, so halting would take down the system
+under management; `Kernel.CLI` catches on the node and re-raises in the calling
+VM, and only that VM exits. `Castle.Commands` holds the operations themselves,
+returning their outcome instead of acting on the process, which is what makes
+them testable.
+
+**`Castle.Error` is what `report!/1` raises, and it is not everything a command
+raises.** `report!/1` turns a returned `{:error, message}` into one; an
+exception, a throw or an exit that the operation did not handle goes straight
+past it. That is deliberate for the one place it can happen on purpose —
+`installed/5` settles the marker and re-raises `install_release/1`'s failure
+unchanged, folding it into a message only where the marker could not be settled
+— so anything claiming that a failed command raises `Castle.Error`, in a `@doc`
+or here, has to say which failures. Automation told to rescue `Castle.Error`
+and nothing else would treat a `release_handler` that blew up as a success.
 
 `Castle.customize/1` is the one function in that module which is *not* one of
 them — it runs at build time, in a consumer's `mix.exs`, and returns a value
 rather than reporting an outcome. See **Release integration** below. Anything
 that says "every function in `Castle`" has to say "but `customize/1`", and the
 comment at the head of `lib/castle.ex` does.
+
+**What is published and what is hidden follows from that, and is
+[#11](https://github.com/ausimian/castle/issues/11)'s decision.** The whole of
+`Castle` now carries `@doc` and `@spec`, and the `@moduledoc` says the two
+things a reader has to know before calling any of it: that this is the runtime
+half of a pair, and that these are commands rather than an API — a command
+prints its report and returns `:ok`, so the return value carries nothing, and a
+refusal raises `Castle.Error` rather than returning `{:error, _}`. Every command
+`@doc` names the `bin/castle` command that reaches it, because that is the
+interface and the function is the thing behind it.
+
+**Say "a refusal", not "a failure", and the distinction is the one drawn just
+above.** `report!/1` turns a returned `{:error, message}` into `Castle.Error`,
+and that covers every refusal these commands make deliberately — but
+`installed/5` re-raises an exception, a throw or an exit out of
+`install_release/1` unchanged once the marker is settled, and anything a
+dependency raises comes through as itself. So automation that rescues
+`Castle.Error` alone misses a command that blew up rather than refused. This
+paragraph exists because the blanket version of the claim was written here in
+the same commit that corrected it in the `@moduledoc`, three paragraphs apart.
+
+Two decisions inside that. `make_releases/0` is `@doc false`: its only caller is
+the launcher's `env.sh` fragment, in the preboot VM of a `start` or `daemon`
+whose deployment has no `RELEASES` yet, and by hand it either does nothing (the
+file is there) or does what the next start would do anyway. Its contract is with
+a shell fragment in another project, so publishing it would document a function
+nobody should call. It keeps its `@spec` regardless — the spec is the contract
+whether or not the function is published. And `install/2..5` is documented as
+what it is, a seam the concurrency test drives: one `@doc` covers every arity of
+a clause with defaults, so saying nothing about the extra four would leave them
+reading as an API. `running/1` is a third case, and documented rather than
+hidden for a different reason than the other two. It has no subcommand either —
+`bin/castle` dispatches exactly `releases`, `upgradable`, `unpack`, `install`,
+`remove` and `commit`, and `running/1`'s only shipped caller is the confirmation
+loop inside `bin/castle install`. But unlike `make_releases/0` it answers a
+read-only question and mutates nothing, and automation driving `rpc` rather than
+`bin/castle` needs precisely it to know when an install has finished booting.
+Hiding it would strand that caller; publishing it costs nothing. Every remaining
+function is a command an operator invokes, and hiding one of those would
+document nothing useful anywhere.
+
+The specs say `:: :ok` and nothing more, because that is what `report!/1`
+returns; a spec naming the lines, or an error tuple, would be describing
+`Castle.Commands`. Nothing checks them — there is no Dialyzer here — so they are
+kept by hand, and a claim in a `@doc` about what a command refuses is worth
+checking against `Castle.Commands` before it is trusted.
+
+**A definition with defaults needs one `@spec` per arity, and "every public
+function carries a spec" is a claim about arities.** `install/1..5` is five
+functions and therefore five specs; the first version of this carried two, for
+`install/1` and `install/5`, and left three unspecced while this file and
+`RELEASE.md` both said the surface was complete. Nothing catches that, and
+`mix docs` is no help either: ExDoc renders one spec against a defaulted
+definition, the widest arity's, so the page looks the same with two specs as
+with five. `credo --strict` passes, and there is no Dialyzer. So check it with
+`Code.Typespec.fetch_specs(Castle)` and count — against
+`Castle.__info__(:functions)`, which is the list that has to be covered —
+rather than by reading the source, which is what missed three of them.
+
+**The `@doc`s are claims, nothing checks them, and the first draft of them
+walked back into two rules this file had already settled.** Both are worth
+naming, because both were regressions rather than staleness:
+
+  * `upgradable/0`'s said the record is synthesised when the system started
+    "without a `releases/RELEASES` file it could read" — which is the
+    *readable* phrasing corrected above, admitting the malformed-terms
+    counterexample, and it named the file unqualified besides. A `@doc` that
+    describes a refusal has to say what the refusal says: name the authority
+    (the file `:release_handler` accepts, no single property of it being the
+    test), and qualify the path with `RELDIR` and `{sasl, releases_dir}`.
+  * `commit/1`'s said that committing an already-permanent version "succeeds
+    and changes nothing", which was true of the shape castle#14 replaced.
+    `Commands.commit/5` materialises inside its own serialised region, so the
+    target's `sys.config` is rewritten from current provider inputs before
+    `make_permanent/1` — which is itself a no-op for that version — is called
+    at all. OTP's step being idempotent is not the command being idempotent.
+
+Three more were ordinary staleness of the same kind, and the pattern is that a
+`@doc` describing a *sequence* goes stale where a `@doc` describing a value
+does not: `install/1`'s claimed two steps before `:release_handler` was asked
+for anything, when `install_upgradable/5` asks `which_releases/0` first and
+refuses for a pending marker in between, and the line that matters is
+`install_release/1` rather than any handler call; the rollback an install
+leaves was described as "anything that takes the system down brings that one
+back", which is false for the one reboot a restart install has already asked
+for and the launcher is holding a marker to carry out; and `unpacked` was
+glossed as "staged and never installed", which `running/1`'s own `@doc`
+already contradicts. `bin/castle commit`'s argumentless form was described as
+defaulting to "the version running now", where `castle.sh.eex` selects a
+`:current` release and exits non-zero when there is none.
+
+So: read a `@doc` about a sequence against the function that implements the
+sequence, not against the module's summary of it, and read one about
+`bin/castle` against Forecastle's `priv/castle.sh.eex`.
 
 Forecastle is what arranges for these to be reachable: it leaves the
 configuration Mix wrote alone, adds a `:preboot` script that starts `:castle`,
@@ -1418,13 +1534,16 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   it. It is the one limitation here that a lock cannot narrow, which is why the
   filesystem half of the protocol — `publish/2` refusing rather than replacing —
   has to stand on its own.
-- **The public API is undocumented, apart from `customize/1`.** `@moduledoc` is
-  still the generated placeholder and the commands carry no `@doc` or `@spec`
-  annotations ([#11](https://github.com/ausimian/castle/issues/11)).
-  `Castle.customize/1` has both, and was documented with #12 rather than left
-  for #11 because it is the function a consumer's `mix.exs` calls and nothing
-  else says how. It is the standard the rest has to be brought up to, not an
-  exception to be levelled down.
+- **Nothing checks the `@spec`s.** The public surface is documented as of
+  [#11](https://github.com/ausimian/castle/issues/11) — see the end of *What it
+  does* for what is published and why — but there is no Dialyzer in this
+  project, so a spec that stops describing its function fails nothing. They are
+  all `:: :ok` today, which is the whole of what `report!/1` returns, so the way
+  one goes wrong is a command that starts returning something else and a spec
+  that keeps saying `:ok`. The same holds for what the `@doc`s claim a command
+  refuses: `mix docs` catches a broken *reference*, and nothing at all catches a
+  true sentence that has stopped being true. Both are read against
+  `Castle.Commands` by hand.
 - **The README is out of date.** It documents an `:appup` compiler and a
   `mix castle.relup` task that moved to Forecastle in 0.3.0, the release
   management commands it describes on `bin/<release>` now live on `bin/castle`,

@@ -165,7 +165,7 @@ defmodule Castle.Commands do
   # not Castle's choice of one - `Castle.Deployment.root_dir/0` sets out what it
   # anchors and what it does not, and is the only place that should. The half
   # this rests on is the applications: extraction, every `lib/<app>-<vsn>` the
-  # handler resolves, and the `erts-<vsn>` a removal deletes. Those cannot be
+  # handler resolves, and the `erts-<erts_vsn>` a removal deletes. Those cannot be
   # relocated, which is why relocating the *records* - the half that can be, with
   # `RELDIR` or `{sasl, releases_dir}` - is not a way out of this refusal.
   #
@@ -239,7 +239,7 @@ defmodule Castle.Commands do
     "#{refusal}: the deployment and the emulator's root are different " <>
       "directories - the deployment is #{release_root} and the emulator runs " <>
       "in #{root_dir}. That is where :release_handler extracts applications, " <>
-      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<vsn> from, " <>
+      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<erts_vsn> from, " <>
       "because those paths are anchored to the emulator's root rather than to " <>
       "the deployment. Pointing Castle at the deployment instead would only " <>
       "move the release records away from the applications they describe. " <>
@@ -450,12 +450,14 @@ defmodule Castle.Commands do
   inside the Erlang installation holds no release to configure, which is true and
   says nothing about why.
 
-  The guard is redundant for `install/5`, which makes it before it takes the lock
-  and so before it reaches here, and it is not redundant for `Castle.commit/1`,
-  which still composes this in front of `commit/3` the way `Castle.install/1`
-  used to. It stays either way: this is a public entry point of its own, and a
+  The guard is redundant for both callers as things stand: `install/5` and
+  `commit/5` each make it before they take the lock, and so before either
+  reaches here. It stays anyway, because this is an entry point of its own and a
   guard that is only correct because of who happens to call it is one call away
-  from being wrong.
+  from being wrong. (It used to say that `commit` was the exception, composing
+  this in front of `commit/3` the way `Castle.install/1` once did. Neither
+  composition exists any more - both materialise inside their own serialised
+  region - and no arity here is 3.)
   """
   @spec materialise(Path.t(), module(), module()) :: result()
   def materialise(rel_vsn_dir, peer \\ Peer, deployment \\ Castle.Deployment) do
@@ -529,7 +531,7 @@ defmodule Castle.Commands do
   about the node that answered it, and the node that acts may be a later one that
   has restarted onto a synthesised record.
 
-  `commit/3`, `remove/3` and `releases/1` are not checked *for the record*, and
+  `commit/5`, `remove/3` and `releases/1` are not checked *for the record*, and
   that is not an omission. None of them can write the synthesised record back:
   `do_make_permanent/2` returns early for a release that is already permanent
   and errors for every other status, `do_remove_release/4` refuses the permanent
@@ -538,7 +540,7 @@ defmodule Castle.Commands do
   to be committed, which a refusal would strand until the next restart put the
   previous release back.
 
-  The ERTS guard, `ensure_own_erts/2`, is on a different footing and `commit/3`
+  The ERTS guard, `ensure_own_erts/2`, is on a different footing and `commit/5`
   and `remove/3` do carry it: it says the deployment could never have been
   upgraded at all, so there is no upgrade under way for it to strand, and what
   those operations would otherwise act on is the Erlang installation. Only the
@@ -649,10 +651,12 @@ defmodule Castle.Commands do
   # directories and can refuse without touching anything, and a refusal has no
   # reason to queue behind a reboot.
   #
-  # What is still outside this and still writes a `sys.config` is `commit/3`'s
-  # materialisation, which `Castle.commit/1` composes the way `install/1` used to.
-  # It is not the same case - see `Castle.materialise/1` - but it is a boundary
-  # rather than a proof, and it is written down as one in AGENTS.md.
+  # Nothing that writes a `sys.config` is outside it any more: `commit/5`
+  # materialises inside this same region too, so the two renames onto one
+  # `sys.config` are ordered wherever they meet. What remains outside is a caller
+  # in a VM of its own, which no lock over `[node()]` can reach - the filesystem
+  # half of the protocol is what stands there, and it is written down as a
+  # boundary in AGENTS.md.
   #
   # `:global.trans/3` and no process of Castle's own, which is the point of
   # choosing it:
@@ -1446,7 +1450,7 @@ defmodule Castle.Commands do
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2` -
   and of everything gated this is the operation with the most to lose by not
   being: `remove_release/1` *deletes*, and the library directories and
-  `erts-<vsn>` it takes away are resolved against `code:root_dir()` - the anchor
+  `erts-<erts_vsn>` it takes away are resolved against `code:root_dir()` - the anchor
   nothing can relocate - so on such a deployment it is the Erlang installation
   it would be asked to delete out of.
   """

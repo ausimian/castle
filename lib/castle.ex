@@ -1,6 +1,78 @@
 defmodule Castle do
   @moduledoc """
-  Documentation for `Castle`.
+  Runtime hot-code upgrade support for Elixir releases.
+
+  Castle is the runtime half of a pair: [Forecastle](https://hexdocs.pm/forecastle)
+  is the build-time half, and a project that depends on Castle gets it as a
+  build-time dependency of its own. Forecastle assembles a release that can be
+  upgraded, and writes the launcher furniture an upgrade is driven through - the
+  `preboot` script, the `env.sh` fragment and the `bin/castle` wrapper. Castle
+  is what that furniture calls on the running node: it unpacks, installs,
+  commits and removes versions, and expands the configuration of the version
+  being installed by running *that version's own* config providers before
+  `:release_handler` is handed anything.
+
+  Two kinds of function live here, and only one of them is an ordinary function.
+
+  ## The integration point
+
+  `customize/1` is the whole of what a project names. It runs at build time, in
+  a consumer's `mix.exs`; it takes the options `mix release` accepts and returns
+  options `mix release` accepts. It is the only function here that other Elixir
+  code is meant to call.
+
+  ## The commands
+
+  Everything else is a command entry point rather than an API. `bin/castle`
+  sends each one to the running node as an expression over
+  `bin/<release> rpc`, and the launcher's `env.sh` fragment makes one call of
+  its own in a preboot VM, on the first start of a deployment, to create the
+  release records `:release_handler` needs. There is no CLI layer in between to
+  carry the outcome, so this module *is* the command boundary - and both halves
+  of that are visible in what these functions do:
+
+    * A command that succeeds prints what it has to report, and returns `:ok`.
+      The report is the output rather than the return value: there is nothing in
+      `:ok` to inspect. What there is to print varies by command and not by
+      kind - `upgradable/0` and `running/1` are questions that answer by not
+      raising and print nothing at all, while `releases/0` is a question whose
+      answer *is* its output, a line for every release the system knows about.
+
+    * A command that fails raises, and what it raises is not always
+      `Castle.Error`. A refusal the command made itself, and an error
+      `:release_handler` returned, become `Castle.Error`. An exception, a throw
+      or an exit that the operation did not handle is let out unchanged: the
+      stacktrace is worth more than anything Castle could wrap it in.
+      `install/1` is where the difference is deliberate rather than
+      incidental - it settles the restart marker it armed and then re-raises
+      whatever `:release_handler.install_release/1` did, folding it into a
+      `Castle.Error` only in the one case where Castle knows something the
+      exception does not say, which is that the marker could not be settled.
+
+      Either way it is the raise that leaves a non-zero exit status behind for
+      the shell that asked for the operation: the expression is evaluated over
+      `elixir --rpc-eval`, which catches on the running node and re-raises in
+      the short-lived VM that made the call, so that VM is the one which exits.
+      Raising rather than halting is deliberate - halting would take down the
+      system under management instead of the caller.
+
+  So the interface is `bin/castle` - `releases`, `upgradable`, `unpack`,
+  `install`, `commit` and `remove` - and these functions are what it reaches.
+  Calling them from Elixir is for automation driving an upgrade over `rpc`
+  itself, and it means taking both halves above as they are: read the outcome on
+  standard output, and treat *any* raise as the failure. A rescue narrowed to
+  `Castle.Error` catches the refusals and the reported errors and misses the
+  command that blew up.
+
+  One condition runs through all of them: the root the VM is running from has to
+  be the deployment's own. Assembling with `include_erts: false` is the usual way
+  for that not to hold - a release that brings no ERTS runs on whichever Erlang
+  installation is on the path, and it is that installation, rather than the
+  deployment, which `:release_handler` would then unpack into, configure and
+  delete out of - though it is not the only way, so what Castle reports is the
+  divergence it can see rather than a cause it cannot. Every command that would
+  change something refuses such a deployment; `upgradable/0` and `releases/0`
+  still answer, so that the state can be asked about.
   """
 
   alias Castle.Commands
@@ -56,10 +128,11 @@ defmodule Castle do
   A release that asks for no `:steps` at all gets
   `#{inspect(@default_steps)}`, which is Mix's default plus `:tar`. The
   difference is deliberate. `:tar` is
-  what packs `<name>-<vsn>.tar.gz`, and that tarball is what gets copied into a
-  deployment's `releases` directory for `bin/castle unpack <vsn>` to read, so a
-  version built without one can be assembled and run but can never be installed
-  onto a running system - which is the only reason to be using Castle.
+  what packs `<name>-<vsn>.tar.gz`, and that tarball is what gets copied into the
+  release directory `:release_handler` reads - see `unpack/1` - for
+  `bin/castle unpack <vsn>` to find, so a version built without one can be
+  assembled and run but can never be installed onto a running system, which is
+  the only reason to be using Castle.
 
   A `:steps` list that *is* given and has no `:tar` in it is honoured as it
   stands, with a warning. Honoured, because it is the project's own list and
@@ -162,7 +235,10 @@ defmodule Castle do
   # and the launcher's env.sh fragment evaluates make_releases/0 in the preboot
   # VM, on the first start of a deployment. There is no separate CLI layer to
   # carry the process status, so these functions are the command boundary, and
-  # it is here that a failure raises.
+  # it is here that a refusal raises. Not every failure: an exception, throw or
+  # exit out of `install_release/1` is re-raised unchanged by
+  # `Commands.installed/5` once the marker is settled, so it passes through this
+  # boundary rather than being converted at it.
   #
   # customize/1 is the exception and is not one of them: it runs at build time,
   # in a consumer's `mix.exs`, and returns a value rather than reporting an
@@ -179,7 +255,35 @@ defmodule Castle do
   #
   # `Castle.Commands` holds the operations themselves, returning their outcome
   # rather than acting on the process, so that they can be tested.
+  #
+  # **The user-facing half of all of that is now in the `@moduledoc` and in the
+  # `@doc`s below** (castle#11), and the two halves have to be kept in step: a
+  # reader who takes these for ordinary functions is surprised twice over, by a
+  # return value that carries nothing and by an exception where a `{:error, _}`
+  # would be. So every one of them says which `bin/castle` command reaches it,
+  # and the module says what a command boundary does.
+  #
+  # What is published and what is hidden follows from the same distinction.
+  # Every command an operator invokes is documented, framed by the `bin/castle`
+  # command that reaches it, because hiding a command an operator has to run
+  # would document nothing useful anywhere. `make_releases/0` is the one
+  # exception - see below - and `install/2..5` is documented as what it is, a
+  # seam a test drives, since one `@doc` covers every arity of a clause with
+  # defaults and silence about the extra four would read as an API.
 
+  # `@doc false`, and the only one here: this is not a command an operator has
+  # any reason to invoke. Its single caller is the launcher's `env.sh` fragment,
+  # which evaluates it in the preboot VM on a `start` or `daemon` whose
+  # deployment has no `releases/RELEASES` yet - and by hand it is close to
+  # useless: on a deployment that has the file it does nothing at all, and on
+  # one that does not, the next start does it anyway. Publishing it would put a
+  # function in the documented surface whose whole contract is with a shell
+  # fragment in another project.
+  #
+  # It keeps its `@spec` regardless. The specs are the contract whether or not
+  # the function is published, and nothing in this project checks them.
+  @doc false
+  @spec make_releases() :: :ok
   def make_releases do
     report!(Commands.make_releases(rel_dir()))
   end
@@ -191,10 +295,82 @@ defmodule Castle do
   # there while the record the node works from was synthesised. Do not put it
   # back in front of them: a check in a call of its own is a check about a moment
   # that has passed, and `bin/castle` sends each of these as a separate rpc.
+  @doc """
+  Asks whether the system can be upgraded from, and says nothing when it can.
+
+  `bin/castle upgradable`. A question rather than a gate: it reports nothing on
+  success, and raises `Castle.Error` when the node is working from the release
+  record `:release_handler` synthesised for itself out of the boot script. An
+  upgrade from that record would report success and leave applications running
+  from the directories of the release it replaced, so `unpack/1` and `install/1`
+  refuse it; what this raises is the same refusal, with the same remedy in it.
+
+  That record is what a node is left with when the release-record file
+  `:release_handler` reads was not one the handler accepted when it booted, and
+  no single property of the file is the test - being present, being readable and
+  parsing as Erlang terms are each necessary and none of them sufficient. So the
+  remedy the refusal names is a restart with that file either absent or
+  accepted, and creating it now changes nothing about the record this node is
+  working from. Which file it is depends on the deployment: `releases/RELEASES`
+  under the release root unless `RELDIR` or the `sasl` `releases_dir` parameter
+  points elsewhere, in which case the release creates one at the root that the
+  handler will not read, and the one it does read has to be put there by hand.
+
+  Nothing has to call this first. `unpack/1` and `install/1` make the check
+  themselves, inside the call that acts, because an answer given to one caller
+  and acted on by another is an answer about a moment that has passed - the node
+  can restart onto a freshly synthesised record in between. What this is for is
+  asking without acting, which is otherwise impossible: the file the handler
+  reads can be there, and be perfectly good now, while the record the node has
+  been working from since boot was made up.
+
+  It only reads, so it still answers on a deployment where every command that
+  changes something is refused - which is the state an operator most needs to be
+  able to ask about.
+  """
+  @spec upgradable() :: :ok
   def upgradable do
     report!(Commands.upgradable())
   end
 
+  @doc """
+  Unpacks a release tarball into the deployment, and reports the version.
+
+  `bin/castle unpack <vsn>`, which builds the argument as
+  `<release name>-<vsn>` - `name` is the tarball's name without its `.tar.gz`
+  suffix, the way `:release_handler.unpack_release/1` takes it, and not a bare
+  version. The tarball has to be in the release directory `:release_handler`
+  reads, which is `releases/` under the deployment root by default. Castle joins
+  nothing here: `unpack/1` hands the name straight to
+  `:release_handler.unpack_release/1`, and `do_unpack_release/4` joins it onto
+  the handler's own releases directory. `RELDIR` and the `sasl` `releases_dir`
+  parameter move that directory, and so move where the tarball has to be put.
+
+  Setting either is unsupported all the same, and it does not merely go unread.
+  It moves the handler's half only: everything Castle resolves for itself is
+  joined onto `code:root_dir()` - the restart marker, the target's configuration
+  under `<root>/releases/<vsn>`, and the `RELEASES` file and target `.rel` that
+  `make_releases/0` works with. So an override leaves the two halves disagreeing
+  about where a version lives, and an unpack that succeeds is followed by an
+  install that cannot. See
+  [#23](https://github.com/ausimian/castle/issues/23).
+
+  It is the `<name>-<vsn>.tar.gz`
+  that `mix release`'s `:tar` step packs, which is why `customize/1` defaults
+  `:steps` to include it.
+
+  Unpacking stages a version: it extracts the applications, writes a release
+  record for it as `unpacked`, and changes nothing about what the system is
+  running. `install/1` is what makes it the running version.
+
+  Raises `Castle.Error` rather than unpacking on a system that cannot be
+  upgraded from - see `upgradable/0`, and note that an unpack allowed through
+  there would take the remedy away rather than merely being pointless: unpacking
+  writes the release records, so the synthesised record lands in the file the
+  remedy depends on and the next boot reads it back as though it had always been
+  there.
+  """
+  @spec unpack(String.t()) :: :ok
   def unpack(name) when is_binary(name) do
     report!(Commands.unpack(name))
   end
@@ -228,6 +404,115 @@ defmodule Castle do
   # They are defaults rather than a separate entry point so that `bin/castle`
   # keeps calling `Castle.install/1` over `rpc` and nothing about the deployment
   # is chosen by a caller: see `rel_dir/0`.
+  @doc """
+  Installs `vsn` and makes it the version the system is running.
+
+  `bin/castle install <vsn>`, on a version that has been unpacked already - see
+  `unpack/1`.
+
+  Five steps run before `:release_handler.install_release/1` is asked for
+  anything, and each of them can refuse the install:
+
+    1. The deployment is checked against the root the emulator is running in -
+       the condition the module documentation describes - and refused if they
+       are not the same directory. It is the one step outside the serialising
+       below, because it reads two directories and touches nothing.
+
+    2. The release the system is running is looked up, and an install from the
+       record `:release_handler` synthesised for itself is refused - see
+       `upgradable/0`, and note that the check is made here, in the call that
+       acts, rather than by anything in front of it. That one lookup answers
+       both this and whether the relup's transition reboots the emulator;
+       asking twice would be asking about two moments.
+
+    3. An install that is going to reboot the emulator is refused while another
+       such install is still waiting for its reboot. Where this sits is as
+       load-bearing as what it does: the version a caller refused here would
+       otherwise have configured in step 4 is the version the pending install's
+       reboot is about to boot, so it is refused before it has written
+       anything.
+
+    4. The target's configuration is expanded, by booting a temporary VM on the
+       target's own boot script and emulator and running the target's own
+       config providers in it: the version being upgraded *to* is the one whose
+       providers have to answer, and they cannot be run on the node that is
+       still running the version being replaced. It is the first step that
+       writes anything, which is why the three that can refuse for a reason
+       about this node come first - an install refused above this has
+       configured nothing.
+
+    5. For a transition that reboots the emulator, the marker the launcher will
+       read on the next start is armed. It can refuse too, and by then the
+       configuration has been expanded, so those refusals say so: nothing was
+       installed and nothing was made permanent, but the target's `sys.config`
+       is the one this call wrote.
+
+  So the boundary is `install_release/1` rather than the first call into
+  `:release_handler` - step 2 is such a call, and steps 2, 3 and 5 are Castle's
+  own refusals rather than OTP's.
+
+  What it prints depends on the transition the relup asks for. A hot upgrade
+  reports the version that is now running and the one it replaced. A transition
+  that restarts the emulator cannot report that, because
+  `:release_handler.install_release/1` replies and *then* reboots, so it reports
+  that the version was installed, that the emulator is restarting, and that the
+  version stays provisional until it is committed.
+
+  Provisional is the ordinary state of a freshly installed version, restart or
+  not: `commit/1` writes `releases/start_erl.data` and nothing else does, so
+  until it runs that file still names the version that was permanent before.
+  What that buys differs between the two transitions, and "any restart rolls
+  back" is not true of both. After a hot upgrade, anything that takes the system
+  down brings the previous version back. After a transition that restarts the
+  emulator, the restart the install *asked for* is already accounted for: Castle
+  leaves a marker naming the target beside the file `:release_handler` writes
+  before rebooting, and the launcher consumes that pair on the next start and
+  boots the target - which is the reboot the install reported, and the reason
+  `install/1` returns before it has finished. It is the restarts *after* that
+  one which read `start_erl.data` and come back on the previous permanent
+  version. Either way nothing is made permanent by a crash, and until `commit/1`
+  runs the rollback costs nothing.
+
+  Confirming the install is a separate step for the same reason: what
+  `install_release/1` replies says only that the upgrade was accepted, and it is
+  the same reply either way. `bin/castle install` polls `running/1` across the
+  reboot instead of trusting it, and automation driving an upgrade over `rpc`
+  has to do the same.
+
+  Two installs cannot run on this node at once: the second waits for the first,
+  everything from step 2 onwards being serialised. It then meets step 3, and is
+  refused if what it would do is reboot the emulator while the first install is
+  still waiting for its own reboot - the file that tells the launcher which
+  version to boot belongs to one install attempt, and is neither adopted nor
+  replaced by the next.
+
+  ## The four extra arguments
+
+  `install/1` is the operator's form, and it is what `bin/castle` calls. The
+  defaulted arguments - the releases directory, and the three modules the
+  install talks to - are not an API and nothing in a deployment passes them:
+  which releases directory the records and the configuration land in is a
+  property of the installation rather than a caller's choice, which is why it is
+  derived here.
+
+  They exist so that a test can drive concurrent installs *through this
+  function*. Serialising an install has to be true of this call and not merely
+  of something below it: the defect that made the lock necessary was a step
+  composed here, and a suite that could only reach one layer down would have
+  stayed green while it was reintroduced.
+  """
+  # Five, because a definition with defaults defines five functions and a
+  # `@spec` covers one arity. Two of them - `install/1` and `install/5` - were
+  # all this carried at first, which left `install/2..4` unspecced and the
+  # claim that the whole of this module is specced false. `mix docs` does not
+  # notice, `credo --strict` does not notice, and there is no Dialyzer here:
+  # `Code.Typespec.fetch_specs(Castle)` is what shows all five, and reading the
+  # source is what missed three.
+  @spec install(String.t()) :: :ok
+  @spec install(String.t(), Path.t()) :: :ok
+  @spec install(String.t(), Path.t(), module()) :: :ok
+  @spec install(String.t(), Path.t(), module(), module()) :: :ok
+  @spec install(String.t(), Path.t(), module(), module(), module()) :: :ok
   def install(
         vsn,
         rel_dir \\ rel_dir(),
@@ -239,18 +524,117 @@ defmodule Castle do
     report!(Commands.install(vsn, rel_dir, handler, peer, deployment))
   end
 
+  @doc """
+  Confirms that `vsn` is the release the system is running, and has finished
+  booting.
+
+  Says nothing when it is, and raises `Castle.Error` otherwise - naming the
+  version that is running instead, or the progress a node that is still booting
+  has reached. There is no `bin/castle` command of its own for it:
+  `bin/castle install` polls this until it answers, or until it runs out of
+  time, and that is what an installed version being confirmed means. Automation
+  that installs over `rpc` rather than through `bin/castle` needs it for the
+  same reason.
+
+  Two conditions, and the second is the one that is easy to leave out. The
+  version has to be the running release - the `current` one, or the `permanent`
+  one when none is current, so a version that has been installed and one that
+  has been committed both count, while a version left `unpacked` by a rollback
+  does not. And its boot has to have finished: `:release_handler` records the
+  new version while `sasl` starts, so the node answers before the applications
+  after `sasl` are up, and one of those can still fail and take the system back
+  to the previous release. Committing on the strength of that would make a
+  version that cannot boot the permanent one.
+  """
+  @spec running(String.t()) :: :ok
   def running(vsn) when is_binary(vsn) do
     report!(Commands.running(vsn))
   end
 
+  @doc """
+  Makes `vsn` permanent, so that it is the version a restart boots into.
+
+  `bin/castle commit [<vsn>]`. Given no version, `bin/castle` selects the
+  release whose status is `current` - the one an install left provisional, and
+  there is at most one of those - and fails, asking for a version explicitly,
+  when there is none. So it is not "the version running now": a system running
+  nothing but its permanent release has nothing awaiting commit, and saying so
+  is a non-zero exit status rather than a no-op.
+
+  This is what ends the provisional state an install leaves behind: it writes
+  `releases/start_erl.data`, and nothing else does, so until it runs an ordinary
+  restart boots the version that was permanent before and the rollback is free.
+  (An install that restarts the emulator has one restart of its own already
+  accounted for - see `install/1`.)
+
+  The target's configuration is expanded again here, the way `install/1` expands
+  it, and *before* the version is promoted, so what a commit leaves in place is
+  what a boot at commit time would produce. That is the point of doing it here
+  rather than trusting whatever the install wrote: config providers are not
+  obliged to be idempotent, and the environment can have changed since.
+
+  It follows that committing a version that is already permanent is not a
+  no-op, even though OTP's promotion step is one. The expansion has happened by
+  then: the version's `sys.config` has been rewritten from the provider inputs
+  of the moment, and a provider that fails now fails the command. An explicit
+  commit is a request to configure and promote, not a request to promote if
+  promotion is outstanding.
+
+  Raises `Castle.Error` if the configuration could not be expanded, or if the
+  version is not one `:release_handler` will promote: a version that is staged
+  and not installed is refused - which includes one a rollback returned to that
+  state - as are a superseded version and one it has never heard of.
+  """
+  @spec commit(String.t()) :: :ok
   def commit(vsn) when is_binary(vsn) do
     report!(Commands.commit(vsn, rel_dir()))
   end
 
+  @doc """
+  Removes `vsn` from the system, and deletes what nothing else is using.
+
+  `bin/castle remove <vsn>`. It takes away the version's own release directory,
+  every library directory no remaining release refers to, and the
+  `erts-<erts_vsn>` of the emulator that release was built against, if no
+  remaining release still refers to it.
+
+  Note that the emulator directory is named for the *ERTS* version and not for
+  `vsn` — `do_remove_release/4` reads `erts_vsn` out of the release record and
+  compares it against the releases that are left. The two are unrelated numbers,
+  and normally different ones: a release at `0.1.1` may well be carrying
+  `erts-16.2`.
+
+  It deletes rather than merely forgets, which is the point of having it: a
+  deployment that never removes a superseded version only grows. Raises
+  `Castle.Error` for the permanent version, which `:release_handler` refuses
+  outright, and for a version it has no record of.
+  """
+  @spec remove(String.t()) :: :ok
   def remove(vsn) when is_binary(vsn) do
     report!(Commands.remove(vsn))
   end
 
+  @doc """
+  Lists the releases the system knows of, and the status of each.
+
+  `bin/castle releases`. One line per release: the version, and the status
+  `:release_handler` holds for it. In an ordinary deployment that is `permanent`
+  for the version a restart boots, `current` for one that is running but has not
+  been committed, `unpacked` for one that is staged and not currently installed,
+  and `old` for one that has been superseded and not removed.
+
+  `unpacked` is not "never installed". It is where `unpack/1` leaves a version,
+  and it is also where a version ends up when an install of it failed or was
+  rolled back - notably an emulator upgrade that came back up and could not
+  finish, which `running/1` describes. The status says what the system will do
+  with the version, not what has been tried with it.
+
+  It only reads, so like `upgradable/0` it still answers on a deployment where
+  every command that changes something is refused - it is what an operator asks
+  in order to make sense of such a refusal. A system that knows of no releases
+  reports nothing rather than an empty table.
+  """
+  @spec releases() :: :ok
   def releases do
     report!(Commands.releases())
   end

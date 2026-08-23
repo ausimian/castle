@@ -36,7 +36,7 @@ defmodule Castle.Deployment do
   applications: the `extract_tar(Root, Tar)` an unpack goes through, every
   `lib/<app>-<vsn>` the handler resolves — stored relatively by
   `create_RELEASES/3` precisely so the file can be moved — and the
-  `erts-<vsn>` a removal deletes.
+  `erts-<erts_vsn>` a removal deletes.
 
   **The release records are not.** `init/1` takes its releases directory from
   `{sasl, releases_dir}`, then `RELDIR`, and only then `init:get_argument(root)`.

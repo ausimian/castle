@@ -39,7 +39,7 @@ jobs:
       run: mix precommit
 
   test:
-    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
+    name: Test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})${{ matrix.cover && ' + coverage floor' || '' }}
     # Only Linux for now. Castle is pure Elixir talking to :release_handler,
     # with no shell scripts of its own and no suite that boots a release, so
     # there is nothing platform-sensitive to run. Add macos-15 alongside the
@@ -60,6 +60,27 @@ jobs:
           # Elixir 1.19 supports Erlang/OTP 26-28
           - elixir: '1.19'
             otp: '29'
+        include:
+          # **The one cell that checks the coverage floor, and the only place in
+          # CI that checks it at all.** `mix precommit` enforces the threshold in
+          # `mix.exs`, but the `precommit` job below is pinned to a single
+          # Elixir, so on its own it says nothing about the rest of the
+          # `~> 1.18` range that `mix.exs` declares - and cover's line
+          # attribution is not constant across that range. Elixir 1.20 counts
+          # one more relevant line in `Castle.Peer` than 1.19 does, which is how
+          # a floor set from the pinned toolchain came to fail a clean tree for
+          # contributors on a current Elixir.
+          #
+          # This is the newest Elixir in the matrix, so it reports the lowest
+          # figure and trips first: a canary for exactly that drift. Every other
+          # cell stays on a plain `mix test` deliberately - seven readings that
+          # disagree by version would be noise, not signal.
+          #
+          # Keep this on whichever cell is newest when the matrix moves on. The
+          # threshold note in `mix.exs` explains what to do if it goes red.
+          - elixir: '1.20'
+            otp: '29'
+            cover: true
 
     steps:
     - name: Checkout code
@@ -91,4 +112,23 @@ jobs:
       run: mix compile --warnings-as-errors
 
     - name: Run tests
+      if: ${{ !matrix.cover }}
       run: mix test
+
+    # Split in two rather than one `mix test --cover`, so that the step which
+    # goes red names the thing that broke without anyone opening the log:
+    # exporting cannot fail on coverage, and checking cannot fail on a test.
+    - name: Run tests (exporting coverage)
+      if: ${{ matrix.cover }}
+      run: mix test --cover --export-coverage ci
+
+    - name: Check the coverage floor
+      # Red here means the total fell under the threshold in `mix.exs` while the
+      # tests passed. Either coverage genuinely dropped, or this Elixir
+      # attributes relevant lines differently from the pinned toolchain - read
+      # the threshold note in `mix.exs` before changing the number, because it
+      # is a floor across the whole supported range and not a reading from one.
+      if: ${{ matrix.cover }}
+      env:
+        MIX_ENV: test
+      run: mix test.coverage

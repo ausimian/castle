@@ -327,6 +327,83 @@ defmodule Castle.PeerTest do
       assert message =~ "other.rel"
     end
 
+    test "reports a release file that does not hold one release", %{tmp_dir: root} do
+      # The emulator to evaluate the configuration with comes out of the release
+      # file, and the shape is matched rather than picked over, so anything else
+      # in the file has to be refused rather than read around. A second term
+      # appended to the release is what `:file.consult/1` reveals and the pattern
+      # rejects - and naming what was there is what tells an operator whether they
+      # are looking at a damaged release or at the wrong file altogether.
+      vsn_dir = SyntheticRelease.build(root)
+      authoritative = Path.join(vsn_dir, "synthetic-1.0.0.rel")
+      File.write!(authoritative, File.read!(authoritative) <> "{appended_by_hand}.\n")
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Cannot read #{authoritative} as a release file. It holds ["
+      assert message =~ "{:appended_by_hand}"
+    end
+
+    test "reports a release file it cannot read at all", %{tmp_dir: root} do
+      # Not the same answer, and it must not be: a file that will not parse says
+      # nothing about what it holds, so the message says what the read said
+      # instead of describing terms nobody got.
+      vsn_dir = SyntheticRelease.build(root)
+      authoritative = Path.join(vsn_dir, "synthetic-1.0.0.rel")
+      File.write!(authoritative, "{release,\n")
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Cannot read #{authoritative}."
+      refute message =~ "as a release file"
+    end
+
+    test "refuses a version whose sys.config will not parse", %{tmp_dir: root} do
+      # Refused before a VM is started, like everything else here: `sys.config` is
+      # read twice on the way in - as bytes, for the header the launcher reads,
+      # and as terms - and it is the second that decides whether there is
+      # anything to resolve at all. `:file.consult/1` answers a
+      # `{Line, Module, Reason}` tuple for this rather than a posix atom, which is
+      # the one reason `format_error/1` has a clause for something that is not an
+      # atom: the line is the part an operator needs, and it is inside the tuple.
+      vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
+      sys_config = Path.join(vsn_dir, "sys.config")
+      File.write!(sys_config, "this is not a configuration")
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Cannot read #{sys_config}. {1, :erl_parse,"
+    end
+
+    test "reports a target whose Castle does not answer this call", %{tmp_dir: root} do
+      # The cross-version contract, seen from the far side. `resolve/1` runs in
+      # the *target* release's own code, so `{Castle.Peer, :resolve, 1}` is an
+      # agreement between one version of Castle and the next - and a target built
+      # against a Castle that predates it answers something this cannot use. Not
+      # an exception, which the catch below `call/2` already covers, and not an
+      # `{:error, binary}` either: a third thing, which has to be refused with
+      # the reason an operator can act on rather than passed on as configuration.
+      #
+      # The fixture is a castle application built for the target alone. It is why
+      # `build/2` has `:override`: the release file still names castle once, at
+      # the version preboot starts, and only the code behind the name differs.
+      fake = SyntheticRelease.stub_castle(Path.join(root, "old-castle"), :not_implemented)
+
+      vsn_dir =
+        SyntheticRelease.build(root,
+          override: [fake],
+          config: with_providers([{PeerProviderStub, []}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Castle.Peer.resolve/1 answered :not_implemented"
+      assert message =~ "predates this mechanism"
+
+      # Refused rather than resolved from, so nothing was written.
+      assert File.read!(sys_config) == before
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+
     test "gives up on a peer that never boots, at the deadline", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
       File.write!(Path.join(vsn_dir, "preboot.boot"), "not a boot script")
@@ -559,6 +636,42 @@ defmodule Castle.PeerTest do
       refute File.exists?(pristine)
       assert File.read!(Path.join(vsn_dir, "sys.config")) == resolved
     end
+
+    test "refuses a base name that is a link rather than writing through it",
+         %{tmp_dir: root} do
+      # The base's name taken by something that is not a base, which is the half a
+      # private working directory does not cover: the name lives in the version
+      # directory, beside `sys.config`, and nothing about that directory is
+      # Castle's to guarantee.
+      #
+      # A dangling link is what makes the two implementations distinguishable.
+      # `File.regular?/1` says no for it, so this takes the first
+      # materialisation's path and stages a base of its own; the link then
+      # refuses rather than replaces, and what is at the name is read instead -
+      # which is nothing, so the install is refused and the operator is told to
+      # remove it. `File.write/2` in that position follows the link and creates
+      # the target outright, and the end state of the two differs only in a file
+      # somewhere else.
+      vsn_dir =
+        SyntheticRelease.build(root,
+          config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      pristine = Path.join(vsn_dir, "sys.config.pristine")
+      elsewhere = Path.join(root, "elsewhere")
+      original = File.read!(sys_config)
+      File.ln_s!(elsewhere, pristine)
+
+      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert message =~ "Cannot read #{pristine}. no such file or directory"
+      assert message =~ "Remove it, and unpack 1.0.0 again as well if"
+
+      # Nothing was written through the link, and nothing was left behind either.
+      refute File.exists?(elsewhere)
+      assert File.read!(sys_config) == original
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
   end
 
   # Every file this module brings into existence holds a release's
@@ -739,6 +852,142 @@ defmodule Castle.PeerTest do
       # will not reopen it.
       assert {:error, _} = Castle.Peer.write_private(filled, "again")
       assert File.read!(filled) == "secret"
+    end
+
+    test "reports a write that did not happen rather than raising", %{tmp_dir: root} do
+      # `:file.write/2` and not `IO.binwrite/2`, which is the whole reason the
+      # write is separable from the create. The handle is opened `:raw`, so it is
+      # a `file_descriptor` record that the `IO` functions merely accept, and
+      # `IO.binwrite/2` is specified to return `:ok` - it earns that by raising
+      # whatever `:file.write/2` answered. Everything in this module runs ahead of
+      # `install_release/1` and reports rather than raises, because an exception
+      # there is a silent abort of an install that has not been reported as
+      # failing.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "sys.config")
+
+      assert {:ok, handle} = Castle.Peer.create_exclusive(path)
+      assert File.close(handle) == :ok
+
+      assert {:error, message} = Castle.Peer.fill(handle, path, "the configuration")
+      assert message =~ "Cannot write #{path}."
+
+      # And the configuration is not in the file, which is the fact the caller was
+      # told about: the exclusive open created it empty and nothing filled it.
+      assert File.read!(path) == ""
+    end
+
+    test "reports a close that failed, and does not narrow the file", %{tmp_dir: root} do
+      # `fill/3` takes three steps and the *close* is the one no closed handle can
+      # single out. A handle that is already closed fails both the write and the
+      # close, and `with :ok <- written, :ok <- closed` reports the write - so the
+      # test above pins `written/3` and says nothing about `closed/2`, and both
+      # produce the same "Cannot write" prefix besides. Only a handle whose write
+      # succeeds and whose close does not can tell them apart.
+      #
+      # A process is that handle. `File.io_device/0` is `pid | file_descriptor`,
+      # so this is within what `fill/3` accepts: `:file.write/2` sends a pid
+      # `{:put_chars, …}` over the io protocol, while `File.close/1` sends it a
+      # `:file_request`, which is what lets one answer and the other refuse.
+      path = Path.join(root, "sys.config")
+      File.write!(path, "what was there before")
+      File.chmod!(path, 0o644)
+
+      assert {:error, message} =
+               Castle.Peer.fill(closing_with(:enospc), path, "the configuration")
+
+      # The close's own reason, which the write cannot produce here because the
+      # write succeeded.
+      assert message =~ "Cannot write #{path}. no space left on device"
+
+      # And the mode goes on only once both have succeeded, so a file that was
+      # not written in full is never given the mode that says it was.
+      assert mode(path) == 0o644
+      assert File.read!(path) == "what was there before"
+    end
+
+    test "reports a mode it could not set on the file it wrote", %{tmp_dir: root} do
+      # The `chmod` is the one step here that goes by path, because OTP has
+      # nothing that sets a mode on an open file - so it can fail where the write
+      # through the handle did not, and it has to be reported when it does. The
+      # content is already committed to the inode by then, at whatever the umask
+      # chose, so a caller told `:ok` would go on to publish a file that never
+      # took `sys.config`'s mode. The name is removed rather than swapped, which
+      # is the same window the test above stands in and the deterministic end of
+      # it.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "sys.config")
+
+      assert {:ok, handle} = Castle.Peer.create_exclusive(path)
+      File.rm!(path)
+
+      assert {:error, message} = Castle.Peer.fill(handle, path, "the configuration")
+      assert message =~ "Cannot set the mode of #{path}. no such file or directory"
+      refute File.exists?(path)
+    end
+
+    test "reports a model whose mode it cannot read", %{tmp_dir: root} do
+      # The mode of the file being copied is what the copy has to end up with, so
+      # a model that cannot be stat'd is not a mode to go ahead without: the copy
+      # would keep the 0600 it was created with, which is narrower rather than
+      # wider, and would then be published as though it carried the operator's
+      # own mode.
+      assert {:ok, work} = Castle.Peer.work_dir(root)
+      path = Path.join(work, "copy")
+      model = Path.join(root, "sys.config")
+
+      assert {:error, message} = Castle.Peer.write_like(path, "the configuration", model)
+      assert message =~ "Cannot read #{model}. no such file or directory"
+
+      # Written, and left at the mode a file holding configuration is created
+      # with. Failing part way leaves it narrower than intended, never wider.
+      assert mode(path) == 0o600
+    end
+
+    test "refuses to write where it cannot see the directory at all", %{tmp_dir: root} do
+      # The privacy of the directory is checked on every creation rather than
+      # assumed of the working directory once, because remembering it at the call
+      # sites is the thing that failed four times over. A directory that cannot be
+      # stat'd is not a directory that may be assumed private - and the refusal
+      # names the *directory*, which is the thing there is something wrong with.
+      missing = Path.join(root, "gone")
+      path = Path.join(missing, "sys.config")
+
+      assert {:error, message} = Castle.Peer.write_private(path, "the configuration")
+      assert message =~ "Cannot read #{missing}. no such file or directory"
+      refute File.exists?(path)
+    end
+
+    test "reports a directory it cannot make a working directory in", %{tmp_dir: root} do
+      # Made rather than ensured, and a failure to make it refuses instead of
+      # going on: everything this module writes goes inside it, so there is
+      # nowhere else for the configuration to be assembled.
+      missing = Path.join(root, "gone")
+
+      assert {:error, message} = Castle.Peer.work_dir(missing)
+      assert message =~ "Cannot create #{Path.join(missing, "castle-")}"
+      assert message =~ "no such file or directory"
+      refute File.exists?(missing)
+    end
+
+    test "reports a staging file it cannot publish, and publishes nothing",
+         %{tmp_dir: root} do
+      # `publish/2`'s third answer. `:eexist` is the name being taken, which is a
+      # race the loser is told about and reads around; anything else is a failure
+      # to publish at all, and it has to be reported rather than folded into
+      # "taken" - the caller's next move for a taken name is to read what is
+      # there, and here there is nothing to read.
+      #
+      # A staging file that is not there is the deterministic way in, and no mode
+      # is involved. `File.ln/2` refuses it and creates no destination, which is
+      # the second half of what this asserts: a publish that did not happen has
+      # left no name behind for a start of the deployment to act on.
+      staging = Path.join(root, "never-staged")
+      destination = Path.join(root, "sys.config.pristine")
+
+      assert {:error, message} = Castle.Peer.publish(staging, destination)
+      assert message =~ "Cannot write #{destination}. no such file or directory"
+      refute File.exists?(destination)
     end
 
     test "carries an unrestricted mode just as faithfully", %{tmp_dir: root} do
@@ -1052,6 +1301,26 @@ defmodule Castle.PeerTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  # An io device that accepts everything written to it and refuses to close, so
+  # that `fill/3`'s write can succeed where its close cannot. `:file.write/2`
+  # sends a pid an io request and `File.close/1` sends it a file request, which is
+  # the whole of why the two can be answered differently.
+  defp closing_with(reason) do
+    spawn_link(fn -> device(reason) end)
+  end
+
+  defp device(reason) do
+    receive do
+      {:io_request, from, reply_as, _request} ->
+        send(from, {:io_reply, reply_as, :ok})
+        device(reason)
+
+      {:file_request, from, reply_as, :close} ->
+        send(from, {:file_reply, reply_as, {:error, reason}})
+        device(reason)
+    end
+  end
 
   defp rel_files(vsn_dir), do: Enum.filter(File.ls!(vsn_dir), &String.ends_with?(&1, ".rel"))
 

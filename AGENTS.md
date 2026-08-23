@@ -1143,7 +1143,9 @@ one Castle set silently would be one a consumer could not see in their own
 
 - Run `mix precommit` before committing. It is the single validation gate —
   `compile --warnings-as-errors`, `deps.unlock --unused`, `format`,
-  `credo --strict`, `test`. Do not run the individual checks piecemeal.
+  `credo --strict`, `test --cover`. Do not run the individual checks piecemeal.
+  The `--cover` is what enforces the coverage threshold; see *What
+  `mix test --cover` measures* for the figure and why it is what it is.
 - `@version` in `mix.exs` is the single source of truth for the version.
 - Add user-visible changes to `RELEASE.md` on the feature branch, using
   [Keep a Changelog](https://keepachangelog.com/) sections. Do not defer release
@@ -1259,6 +1261,18 @@ shapes differ in the version directory's release files: Mix assembles one,
 shape is how `Castle.Peer` came to refuse every unpacked release as ambiguous,
 having been reviewed seven times against a directory the peer path never meets.
 
+`build/2`'s `:override` points `lib/<app>-<vsn>` at a directory other than this
+node's own copy, leaving the release file alone — which is what a target
+carrying a *different build* of one of preboot's applications looks like, and the
+only way to be on the far side of `{Castle.Peer, :resolve, 1}`.
+`stub_castle/2` builds that castle: one exported `resolve/1` answering a fixed
+atom. **It compiles with `:compile.forms/2` rather than from Elixir source**,
+and that is load bearing rather than tidy — the module is named `Castle.Peer`,
+so `Code.compile_string/1` would load the stub over the running one and every
+peer test after it would be asserting against the fixture. Abstract forms are
+the one route to a beam the code server never sees. Do not "simplify" it onto
+`provider_app/5`.
+
 `Castle.Peer.materialise/2` takes `:boot_timeout` and `:resolve_timeout` for the
 same reason `Castle.Commands` takes the module to talk to — a deadline nothing
 can shorten is a deadline no test can show is enforced. Two tests give it a
@@ -1291,6 +1305,23 @@ created while the file the name now points at never saw it — with that same te
 asserting the acknowledged cost, that the by-path `chmod` does land on the
 swapped name. With the name left alone the two behaviours are identical, so
 there is no other way to tell them apart.
+
+**`fill/3`'s three steps need three different handles to be told apart, and a
+handle that is merely closed only reaches the first.** An already-closed handle
+fails the write *and* the close, `with :ok <- written, :ok <- closed` reports the
+write, and both helpers produce the same `"Cannot write #{path}"` prefix — so
+that case pins `written/3` (its discriminator is that `IO.binwrite/2` in place of
+`:file.write/2` raises instead of returning) and says nothing whatever about
+`closed/2`. It executed `closed/2`'s error clause without being able to detect it
+breaking, and this file claimed the clause was uncovered while the report showed
+it hit; both halves were wrong in the same place. Telling them apart needs a
+handle whose **write succeeds and whose close does not**, which is a process:
+`File.io_device/0` is `pid | file_descriptor`, so a pid is within what `fill/3`
+accepts, and `:file.write/2` sends a pid an io request while `File.close/1` sends
+it a `:file_request` — two protocols, so one can answer and the other refuse.
+That test asserts the close's own reason and that the file was **not** narrowed,
+which is the "mode only once both have succeeded" half of the contract. A
+`chmod` that cannot land is the third step, reached by removing the name.
 
 `secure_dir/1` is public so that the `mkdir`-to-`chmod` window can be stood in:
 a test creates a directory at 0777, plants a `sys.config` symlink inside it, and
@@ -1344,6 +1375,14 @@ modes, since a fixture here may not turn on a mode that root or a filesystem can
 ignore. And `Stub.calls(:which_releases) == [[]]` on the successful install is now
 load bearing twice over: it says the record check happened in the call that acted,
 *and* that the classification did not ask a second time.
+
+The other things that can hold the marker's name are planted the same way, and
+each of `File.lstat/1`'s answers has to read as a sentence: a **dangling
+symlink**, which also shows that nothing was written through it since what it
+pointed at is still not there, and a **fifo** made with `mkfifo`, which is the
+only one of the `:other` types a test can create without privileges or a mode.
+That last one is why `describe_type/1` has an `:other` clause — the catch-all
+put "a other" into a refusal that ships.
 
 **The attempt-ownership tests are about states that only exist while
 `install_release/1` is in flight**, so `Castle.ReleaseHandlerStub` accepts a
@@ -1486,6 +1525,183 @@ target's own providers over the materialised file, with `SAMPLE_GREETING` change
 underneath it, and answers with the new value. What lets it is that materialising
 leaves no `config_provider_booted` marker behind and preserves the header Mix
 wrote, so Elixir's pipeline is still armed in the file the launcher reads.
+
+### What `mix test --cover` measures
+
+`mix test --cover` measures `lib`, and `test_coverage` in `mix.exs` names the
+seven `test/support` modules out of it. A fixture is covered by being run at
+all, so counting them moved the total without their ever being the thing
+measured — and two of them moved it *down* for a reason that is not about the
+suite. `Castle.PeerProviderStub` sat at 4.17% and `Castle.IoSink` at 76% while
+being exercised by every peer test, because they execute in the peer's VM. The
+list is module names rather than a pattern: a regex over `Stub` would swallow a
+production module spelled that way, which is the one thing an exclusion must not
+do.
+
+**Three things check the floor, and they are not checking the same thing.**
+
+* **`mix precommit`** runs `test --cover`, which is what makes the threshold a
+  gate rather than a number in a comment. It runs on whatever Elixir the
+  contributor happens to have, so this is where the floor meets the `~> 1.18`
+  range in practice — and where a false failure does the most damage, because
+  the lesson it teaches is to stop running the gate.
+* **CI's `precommit` job** runs the same alias pinned to Elixir 1.19 / OTP 28.
+  That is the reading the rest of this section quotes.
+* **One cell of CI's `test` matrix** — the newest Elixir, currently 1.20 /
+  OTP 29 — exports coverage and then runs `mix test.coverage`. It is the lowest
+  reporter, so it trips first: a canary for attribution drift rather than a
+  second opinion on the figure. Every other cell stays on a plain `mix test`
+  deliberately, because seven readings that disagree by version are noise.
+
+That cell is **two steps rather than one `mix test --cover`**, so the step that
+goes red names what broke without anyone opening the log: exporting coverage
+cannot fail on the threshold, and `mix test.coverage` cannot fail on a test. Its
+job name carries `+ coverage floor` for the same reason. Move the `cover: true`
+flag when the matrix's newest cell moves on.
+
+None of that existed until the floor had already failed a clean tree on 1.20 and
+CI had stayed green through it, because the matrix ran a plain `mix test` and the
+one job that checked the threshold was pinned to the version that agreed with
+it. A gate checked only on the maintainer's toolchain is a gate that discovers
+its own bugs through other people.
+
+**The figure is not the same on every supported toolchain, and the threshold has
+to be a floor across them rather than a reading from one.** Measured, one cell
+per toolchain with its own `MIX_HOME` and `MIX_BUILD_ROOT`:
+
+| Elixir / OTP | `Castle.Peer` | Total | relevant |
+| --- | --- | --- | --- |
+| 1.18.3 / 27 | 81.22% | 88.58% | 473 |
+| 1.18.4 / 27 | 81.22% | 88.58% | 473 |
+| 1.18.4 / 28 | 81.22% | 88.58% | 473 |
+| 1.19.5 / 27 | 81.22% | 88.58% | 473 |
+| 1.19.5 / 28 *(CI)* | 81.22% | 88.58% | 473 |
+| 1.20.3 / 28 | 80.84% | 88.40% | 474 |
+| 1.20.3 / 29 | 80.84% | 88.40% | 474 |
+
+Same tests, same 419 covered lines, a different denominator. It tracks the
+Elixir version and not OTP, and the difference is exactly one line: **1.20
+counts the head of `defp forward_standard_error do` (peer.ex:981) as executable
+where 1.19 does not.** Note where that lands — inside the `## In the peer`
+section, so the drift went straight into the set nothing can observe, making it
+34 unmeasurable lines on 1.20 rather than 33. Attribution drift is not
+distributed evenly over the module, and there is no reason to expect the next
+one to be either.
+
+Per module on the pinned toolchain: `Castle.Commands` 94.85%, `Castle` 90.48%,
+`Castle.Peer` 81.22%, `Castle.Deployment` and `Castle.Error` 100%.
+
+**So the threshold is 88 — the lowest reading, rounded down.** Two earlier
+values were wrong in opposite directions and both are worth keeping written
+down. 85 sat *below* the figure it was meant to floor, so it ratcheted nothing
+and licensed a thirteen-line regression. 88.58 was the pinned toolchain's exact
+reading with no slack, and it made the mandatory `mix precommit` fail on a clean
+tree under Elixir 1.20 — a false failure for anyone on a current release. The
+comment beside that number had *already said* attribution varies by version; the
+hazard was identified and the number ignored it, which is the more instructive
+half of the mistake. Do not set this from one machine, and do not raise it to
+88.40 or above: that re-creates the trap the moment another version attributes
+differently.
+
+**What 88 costs, measured on the toolchain with the least slack rather than
+estimated.** Adding uncovered lines to `lib` under Elixir 1.20.3:
+
+| added | total | exit |
+| --- | --- | --- |
+| 0 | 88.40% | 0 |
+| 1 | 88.21% | 0 |
+| 2 | 88.03% | 0 |
+| 3 | 87.84% | **3** |
+
+So it absorbs two and fails on the third; on 1.19 it absorbs three and fails on
+the fourth. That is more slack than a floor ideally has, and it is the
+deliberate price of enough headroom that one more line of version drift does not
+produce a false failure. The direction of the trade is the point: a floor that
+fires on a clean tree gets the gate bypassed, while a floor two lines loose still
+catches every regression large enough to matter — and a review that let two new
+uncovered branches through was not going to be saved by a percentage. Anything
+tighter than about 88.2 buys back one line of sensitivity and spends the drift
+headroom this paragraph exists because of.
+
+**What cannot be measured is the peer's VM, and the reason is where
+instrumentation is applied — not anything cover is unable to do.** An earlier
+version of this file said the peer "has no node name and `is_alive() == false`,
+so `cover` cannot be started on it", and that is false: `:cover.start/0` works
+in a VM with no distribution. What actually happens is that Mix starts cover on
+*this* node and instruments the modules loaded here, while the peer is a
+separate VM loading `Castle.Peer` from the target release's own beam files,
+which nothing has instrumented. Cover's only mechanism for reaching another VM
+is `:cover.start/1` over a *distributed* node, and this peer deliberately has
+none. So `resolve/1` and everything below the `## In the peer` comment — 33
+lines on 1.19 and 34 on 1.20, about 7% of the shipped total — runs on every
+`Castle.PeerTest` and is counted as missed, which puts the observable ceiling
+near 93%.
+
+Do not raise it by calling those functions on the test node: that runs Elixir's
+pipeline in the very VM the whole mechanism exists to keep it out of, mutates
+this node's `:elixir` application environment, and asserts less than the peer
+tests already do. Splitting them into a module of their own to exclude it is
+worse — `{Castle.Peer, :resolve, 1}` is a contract with the *next* version of
+Castle, so the MFA is not free to move for a metric.
+
+**Why 90% is not the threshold, stated as arithmetic rather than as a claim of
+impossibility.** 90% needs 426 covered on 1.19's denominator of 473 — 427 on
+1.20's 474 — so seven more than there are, eight on the newer attribution.
+Twenty-one
+missed lines are observable in principle, and they divide cleanly:
+
+* **Five are the compiler's own generated clauses**, one line per defaulted
+  arity nothing calls: `Castle.install/2` and `/3`, `Castle.Commands.install/2`
+  and `/3`, and `Castle.Commands.commit/3`. These *are* hittable — calling the
+  intermediate arities was measured to cover all five and to take the total to
+  89.64% — and that is exactly the problem. Each is a delegation whose defaults
+  are a subset of an arity that is already called, so `Castle.install/1` in
+  `castle_test.exs` already establishes that the defaults are the real modules.
+  A case calling `install/3` would assert nothing that arity 1 and arity 4 do
+  not, and would move this number. That is the move this project does not make,
+  and it is the reason 90% is out of reach: five of the seven can only come from
+  here.
+* **Sixteen need a file mode, a device node, or a provider sabotaging Castle's
+  own working directory.** In `Castle.Commands`: `arm/4`'s three publish
+  failures (`work_dir/1` refusing, an `lstat` failing for anything but
+  `:enoent`, a staged marker that cannot be written or linked) together with
+  `unarmed/3` and `detail/1`, the message all three share — seven lines that
+  stand or fall together, and every route to them needs the releases directory
+  to stop behaving between one statement and the next. Plus
+  `armed_version/1`'s unreadable marker, and `describe_type/1`'s catch-all,
+  which only `:device` reaches now and a device node needs root to make. In
+  `Castle.Peer`: `release_file/1`'s and `empty/1`'s listing failures (the
+  second unreachable through `work_dir/1` at all, which has just created the
+  directory — reaching it means calling `secure_dir/1` on something it never
+  hands over, whose one observable effect is that Castle deletes what you
+  pointed it at); `keep/2`'s generic publish error, where `write_like/3` has
+  created the staging file immediately before, so the only `File.ln/2` failures
+  left are cross-device; `stop/1`'s rescue, which needs the control process
+  already gone and is a race no fixture settles; and the two writes at the end
+  of `expand/2`, whose only route is a config provider removing the working
+  directory while the peer runs.
+
+  A mode fixture is refused here for the reason `stub_stat/1` exists: root and
+  some filesystems ignore one, so it would only sometimes describe the state it
+  names.
+
+**Two things that were in this list and should not have been.** `publish/2`'s
+generic error needs none of the above — `File.ln/2` with a staging file that is
+not there answers `:enoent` and creates no destination — and it is now covered.
+So is `call/2`'s "answered … may carry a version of Castle that predates this
+mechanism": `SyntheticRelease.stub_castle/2` builds a castle application for the
+target alone, which is what `build/2`'s `:override` is for. Both were dismissed
+as needing fixtures they did not need. And `closed/2` was listed as uncovered
+while the report showed its error clause *hit* — executed incidentally by the
+closed-handle test, which cannot discriminate it, and now pinned properly by a
+test of its own. Read this list against a freshly regenerated `cover/`; stale
+HTML from a previous run is how the inconsistency survived.
+
+**A booted release** is the last of it, and that is Forecastle's `:e2e` suite,
+described just above. That suite is where the in-peer section is exercised
+against a real release rather than a synthetic one, where the marker is consumed
+by a real launcher, where `running/1` is polled across a real reboot, and where
+the exit statuses `bin/castle` returns are asserted. None of it is measured here.
 
 ## Known limitations
 

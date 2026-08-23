@@ -40,6 +40,12 @@ defmodule Castle.SyntheticRelease do
     * `:apps` - `{app, vsn, dir}` triples to add to the code path without
       starting them, which is how a provider module that lives outside the
       applications preboot starts is reached
+    * `:override` - `{app, vsn, dir}` triples for applications preboot already
+      starts, pointing `lib/<app>-<vsn>` somewhere other than this node's own
+      copy. The release file is untouched, so the application is still started
+      once and under the same version - only the code behind it differs, which
+      is what a target release carrying a *different* build of one of these
+      applications looks like
     * `:shape` - `:unpacked`, the default, or `:assembled`; which release files
       the version directory holds, and so how the version is to have got there.
       See `write_release_files/4`
@@ -47,6 +53,7 @@ defmodule Castle.SyntheticRelease do
   def build(root, opts \\ []) do
     vsn = Keyword.get(opts, :vsn, "1.0.0")
     extra = Keyword.get(opts, :apps, [])
+    override = Keyword.get(opts, :override, [])
     lib = Path.join(root, "lib")
     vsn_dir = Path.join([root, "releases", vsn])
     File.mkdir_p!(vsn_dir)
@@ -55,7 +62,7 @@ defmodule Castle.SyntheticRelease do
     apps = for app <- @started, do: {app, to_string(Application.spec(app, :vsn)), :permanent}
     apps = apps ++ for {app, app_vsn, dir} <- extra, do: {app, app_vsn, :none, dir}
 
-    make_boot_script(vsn_dir, vsn, apps, link_apps(lib, apps, extra))
+    make_boot_script(vsn_dir, vsn, apps, link_apps(lib, apps, extra ++ override))
     write_release_files(vsn_dir, vsn, apps, Keyword.get(opts, :shape, :unpacked))
     write_sys_config(vsn_dir, opts)
 
@@ -78,6 +85,43 @@ defmodule Castle.SyntheticRelease do
 
     {{app, vsn, dir}, binary}
   end
+
+  @doc """
+  Writes a `castle` application holding nothing but a `Castle.Peer.resolve/1`
+  that answers `reply`, and returns the triple `build/2`'s `:override` takes.
+
+  This is how a target release carrying a Castle that predates
+  `{Castle.Peer, :resolve, 1}` is reached. That MFA is a contract between one
+  version of Castle and the next, so the only way to be on the far side of it is
+  for the release being configured to hold a different castle.
+
+  **The module is compiled straight to a beam with `:compile.forms/2`, which
+  returns the binary without loading it.** That is not a detail: this module is
+  named `Castle.Peer`, so compiling it from Elixir source the way
+  `provider_app/5` does would replace the running `Castle.Peer` in the node
+  under test, and every peer test after it would be running against this stub.
+  Erlang abstract forms are the one way to get a beam for a module without the
+  code server ever seeing it.
+  """
+  def stub_castle(dir, reply) when is_atom(reply) do
+    ebin = Path.join(dir, "ebin")
+    File.mkdir_p!(ebin)
+
+    forms = [
+      {:attribute, 1, :module, Castle.Peer},
+      {:attribute, 1, :export, [resolve: 1]},
+      {:function, 1, :resolve, 1, [{:clause, 1, [{:var, 1, :_path}], [], [{:atom, 1, reply}]}]}
+    ]
+
+    {:ok, Castle.Peer, binary} = :compile.forms(forms, [:binary, :return_errors])
+    File.write!(Path.join(ebin, "#{Castle.Peer}.beam"), binary)
+    write_app(ebin, :castle, castle_vsn(), [Castle.Peer])
+
+    {:castle, castle_vsn(), dir}
+  end
+
+  @doc "The version preboot's release file names castle at."
+  def castle_vsn, do: to_string(Application.spec(:castle, :vsn))
 
   @doc """
   Writes an application with no modules at all, and returns the triple

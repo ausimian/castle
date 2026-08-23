@@ -1,129 +1,157 @@
 # Castle
 
-Runtime support for hot-code upgrades.
+Castle adds hot-code upgrade support to Elixir releases. It manages upgrades on
+the running node and resolves the target release's runtime configuration before
+OTP installs it.
 
-`Castle` provides runtime support for hot-code upgrades. In particular, it generates a 
-valid `sys.config` from `runtime.exs` and/or other [Config Providers](https://hexdocs.pm/elixir/main/Config.Provider.html)
-prior to both boot and hot-code upgrade.
+[Forecastle](https://hexdocs.pm/forecastle) handles the build-time work. Castle
+includes it as a build-time dependency.
 
-It relies on [Forecastle](https://hexdocs.pm/forecastle/readme.html) for build-time release generation
-and brings it in as a build-time dependency.
+## Requirements
+
+- Elixir 1.18 or later.
+- A Unix release built with its own ERTS. Castle refuses releases built with
+  `include_erts: false`.
+- An external supervisor such as systemd, Docker, Kubernetes or runit if an
+  upgrade restarts the emulator.
+
+Use Castle and Forecastle from the same release series. Castle 1.x expects the
+release layout produced by Forecastle 1.x.
 
 ## Installation
 
-The package can be installed by adding `castle` to your list of dependencies in
-`mix.exs`. For projects that don't define a release, but use the `appup` compiler,
-it's sufficient to bring `Castle` in as a build-time dependency:
+Add Castle to applications that build a release:
 
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0", runtime: false}
+    {:castle, "~> 1.0"}
   ]
 end
 ```
 
-For projects that _do_ define one or more releases, `Castle` should be brought in
-as a runtime dependency:
+An application that only uses Forecastle's appup compiler can keep Castle out
+of its runtime release:
 
 ```elixir
 def deps do
   [
-    {:castle, "~> 0.3.0"}
+    {:castle, "~> 1.0", runtime: false}
   ]
 end
 ```
 
-`Castle` brings in `Forecastle` as a build-time dependency.
+## Project setup
 
-## Integration
+Point the project at its appup file and add the appup compiler:
 
-Build-time integration is done via `Forecastle` and more details can be found in its
-documentation but, in summary, it will integrate into your release process via the
-release assembly process. In particular, it requires that that the `Forecastle.pre_assemble/1` 
-and `Forecastle.post_assemble/1` functions are placed around the `:assemble` step, e.g.:
+```elixir
+def project do
+  [
+    appup: "appup.exs",
+    compilers: Mix.compilers() ++ [:appup]
+  ]
+end
+```
+
+Define each release lazily and pass its options to `Castle.customize/1`:
 
 ```elixir
 defp releases do
   [
-    myapp: [
-      include_executables_for: [:unix],
-      steps: [&Forecastle.pre_assemble/1, :assemble, &Forecastle.post_assemble/1, :tar]
-    ]
+    my_app: fn ->
+      [include_executables_for: [:unix]]
+      |> Castle.customize()
+    end
   ]
 end
 ```
 
-## Release Management
+The function wrapper is required. Mix loads `mix.exs` before dependencies have
+been compiled during commands such as `mix deps.get`. It evaluates the release
+function later, when Castle is available.
 
-The script in the `bin` folder supports some extra commands to manage upgrades.
-Releases, in their tarred-gzipped form, should first be copied to the `releases`
-subfolder on the target system. The following commands can be used to manage
-them:
+`Castle.customize/1` adds Forecastle's assembly steps around `:assemble`. When
+`:steps` is omitted, it uses `[:assemble, :tar]`. An explicit steps list is
+preserved; Castle warns if it has no `:tar` step.
 
-  - `releases` - Lists the releases on the system and their status. Status can
-    be one of the following:
-    - permanent - the release the system will boot into on next restart.
-    - current - if it exists, represents the current running release. Will be
-      different from the permanent version if a new release has been installed
-      but not yet committed. If no version is listed as current, the permanent
-      version is the currently running version.
-    - old - if it exists, a previously installed version.
-    - unpacked - an unpacked version, but not yet installed.
-  - `unpack <vsn>` - Unpacks the release called `<name>-<vsn>.tar.gz`.
-  - `install <vsn>` - Installs the new release. This makes the release the
-    current one, but not yet the permanent one. Prior to running the relup,
-    `Castle` generates the version specific `sys.config` for the new version.
-  - `commit <vsn>` - Makes the specified release the one the permanent one.
-  - `remove <vsn>` - Remove an old version from the filesystem. Any files
-    shared with remaining releases are left untouched.
+You can also provide `rel/env.sh.eex`. Forecastle keeps its contents and appends
+the launcher setup Castle needs.
 
-## The Appup Compiler
+## Appups and relups
 
-You are responsible for writing the [appup](https://www.erlang.org/doc/man/appup.html)
-scripts for your application, but `Castle` will copy the appup into the `ebin` folder
-for you. The steps are as follows:
+Write an appup for each application whose code changes during a hot upgrade.
+The appup file uses Erlang terms written in Elixir syntax:
 
-1. Write a file, in _Elixir form_, describing the application upgrade. e.g.:
-   ```elixir
-   # You can call the file what you like, e.g. appup.ex, 
-   # but you should # keep it away from the compiler paths.
-   {
-    '0.1.1',
-     [
-      {'0.1.0', [
-        {:update, MyApp.Server, {:advanced, []}}
-      ]}
-     ],
-     [
-      {'0.1.0', [
-        {:update, MyApp.Server, {:advanced, []}}
-      ]}
-     ]
-   }
-   ```
-   This file will typically be checked in to SCM.
-2. Add the appup file to the Mix project definition in mix.exs and add the
-   `:appup` compiler.
-   ```elixir
-   # Mix.exs
-   def project do
-     [
-       appup: "appup.ex", # Relative to the project root.
-       compilers: Mix.compilers() ++ [:appup]
-     ]
-   end
-   ```
-   
-## Relup Generation
-
-Castle contains a mix task, `castle.relup`, that simplifies the generation of
-the relup file. Assuming you have two _unpacked_ releases e.g. `0.1.0` and `0.1.1` 
-and you wish to generate a relup between them:
-
-```shell
-> mix castle.relup --target myapp/releases/0.1.1/myapp --fromto myapp/releases/0.1.0/myapp
+```elixir
+{
+  ~c"1.1.0",
+  [
+    {~c"1.0.0", [{:update, MyApp.Server, {:advanced, []}}]}
+  ],
+  [
+    {~c"1.0.0", [{:update, MyApp.Server, {:advanced, []}}]}
+  ]
+}
 ```
 
-If the generated file is in the project root, it will be copied during 
-post-assembly to the release.
+Generate a relup between assembled releases:
+
+```shell
+mix forecastle.relup \
+  --target _build/prod/rel/my_app/releases/1.1.0/my_app \
+  --fromto _build/prod/rel/my_app/releases/1.0.0/my_app
+```
+
+The task writes `relup` to the project root by default. Leave it there for the
+next release build to package. Use `--hot` to require a hot transition or
+`--restart` to force a one-stage emulator restart.
+
+## Managing releases
+
+Build the new release, then copy `<name>-<vsn>.tar.gz` into the running
+deployment's `releases` directory. Manage it with `bin/castle`:
+
+```shell
+# Show known releases and their status.
+my_app/bin/castle releases
+
+# Check whether this node can be upgraded. Success prints nothing.
+my_app/bin/castle upgradable
+
+# Stage, install and make version 1.1.0 permanent.
+my_app/bin/castle unpack 1.1.0
+my_app/bin/castle install 1.1.0
+my_app/bin/castle commit
+
+# Remove a version that is no longer needed.
+my_app/bin/castle remove 1.0.0
+```
+
+Release statuses are:
+
+- `permanent`: the version used on the next ordinary restart.
+- `current`: the running version, installed but not committed.
+- `old`: a superseded version that can be removed.
+- `unpacked`: a staged version, or one returned to that state after a failed or
+  rolled-back install.
+
+`install` resolves the target version's config providers in a temporary VM
+running that version's code. It then asks OTP to install the release. The
+version remains provisional until `commit` writes it as permanent. If a
+provisional hot upgrade fails or the service restarts, the previous permanent
+version boots again.
+
+For a relup containing `restart_emulator`, `install` waits across the restart
+until the target version has finished booting. The external supervisor must
+restart the process. Castle does not support OTP's two-stage
+`restart_new_emulator` transition.
+
+## Limitations
+
+- Windows launchers are not supported.
+- `RELDIR` and the SASL `releases_dir` option are not supported yet. Castle and
+  `:release_handler` must use the same release directory. See
+  [issue #23](https://github.com/ausimian/castle/issues/23).
+- Castle serialises installs within one Erlang node. Do not run Castle from a
+  second VM against the same deployment.

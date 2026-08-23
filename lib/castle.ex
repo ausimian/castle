@@ -339,15 +339,23 @@ defmodule Castle do
   `bin/castle unpack <vsn>`, which builds the argument as
   `<release name>-<vsn>` - `name` is the tarball's name without its `.tar.gz`
   suffix, the way `:release_handler.unpack_release/1` takes it, and not a bare
-  version. The tarball itself has to have been copied into `releases/` under the
-  deployment root, and that is the only release directory Castle resolves: it
-  joins the name onto `code:root_dir()` and consults neither `RELDIR` nor the
-  `sasl` `releases_dir` parameter. Setting either is not supported, and does not
-  merely go unread - it moves the directory `:release_handler` unpacks into and
-  keeps its records in, while the guard that reads the target's `.rel` and the
-  step that writes the target's configuration both still resolve
-  `<root>/releases/<vsn>`. The two stop agreeing on where a version lives, so
-  such a deployment cannot complete an upgrade. It is the `<name>-<vsn>.tar.gz`
+  version. The tarball has to be in the release directory `:release_handler`
+  reads, which is `releases/` under the deployment root by default. Castle joins
+  nothing here: `unpack/1` hands the name straight to
+  `:release_handler.unpack_release/1`, and `do_unpack_release/4` joins it onto
+  the handler's own releases directory. `RELDIR` and the `sasl` `releases_dir`
+  parameter move that directory, and so move where the tarball has to be put.
+
+  Setting either is unsupported all the same, and it does not merely go unread.
+  It moves the handler's half only: everything Castle resolves for itself is
+  joined onto `code:root_dir()` - the restart marker, the target's configuration
+  under `<root>/releases/<vsn>`, and the `RELEASES` file and target `.rel` that
+  `make_releases/0` works with. So an override leaves the two halves disagreeing
+  about where a version lives, and an unpack that succeeds is followed by an
+  install that cannot. See
+  [#23](https://github.com/ausimian/castle/issues/23).
+
+  It is the `<name>-<vsn>.tar.gz`
   that `mix release`'s `:tar` step packs, which is why `customize/1` defaults
   `:steps` to include it.
 

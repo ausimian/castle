@@ -515,8 +515,11 @@ Castle's job is configuration and release management on a running node.
   more: a diagnostic, not a gate, and nothing has to call it. It stays because
   the state it reports is otherwise invisible — the file can be present while the
   record the node works from was synthesised — so an operator needs a way to ask
-  that does not unpack or install anything. Whether it belongs in the documented
-  API surface is [#11](https://github.com/ausimian/castle/issues/11)'s to settle.
+  that does not unpack or install anything.
+  [#11](https://github.com/ausimian/castle/issues/11) settled that it belongs in
+  the documented surface, and for that same reason: `bin/castle upgradable` is
+  how an operator asks, and a diagnostic nobody is told about is one nobody
+  thinks to ask.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
   before `install` and `commit` hand it over, the record check inside `unpack`
@@ -924,6 +927,34 @@ them — it runs at build time, in a consumer's `mix.exs`, and returns a value
 rather than reporting an outcome. See **Release integration** below. Anything
 that says "every function in `Castle`" has to say "but `customize/1`", and the
 comment at the head of `lib/castle.ex` does.
+
+**What is published and what is hidden follows from that, and is
+[#11](https://github.com/ausimian/castle/issues/11)'s decision.** The whole of
+`Castle` now carries `@doc` and `@spec`, and the `@moduledoc` says the two
+things a reader has to know before calling any of it: that this is the runtime
+half of a pair, and that these are commands rather than an API — a command
+prints its report and returns `:ok`, so the return value carries nothing, and a
+failure raises `Castle.Error` rather than returning `{:error, _}`. Every command
+`@doc` names the `bin/castle` command that reaches it, because that is the
+interface and the function is the thing behind it.
+
+Two decisions inside that. `make_releases/0` is `@doc false`: its only caller is
+the launcher's `env.sh` fragment, in the preboot VM of a `start` or `daemon`
+whose deployment has no `RELEASES` yet, and by hand it either does nothing (the
+file is there) or does what the next start would do anyway. Its contract is with
+a shell fragment in another project, so publishing it would document a function
+nobody should call. It keeps its `@spec` regardless — the spec is the contract
+whether or not the function is published. And `install/2..5` is documented as
+what it is, a seam the concurrency test drives: one `@doc` covers every arity of
+a clause with defaults, so saying nothing about the extra four would leave them
+reading as an API. Every other function is a command an operator invokes, and
+hiding one of those would document nothing useful anywhere.
+
+The specs say `:: :ok` and nothing more, because that is what `report!/1`
+returns; a spec naming the lines, or an error tuple, would be describing
+`Castle.Commands`. Nothing checks them — there is no Dialyzer here — so they are
+kept by hand, and a claim in a `@doc` about what a command refuses is worth
+checking against `Castle.Commands` before it is trusted.
 
 Forecastle is what arranges for these to be reachable: it leaves the
 configuration Mix wrote alone, adds a `:preboot` script that starts `:castle`,
@@ -1418,13 +1449,16 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   it. It is the one limitation here that a lock cannot narrow, which is why the
   filesystem half of the protocol — `publish/2` refusing rather than replacing —
   has to stand on its own.
-- **The public API is undocumented, apart from `customize/1`.** `@moduledoc` is
-  still the generated placeholder and the commands carry no `@doc` or `@spec`
-  annotations ([#11](https://github.com/ausimian/castle/issues/11)).
-  `Castle.customize/1` has both, and was documented with #12 rather than left
-  for #11 because it is the function a consumer's `mix.exs` calls and nothing
-  else says how. It is the standard the rest has to be brought up to, not an
-  exception to be levelled down.
+- **Nothing checks the `@spec`s.** The public surface is documented as of
+  [#11](https://github.com/ausimian/castle/issues/11) — see the end of *What it
+  does* for what is published and why — but there is no Dialyzer in this
+  project, so a spec that stops describing its function fails nothing. They are
+  all `:: :ok` today, which is the whole of what `report!/1` returns, so the way
+  one goes wrong is a command that starts returning something else and a spec
+  that keeps saying `:ok`. The same holds for what the `@doc`s claim a command
+  refuses: `mix docs` catches a broken *reference*, and nothing at all catches a
+  true sentence that has stopped being true. Both are read against
+  `Castle.Commands` by hand.
 - **The README is out of date.** It documents an `:appup` compiler and a
   `mix castle.relup` task that moved to Forecastle in 0.3.0, the release
   management commands it describes on `bin/<release>` now live on `bin/castle`,

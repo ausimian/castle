@@ -260,6 +260,33 @@
   into a temporary hybrid release whose version directory holds a boot script and
   a configuration and none of the launcher's own files, so there is nothing for a
   launcher to boot; Forecastle refuses to generate one.
+- Documentation for the `Castle` module, which used to be the placeholder
+  `mix new` writes. It now says what Castle is - the runtime half of a pair whose
+  build-time half is Forecastle - and, before anything else, what kind of thing
+  the functions in it are: `customize/1` is the build-time integration point and
+  the only one meant to be called from other Elixir code, and everything else is
+  a command entry point that `bin/castle` reaches over `rpc`. That distinction is
+  worth reading before calling any of them, because a command prints its report
+  and returns a bare `:ok`, and a command that fails raises `Castle.Error`
+  instead of returning an error - which is what leaves a non-zero exit status
+  behind for the shell, and is not what a caller expecting an ordinary function
+  would write code for.
+
+  Every command is documented with the `bin/castle` command that reaches it -
+  `releases`, `upgradable`, `unpack`, `install`, `commit`, `remove` - and with
+  what it refuses and what it leaves behind: that an install is provisional until
+  it is committed and a restart until then returns to the previous version, that
+  `bin/castle install` confirms the version is running rather than trusting the
+  reply, that removing a version deletes what nothing else is using, and that the
+  two questions - `upgradable` and `releases` - answer on a deployment where
+  everything else is refused. `Castle.running/1` is documented too: it has no
+  `bin/castle` command of its own, and it is what automation driving an upgrade
+  over `rpc` needs in order to confirm one.
+
+  Every public function now carries a `@spec`. `Castle.make_releases/0` is
+  deliberately not published: its only caller is the launcher, on the first start
+  of a deployment, and by hand it either does nothing or does what the next start
+  would do anyway.
 
 ### Changed
 

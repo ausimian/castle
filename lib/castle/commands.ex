@@ -14,7 +14,7 @@ defmodule Castle.Commands do
   # differ; it has said nothing, which is a different answer.
   @no_inode "the filesystem reports no inode numbers, so the two cannot be compared"
 
-  # The file `install/4` arms before a transition that reboots the emulator, and
+  # The file `install/5` arms before a transition that reboots the emulator, and
   # the launcher's `env.sh` fragment consumes on the next start. It sits beside
   # the release records, and it is named to be unmistakable: nothing else writes
   # it, and a human who finds one knows what it is for.
@@ -27,8 +27,8 @@ defmodule Castle.Commands do
   # together are the evidence: OTP's file says which version, and this one says
   # that Castle asked for the reboot that would boot it.
   #
-  # **Agreeing on a version is not enough, and believing it was is what
-  # `arm_restart/4` had to be rewritten for.** Two files that merely name the
+  # **Agreeing on a version is not enough, and believing it was is what the
+  # arming protocol had to be rewritten for.** Two files that merely name the
   # same version say nothing about being the work of one install: a failed
   # attempt to X leaves OTP's file naming X, a retry to X arms a fresh marker
   # beside it, and a hard restart before the retry reaches `install_release/1`
@@ -36,7 +36,7 @@ defmodule Castle.Commands do
   # boots X with OTP's records calling it `unpacked`. So the pair has to belong
   # to one *attempt*, which is `@provisional_marker` being cleared before the
   # marker is armed, the marker being published exclusively, and the marker
-  # naming the attempt that wrote it. See `arm_restart/4`.
+  # naming the attempt that wrote it. See `unclaimed/3` and `arm/4`.
   #
   # Those three are about one caller's sequence, and they are not on their own
   # enough either: two callers can run the sequence at once, and then the loser
@@ -355,7 +355,7 @@ defmodule Castle.Commands do
 
   This is the question on its own, for an operator who wants it answered without
   acting on the answer. It is not what protects an upgrade: `unpack/3` and
-  `install/3` ask it themselves, from inside the operation, because an answer
+  `install/5` ask it themselves, from inside the operation, because an answer
   given to one caller and acted on by another is an answer about a moment that
   has passed - the node can restart in between, and the node that comes back
   synthesises the record afresh. Nothing has to call this first, and putting it
@@ -376,7 +376,7 @@ defmodule Castle.Commands do
     end
   end
 
-  # The check `unpack/3` and `install/3` make before they touch
+  # The check `unpack/3` and `install/5` make before they touch
   # `:release_handler`, and what `upgradable/1` answers on its own.
   #
   # `refusal` is what the message leads with, and it names the operation rather
@@ -388,7 +388,7 @@ defmodule Castle.Commands do
   end
 
   # The same rule over a running release that has already been asked for.
-  # `install/4` needs it twice - the record check, and which relup entry the
+  # `install/5` needs it twice - the record check, and which relup entry the
   # transition will be evaluated from - and `which_releases/0` must be asked once:
   # two calls are two moments, which is the whole point of the check being inside
   # the operation.
@@ -445,11 +445,17 @@ defmodule Castle.Commands do
   test can see what was asked of it without starting a VM.
 
   Gated on the release bringing its own ERTS - see `ensure_own_erts/2` - because
-  `Castle.install/1` and `Castle.commit/1` do this first, and `rel_vsn_dir` is
-  derived from `code:root_dir()`: without the guard the operator's first news of
-  an ERTS-less deployment is that some version directory inside the Erlang
-  installation holds no release to configure, which is true and says nothing
-  about why.
+  `rel_vsn_dir` is derived from `code:root_dir()`, so without the guard the
+  operator's first news of an ERTS-less deployment is that some version directory
+  inside the Erlang installation holds no release to configure, which is true and
+  says nothing about why.
+
+  The guard is redundant for `install/5`, which makes it before it takes the lock
+  and so before it reaches here, and it is not redundant for `Castle.commit/1`,
+  which still composes this in front of `commit/3` the way `Castle.install/1`
+  used to. It stays either way: this is a public entry point of its own, and a
+  guard that is only correct because of who happens to call it is one call away
+  from being wrong.
   """
   @spec materialise(Path.t(), module(), module()) :: result()
   def materialise(rel_vsn_dir, peer \\ Peer, deployment \\ Castle.Deployment) do
@@ -543,18 +549,52 @@ defmodule Castle.Commands do
   it from `code:root_dir()`, and a test needs somewhere to look.
 
   A transition that reboots the emulator is refused, with nothing touched, while
-  another such install is still pending - see `arm_restart/4`. One at a time is
-  the price of the marker being evidence about a particular install rather than
-  about a version.
+  another such install is still pending - see `unclaimed/3`. One at a time is the
+  price of the marker being evidence about a particular install rather than about
+  a version.
 
   Two installs cannot be under way on this node at once at all - see
   `serialised/2`. The refusal above is what the second one is then told, once the
   first has finished and its marker is complete.
+
+  **Materialising the target's configuration is part of this operation, and used
+  to be composed in front of it.** `Castle.install/1` called
+  `materialise/3` and then this, so two callers both materialised before either
+  reached the lock. That is not the harmless idempotent work it was argued to be:
+  materialisation *ends in a rename onto the target's `sys.config`*, which is a
+  replace by design, because that is the file `:release_handler` reads and so the
+  file the resolved configuration has to land in. The staging refuses rather than
+  replaces and `sys.config.pristine` refuses rather than replaces; the last step
+  does neither, and cannot. So the loser's providers - evaluated in a VM of their
+  own, over whatever environment that caller had - overwrote the configuration
+  the winner's provisional release was about to boot, and the loser was then
+  refused for the winner's marker. A refused install decided what a successful
+  one booted.
+
+  It is inside the region and *after* the refusals, which is the half that
+  matters and the half a "move it inside the lock" would have missed: a caller
+  that is going to be told a restart install is pending must not materialise on
+  its way to being told. See `install_upgradable/5` for the order and why each
+  step is where it is.
+
+  The peer comes before the deployment, the way `materialise/3` takes them, and
+  the order earns something in the tests as well as being consistent: the cases
+  about the ERTS guard hand this an unstubbed `Castle.PeerStub`, which raises if
+  it is reached, so "refuses without starting a peer" is asserted by the guard
+  holding rather than by a separate look.
   """
-  @spec install(String.t(), Path.t(), module(), module()) :: result()
-  def install(vsn, rel_dir, handler \\ :release_handler, deployment \\ Castle.Deployment) do
+  @spec install(String.t(), Path.t(), module(), module(), module()) :: result()
+  def install(
+        vsn,
+        rel_dir,
+        handler \\ :release_handler,
+        peer \\ Peer,
+        deployment \\ Castle.Deployment
+      ) do
     with :ok <- ensure_own_erts("Cannot install #{vsn}", deployment) do
-      serialised(rel_dir, fn -> install_upgradable(vsn, rel_dir, handler) end)
+      serialised(rel_dir, fn ->
+        install_upgradable(vsn, rel_dir, handler, peer, deployment)
+      end)
     end
   end
 
@@ -568,11 +608,11 @@ defmodule Castle.Commands do
 
   # Everything after the ERTS guard, run with no other caller in it.
   #
-  # **The three steps of `arm_restart/4` are correct for one caller and say
+  # **The steps of the arming protocol are correct for one caller and say
   # nothing across processes, and `release_handler` serialising `install_release/1`
   # does not close that.** Its serialisation is *downstream* of the whole
   # protocol: two callers can both read the running release, both classify it,
-  # and both pass `unclaimed/2`, because all of that happens before either of
+  # and both pass `unclaimed/3`, because all of that happens before either of
   # them publishes anything. Refusing before clearing then buys nothing. The
   # loser's `clear_provisional/3` runs after the winner's `install_release/1`
   # has written `new_start_erl.data`, so it deletes the winner's live evidence;
@@ -583,7 +623,7 @@ defmodule Castle.Commands do
   # **Do not reorder the protocol to avoid that.** Publishing before clearing
   # leaves a window in which the marker pairs with a *stale* `new_start_erl.data`,
   # and the hook then boots a version nothing installed - which is worse than
-  # losing a reboot, and is the thing `arm_restart/4`'s order exists to prevent.
+  # losing a reboot, and is the thing the protocol's order exists to prevent.
   # The order is right; what was missing is that only one caller may be in it.
   #
   # The region has to reach further than the arming, for a second reason.
@@ -592,9 +632,27 @@ defmodule Castle.Commands do
   # `do_get_rh_script/4` will select: a concurrent hot upgrade moves the
   # from-version, so a marker gets armed for a reboot OTP does not make, or a
   # reboot happens with none armed. So the read, the classification, the arming,
-  # `install_release/1` and the disarming are all in here, and the ERTS guard -
-  # which reads two directories and can refuse without touching anything - is the
-  # only part deliberately left outside.
+  # `install_release/1` and the disarming are all in here.
+  #
+  # **And so is materialising the target's configuration, which was the last thing
+  # left outside and did not belong there.** The argument for keeping it out was
+  # that it writes only into the target's own version directory, that its
+  # primitives refuse rather than replace, and that holding this lock across a
+  # peer VM's boot would put every install behind another's configuration step.
+  # The first two are wrong about the step that matters - the *rename onto
+  # `sys.config`* replaces, by design and necessarily - and the third is a
+  # throughput argument about concurrent installs, which this protocol refuses
+  # anyway. An install that waits is slower; an install whose configuration is
+  # somebody else's is wrong.
+  #
+  # The ERTS guard is now the only part deliberately left outside: it reads two
+  # directories and can refuse without touching anything, and a refusal has no
+  # reason to queue behind a reboot.
+  #
+  # What is still outside this and still writes a `sys.config` is `commit/3`'s
+  # materialisation, which `Castle.commit/1` composes the way `install/1` used to.
+  # It is not the same case - see `Castle.materialise/1` - but it is a boundary
+  # rather than a proof, and it is written down as one in AGENTS.md.
   #
   # `:global.trans/3` and no process of Castle's own, which is the point of
   # choosing it:
@@ -646,15 +704,80 @@ defmodule Castle.Commands do
   # not enough on its own: another caller's install can move the answer between
   # the one question and the install that acts on it, which is the other half of
   # why this whole function is inside the region rather than just the arming.
-  defp install_upgradable(vsn, rel_dir, handler) do
+  #
+  # **The order of the four steps is the protocol, and materialising is the third
+  # of them.** Read as a rule: nothing that writes runs until everything that can
+  # refuse has been asked.
+  #
+  #   1. `refuse_synthesised/2` - a fact about this node's release record.
+  #   2. `unclaimed/3` - a restart install is already pending. This is step 1 of
+  #      what used to be `arm_restart/4`, pulled in front of the materialisation
+  #      *because* of it: a caller that is going to be refused here must not have
+  #      replaced the target's `sys.config` on its way to being told, or the
+  #      configuration the pending install's reboot boots is the refused caller's.
+  #   3. `materialise/3` - the target's own providers, in a VM of their own,
+  #      resolved onto the target's `sys.config`. First thing here that writes
+  #      anything, and the last thing that can refuse for a reason about the
+  #      target rather than about this node.
+  #   4. `arm/4` - clear OTP's file, then publish the marker. The first
+  #      *destructive* step, and it stays after everything above for the reason
+  #      its own note gives: an attempt that refused after clearing would take an
+  #      already-requested reboot away in silence.
+  #
+  # Materialising before the record check is what this used to do, and the note in
+  # `Castle` called it "only work". It is not: see `install/5`. Materialising
+  # after step 4 would be worse still - the marker would be armed for an install
+  # that a provider could then refuse, and `install_release/1` is the line nothing
+  # may fail after without saying an install happened.
+  defp install_upgradable(vsn, rel_dir, handler, peer, deployment) do
     refusal = "Cannot install #{vsn}"
     running = running_release(handler)
     restart? = restart_planned?(vsn, rel_dir, running)
 
     with :ok <- refuse_synthesised(refusal, running),
-         {:ok, attempt} <- arm_restart(restart?, vsn, rel_dir, refusal) do
-      installed(vsn, attempt, rel_dir, handler)
+         :ok <- unclaimed(restart?, rel_dir, refusal),
+         {:ok, configured} <- materialise(Path.join(rel_dir, vsn), peer, deployment),
+         {:ok, attempt} <- arm(restart?, vsn, rel_dir, refusal),
+         {:ok, lines} <- installed(vsn, attempt, rel_dir, handler, deployment) do
+      {:ok, configured ++ lines}
     end
+  end
+
+  # The armed region: `install_release/1`, with the marker's ownership settled on
+  # **every** way out of it.
+  #
+  # It used to be a bare `case` over the reply, with `disarm/2` in the two failing
+  # branches - so an exit, a throw or a raise from `install_release/1` left the
+  # region without settling anything. That is the "boots a version nothing
+  # installed" hazard the whole marker protocol exists to prevent, reintroduced
+  # through the one path that does not return: if
+  # `prepare_restart_new_emulator/7` has already written `new_start_erl.data` by
+  # then, an exception leaves two agreeing files and the next start consumes them.
+  #
+  # `try/catch/else` rather than `after`, and the distinction is the point. An
+  # `after` cannot see which way the block went, so it would disarm on the
+  # *successful* restart install too - taking away the marker whose whole purpose
+  # is to outlive this call. The `else` clause is the returns, the `catch` clause
+  # is the ones that are not returns, and only the second class is a failure the
+  # caller has not been told about yet.
+  #
+  # An exception is re-raised rather than turned into a message, when the marker
+  # could be settled: `Castle` is the boundary that raises, `Kernel.CLI` catches
+  # on the node and the calling VM re-raises with the reason and a non-zero exit,
+  # and Castle has nothing to add to an exception out of `:release_handler` that
+  # is worth losing the stacktrace for. What it does have something to say about
+  # is a marker it could not settle, and that is the one case where this reports
+  # instead - see `abandoned/5`.
+  # The function body *is* the `try`, which is what `credo --strict` asks for and
+  # is why there is no visible `try do` here. The `catch` and `else` below belong
+  # to it, and the whole of `installed/5` is the guarded region.
+  defp installed(vsn, attempt, rel_dir, handler, deployment) do
+    handler.install_release(to_charlist(vsn))
+  catch
+    kind, reason ->
+      abandoned(vsn, attempt, rel_dir, deployment, {kind, reason, __STACKTRACE__})
+  else
+    outcome -> reported(vsn, attempt, rel_dir, deployment, outcome)
   end
 
   # `install_release/1` replies the same `{ok, Vsn, Descr}` for a hot upgrade and
@@ -662,8 +785,8 @@ defmodule Castle.Commands do
   # which is why the transition is classified from the relup beforehand and the
   # answer carried in here. Reporting a reboot as "now running" is a claim that is
   # false for as long as the reboot takes, and automation reads it.
-  defp installed(vsn, attempt, rel_dir, handler) do
-    case handler.install_release(to_charlist(vsn)) do
+  defp reported(vsn, attempt, rel_dir, deployment, outcome) do
+    case outcome do
       {:ok, other_vsn, _descr} when is_binary(attempt) ->
         {:ok,
          [
@@ -688,14 +811,55 @@ defmodule Castle.Commands do
          ]}
 
       {:error, reason} ->
-        disarm(attempt, rel_dir)
-        {:error, "Install of #{vsn} failed. #{inspect(reason)}"}
+        failed(rel_dir, attempt, deployment, "Install of #{vsn} failed. #{inspect(reason)}")
 
       other ->
-        disarm(attempt, rel_dir)
-        {:error, "Install of #{vsn} returned an unexpected result. #{inspect(other)}"}
+        failed(
+          rel_dir,
+          attempt,
+          deployment,
+          "Install of #{vsn} returned an unexpected result. #{inspect(other)}"
+        )
     end
   end
+
+  # A failure `install_release/1` reported. The marker goes, and if it cannot the
+  # operator is told so *as well as* the failure, rather than instead of it: the
+  # install failing is what they asked about, and a stranded marker is a second
+  # fact about what the next start of the system will now do.
+  defp failed(rel_dir, attempt, deployment, message) do
+    case disarm(attempt, rel_dir, deployment) do
+      :ok -> {:error, message}
+      {:stranded, why} -> {:error, "#{message} #{stranded(rel_dir, why)}"}
+    end
+  end
+
+  # A failure `install_release/1` did not report, because it exited, threw or
+  # raised. The marker is settled first - that is the whole point of catching -
+  # and then the original failure is allowed out unchanged.
+  #
+  # Unless the marker could not be settled, in which case it is *not* allowed out
+  # unchanged, because the thing the operator most needs told would be the thing
+  # the stacktrace buries. The exception is folded into the message instead,
+  # formatted the way an unhandled one would have been printed, so nothing is
+  # lost - and the reason it can be folded in at all is that this is the one
+  # branch where Castle knows something the exception does not say.
+  defp abandoned(vsn, attempt, rel_dir, deployment, {kind, reason, stack}) do
+    case disarm(attempt, rel_dir, deployment) do
+      :ok ->
+        :erlang.raise(kind, reason, stack)
+
+      {:stranded, why} ->
+        {:error,
+         "Install of #{vsn} #{describe_exit(kind)}, and the restart marker it " <>
+           "armed could not be settled. #{stranded(rel_dir, why)} The failure " <>
+           "itself: #{Exception.format(kind, reason, stack)}"}
+    end
+  end
+
+  defp describe_exit(:error), do: "raised"
+  defp describe_exit(:throw), do: "threw"
+  defp describe_exit(:exit), do: "exited"
 
   ## The restart marker
 
@@ -783,38 +947,47 @@ defmodule Castle.Commands do
     end)
   end
 
-  # Armed before `install_release/1` is asked for anything, so that the marker is
-  # in place before OTP writes its own and reboots, and armed as **this
-  # attempt's** rather than as the version's. Three steps, in this order, and the
-  # order is the protocol:
+  # Step 2 of `install_upgradable/5`: **refuse if a marker is already there.**
   #
-  #   1. **Refuse if a marker is already there.** One pending restart install at
-  #      a time. Two attempts sharing one name overwrite and disarm each other,
-  #      and the survivor's marker says nothing about which of them - if either -
-  #      reached `install_release/1`. So a marker at the path is a *finished*
-  #      attempt's, waiting for the reboot it asked for, and this refusal is what
-  #      keeps step 2 from clearing the `new_start_erl.data` that attempt's
-  #      preparation wrote. `publish/2` decides it a second time over, by
-  #      refusing rather than replacing.
+  # One pending restart install at a time. Two attempts sharing one name overwrite
+  # and disarm each other, and the survivor's marker says nothing about which of
+  # them - if either - reached `install_release/1`. So a marker at the path is a
+  # *finished* attempt's, waiting for the reboot it asked for, and this refusal is
+  # what keeps `clear_provisional/3` from clearing the `new_start_erl.data` that
+  # attempt's preparation wrote. `publish/2` decides it a second time over, by
+  # refusing rather than replacing.
   #
-  #      **What makes it true that the marker belongs to a finished attempt is
-  #      `serialised/2` and not this look.** An earlier version of this argued
-  #      that a marker appearing between the `lstat` and the publish belonged to
-  #      an attempt that had not reached `install_release/1` yet, so there was
-  #      nothing of its to destroy. That was the hole: two callers reach this
-  #      check before either publishes, so both pass it, and the one that gets
-  #      here second clears the first's file out from under a reboot that is
-  #      already on its way. Do not reason about this step in isolation again -
-  #      it is one caller's half of a rule whose other half is that there is only
-  #      ever one.
-  #   2. **Clear OTP's file.** `prepare_restart_new_emulator/7` writes
+  # **What makes it true that the marker belongs to a finished attempt is
+  # `serialised/2` and not this look.** An earlier version of this argued that a
+  # marker appearing between the `lstat` and the publish belonged to an attempt
+  # that had not reached `install_release/1` yet, so there was nothing of its to
+  # destroy. That was the hole: two callers reach this check before either
+  # publishes, so both pass it, and the one that gets here second clears the
+  # first's file out from under a reboot that is already on its way. Do not reason
+  # about this step in isolation again - it is one caller's half of a rule whose
+  # other half is that there is only ever one.
+  #
+  # **It is in front of the materialisation rather than inside `arm/4`, and that
+  # is not tidying.** A caller refused here has not written anything, and it must
+  # not have: the pending install it is being told about is going to reboot into
+  # the version whose `sys.config` this caller would otherwise have replaced on
+  # its way to the refusal. Being refused and having decided the winner's
+  # configuration are what this ordering keeps apart.
+  defp unclaimed(false, _rel_dir, _refusal), do: :ok
+  defp unclaimed(true, rel_dir, refusal), do: unclaimed(rel_dir, refusal)
+
+  # Steps 4a and 4b, run together because nothing may come between them: the
+  # marker has to be in place before OTP writes its own and reboots, and it is
+  # armed as **this attempt's** rather than as the version's.
+  #
+  #   a. **Clear OTP's file.** `prepare_restart_new_emulator/7` writes
   #      `releases/new_start_erl.data` and nothing removes it, so one left by an
   #      earlier failure would pair with the marker armed next and boot a version
   #      this attempt never installed. Removing it is safe: `write_new_start_erl/3`
   #      goes through `file:write_file/2`, which creates the file when it is
   #      absent. After this, that file existing means *this* attempt's
   #      preparation wrote it.
-  #   3. **Publish the marker.** Staged in an owner-only working directory and
+  #   b. **Publish the marker.** Staged in an owner-only working directory and
   #      hard-linked into place, which is how `Castle.Peer` publishes
   #      `sys.config.pristine` and for the same two reasons: a link publishes a
   #      file that is already complete, so no start can read a marker that is
@@ -825,32 +998,31 @@ defmodule Castle.Commands do
   #      write, and a death in that window leaves an empty marker that blocks
   #      every later attempt.
   #
-  # Steps 1 and 2 are in that order and must stay in it. Reversed, an attempt
-  # would refuse *after* clearing OTP's file, which is how an install that has
-  # already been asked for loses its reboot silently.
+  # The refusal in `unclaimed/3` comes before a) and must stay there. Reversed, an
+  # attempt would refuse *after* clearing OTP's file, which is how an install that
+  # has already been asked for loses its reboot silently.
   #
   # This runs with no other caller in the install at all - `serialised/2` - and
-  # that is what the step 1 note above rests on. Neither replaces the other: the
+  # that is what the `unclaimed/3` note rests on. Neither replaces the other: the
   # serialisation is why the marker means a finished attempt, and the order of
   # these steps is why a refusal for any *other* reason still changes nothing.
   #
-  # A failure at any step refuses the install rather than going ahead: the reboot
-  # would come back on whichever version `releases/start_erl.data` names, which
-  # is the one being upgraded away from, and the upgrade would be lost with
+  # A failure at either step refuses the install rather than going ahead: the
+  # reboot would come back on whichever version `releases/start_erl.data` names,
+  # which is the one being upgraded away from, and the upgrade would be lost with
   # nothing saying so.
-  defp arm_restart(false, _vsn, _rel_dir, _refusal), do: {:ok, nil}
+  defp arm(false, _vsn, _rel_dir, _refusal), do: {:ok, nil}
 
-  defp arm_restart(true, vsn, rel_dir, refusal) do
+  defp arm(true, vsn, rel_dir, refusal) do
     attempt = attempt()
 
-    with :ok <- unclaimed(rel_dir, refusal),
-         :ok <- clear_provisional(rel_dir, vsn, refusal),
+    with :ok <- clear_provisional(rel_dir, vsn, refusal),
          :ok <- publish_marker(rel_dir, vsn, attempt, refusal) do
       {:ok, attempt}
     end
   end
 
-  # What names this attempt, and the whole of what `disarm/2`'s ownership rests
+  # What names this attempt, and the whole of what `disarm/3`'s ownership rests
   # on. The operating system pid, the wall clock in nanoseconds and a number no
   # other call in this VM will use again: unique within a node, and unique across
   # a node's restarts, which is as far as ownership has to reach - the marker
@@ -926,7 +1098,8 @@ defmodule Castle.Commands do
   defp armed(:taken, marker, refusal), do: {:error, pending(marker, refusal)}
   defp armed({:error, reason}, marker, refusal), do: {:error, unarmed(marker, reason, refusal)}
 
-  # Cleared on every path out of a failed install, because a marker left armed
+  # Cleared on every path out of a failed install - including the ones that do not
+  # return, which is what `installed/5` catches for - because a marker left armed
   # beside a `new_start_erl.data` the same failure may already have written is
   # exactly the pair the hook acts on.
   #
@@ -948,27 +1121,104 @@ defmodule Castle.Commands do
   # re-arming cannot be another install here, and what is left is a start of the
   # deployment consuming the marker and some other VM arming one.
   #
-  # The result of the removal is deliberately not looked at: a releases directory
-  # this cannot remove the marker from is one `publish_marker/4` could not have
-  # linked it into, and that refuses the install before `install_release/1` is
-  # asked for anything.
-  defp disarm(nil, _rel_dir), do: :ok
+  # **Failing to settle it is reported, and used not to be.** The argument for
+  # ignoring `File.rm/1`'s result was that a releases directory the marker cannot
+  # be removed from is one `publish_marker/4` could not have linked it into, so
+  # the install would already have been refused. That holds only if nothing
+  # changed in between, and `install_release/1` runs in between - for as long as
+  # an upgrade takes, with the whole system's code being replaced. A mode applied
+  # underneath it, a mount that went read-only, or the marker being replaced by
+  # something that is not a file are all reachable from there.
+  #
+  # The unreadable case was worse than ignored, it was *misclassified*: an
+  # unreadable marker was treated as another attempt's and left alone. A marker
+  # that cannot be read is not evidence that it is somebody else's; it is no
+  # evidence at all, and the file it might be is the one the next start acts on.
+  #
+  # So there are four answers and only two of them are `:ok`:
+  #
+  #   * **ours** - remove it, and report a removal that failed.
+  #   * **theirs** - leave it, and that is a success: a later attempt's marker is
+  #     a reboot that is still owed.
+  #   * **gone** - a start of the deployment consumed it. Nothing to do.
+  #   * **unverifiable** - say so. Castle will not remove a marker it cannot show
+  #     is its own, and it will not pretend the question was answered.
+  #
+  # `:enoent` from the removal is `:ok` for the same reason **gone** is: the check
+  # and the removal are two calls, so a marker consumed between them is a marker
+  # that is no longer there, which is the outcome that was wanted.
+  defp disarm(nil, _rel_dir, _deployment), do: :ok
 
-  defp disarm(attempt, rel_dir) do
+  defp disarm(attempt, rel_dir, deployment) do
     marker = Path.join(rel_dir, @restart_marker)
 
-    if armed_by?(marker, attempt) do
-      File.rm(marker)
+    case armed_by(marker, attempt, deployment) do
+      :ours -> removed(marker, deployment)
+      :theirs -> :ok
+      :gone -> :ok
+      {:unverifiable, reason} -> {:stranded, unverifiable(marker, reason)}
     end
-
-    :ok
   end
 
-  defp armed_by?(marker, attempt) do
-    case File.read(marker) do
-      {:ok, contents} -> match?([_vsn, ^attempt | _], String.split(contents, "\n"))
-      {:error, _unreadable} -> false
+  defp armed_by(marker, attempt, deployment) do
+    case deployment.read(marker) do
+      {:ok, contents} -> whose(contents, attempt)
+      {:error, :enoent} -> :gone
+      {:error, reason} -> {:unverifiable, reason}
     end
+  end
+
+  defp whose(contents, attempt) do
+    if match?([_vsn, ^attempt | _], String.split(contents, "\n")), do: :ours, else: :theirs
+  end
+
+  defp removed(marker, deployment) do
+    case deployment.rm(marker) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:stranded, unremovable(marker, reason)}
+    end
+  end
+
+  ## What a marker that could not be settled says
+
+  # Why the marker is still there, and what that now means for the next start.
+  #
+  # The second half is the part an operator cannot work out for themselves, and it
+  # is the reason this is a failure rather than a log line: a marker at that path
+  # is a live instruction. If `prepare_restart_new_emulator/7` got as far as
+  # writing `new_start_erl.data` - which it does *before* the reboot, and which
+  # nothing ever removes - then the two files agree and the next ordinary start of
+  # this system boots the version this install failed to reach, with
+  # `:release_handler`'s own records calling it `unpacked`. That is precisely the
+  # state the marker protocol exists to make unreachable.
+  #
+  # The remedy is a removal, and it is named as one, because it is a thing the
+  # operator can do and Castle has just demonstrated it cannot: whatever stopped
+  # it - a mode, a read-only mount, a name that is no longer a regular file - is
+  # what there is to resolve.
+  defp stranded(rel_dir, why) do
+    "#{why} #{Path.join(rel_dir, @restart_marker)} is what tells the launcher to " <>
+      "boot a particular version on the next start, and #{@provisional_marker} - " <>
+      "which :release_handler writes before the reboot and never removes - may " <>
+      "already be beside it. Where it is, the two agree and the next ordinary " <>
+      "start of this system will boot the version this install did not finish, " <>
+      "which the release records will call unpacked. Remove the marker before " <>
+      "restarting this system, or do not restart it until that has been dealt " <>
+      "with. bin/castle releases will say where the system got to."
+  end
+
+  defp unverifiable(marker, reason) do
+    "The restart marker this install armed cannot be accounted for: #{marker} " <>
+      "could not be read (#{:file.format_error(reason)}), so Castle cannot tell " <>
+      "whether it is still the one this attempt published - and it will not remove " <>
+      "a marker that may be a later attempt's, because that would take away a " <>
+      "reboot that is still owed."
+  end
+
+  defp unremovable(marker, reason) do
+    "The restart marker this install armed is still there: #{marker} is this " <>
+      "attempt's and could not be removed (#{:file.format_error(reason)})."
   end
 
   ## What each way of failing to arm says

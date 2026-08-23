@@ -26,10 +26,15 @@ defmodule Castle.CommandsTest do
 
     @tag :tmp_dir
     test "leaves nothing for install_release/1 to be given", %{tmp_dir: dir} do
-      # The order `Castle.install/1` composes these in, with the release handler
-      # ready to accept an install that must not be asked for. Everything able
-      # to refuse belongs on this side of the mutation, and a configuration that
-      # could not be materialised is the whole of what this adds to that list.
+      # `materialise/3` on its own, with the release handler ready to accept an
+      # install that must not be asked for. Everything able to refuse belongs on
+      # this side of the mutation, and a configuration that could not be
+      # materialised is the whole of what this adds to that list.
+      #
+      # This is the step's own contract rather than an ordering claim about
+      # `install/5`: the ordering inside the install is asserted where the install
+      # is, by the marker and configuration cases below. `Castle.commit/1` is the
+      # caller that still composes this in front of an operation.
       unpacked(dir)
       peer = PeerStub.stub({:error, "the compile environment does not agree"})
       Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
@@ -159,12 +164,12 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "install/4" do
+  describe "install/5" do
     @tag :tmp_dir
     test "reports the version change", %{tmp_dir: dir} do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert Commands.install("1.2.3", dir, handler) ==
+      assert Commands.install("1.2.3", dir, handler, configured(dir)) ==
                {:ok, ["Now running 1.2.3 (previously 1.2.2)."]}
 
       assert Stub.calls(:install_release) == [[~c"1.2.3"]]
@@ -174,7 +179,7 @@ defmodule Castle.CommandsTest do
     test "reports a restart of the emulator as the success it is", %{tmp_dir: dir} do
       handler = real_record(:install_release, {:continue_after_restart, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, lines} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, lines} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert Enum.join(lines, " ") =~ "Restarting to install 1.2.3 (previously 1.2.2)."
     end
 
@@ -182,7 +187,7 @@ defmodule Castle.CommandsTest do
     test "reports a failure to install", %{tmp_dir: dir} do
       handler = real_record(:install_release, {:error, {:no_such_release, ~c"1.2.3"}})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Install of 1.2.3 failed."
       assert message =~ "no_such_release"
     end
@@ -191,7 +196,7 @@ defmodule Castle.CommandsTest do
     test "reports a result it does not recognise", %{tmp_dir: dir} do
       handler = real_record(:install_release, {:whatever, ~c"1.2.2"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Install of 1.2.3 returned an unexpected result."
     end
 
@@ -204,7 +209,7 @@ defmodule Castle.CommandsTest do
       # to come first, and nothing may reach the handler.
       handler = synthesised_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Cannot install 1.2.3: 1.2.2 is running from a release record"
       assert message =~ "running its old code"
       assert message =~ "the system has to be restarted"
@@ -219,7 +224,7 @@ defmodule Castle.CommandsTest do
       # same reason the check lives inside the operation at all.
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert Stub.calls(:which_releases) == [[]]
     end
   end
@@ -239,7 +244,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, lines} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, lines} = Commands.install("1.2.3", dir, handler, configured(dir))
 
       # The version on the first line, which is all the hook reads, and the
       # attempt on the second, which is what makes the file this install's rather
@@ -270,7 +275,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.2", [], [{~c"1.2.1", [], [:restart_emulator]}])
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"downgrade"})
 
-      assert {:ok, _} = Commands.install("1.2.1", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.1", dir, handler, configured(dir, "1.2.1"))
       assert armed_version(dir) == "1.2.1"
     end
 
@@ -280,7 +285,7 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:ok, ["Now running 1.2.3 (previously 1.2.2)."]} =
-               Commands.install("1.2.3", dir, handler)
+               Commands.install("1.2.3", dir, handler, configured(dir))
 
       refute File.exists?(marker(dir))
     end
@@ -296,7 +301,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_new_emulator, {:apply, {:m, :f, []}}]}], [])
       handler = real_record(:install_release, {:continue_after_restart, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       refute File.exists?(marker(dir))
     end
 
@@ -307,7 +312,7 @@ defmodule Castle.CommandsTest do
       handler =
         real_record(:install_release, {:error, {:no_matching_relup, ~c"1.2.3", ~c"1.2.2"}})
 
-      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      assert {:error, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       refute File.exists?(marker(dir))
     end
 
@@ -321,7 +326,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, {:error, {:bad_relup_file, ~c"relup"}})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Install of 1.2.3 failed."
       refute File.exists?(marker(dir))
     end
@@ -331,7 +336,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, {:whatever, ~c"1.2.2"})
 
-      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      assert {:error, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       refute File.exists?(marker(dir))
     end
 
@@ -347,7 +352,7 @@ defmodule Castle.CommandsTest do
       File.mkdir!(marker(dir))
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Cannot install 1.2.3: #{marker(dir)}"
       assert message =~ "there is already a directory at that path"
       assert Stub.calls(:install_release) == []
@@ -364,7 +369,7 @@ defmodule Castle.CommandsTest do
       File.mkdir!(provisional(dir))
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "Cannot install 1.2.3: the upgrade to 1.2.3 restarts the emulator"
       assert message =~ provisional(dir)
       assert message =~ "would pair with the marker this install is about to arm"
@@ -377,7 +382,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, _} = Commands.install("1.2.3", dir, handler, erts_less())
+      assert {:error, _} = Commands.install("1.2.3", dir, handler, PeerStub, erts_less())
       refute File.exists?(marker(dir))
     end
 
@@ -391,7 +396,7 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert Path.wildcard(Path.join(dir, "castle-*")) == [marker(dir)]
     end
   end
@@ -417,14 +422,14 @@ defmodule Castle.CommandsTest do
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       handler = real_record(:install_release, prepares_then_fails(dir, "1.2.3"))
 
-      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      assert {:error, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       refute File.exists?(marker(dir)), "the marker survived a failed install"
       assert File.exists?(provisional(dir)), "the fixture did not leave OTP's file behind"
 
       # The retry, which must not be able to pair with what the first left.
       Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert armed_version(dir) == "1.2.3"
 
       refute File.exists?(provisional(dir)),
@@ -450,7 +455,7 @@ defmodule Castle.CommandsTest do
           {:ok, ~c"1.2.2", ~c"upgrade"}
         end)
 
-      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert_received {:when_asked, true, false}
     end
 
@@ -466,7 +471,7 @@ defmodule Castle.CommandsTest do
       File.write!(provisional(dir), "16.0 1.2.4")
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert message =~ "a restart install is pending - it names 1.2.4"
       assert message =~ "consumed by the next start of this deployment"
       assert File.read!(marker(dir)) == "1.2.4\nsomeone-elses-attempt\n"
@@ -493,12 +498,240 @@ defmodule Castle.CommandsTest do
           {:error, :whatever}
         end)
 
-      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      assert {:error, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert File.read!(marker(dir)) == foreign
     end
   end
 
-  # The three steps of `arm_restart/4` are one caller's sequence, and two callers
+  # Arming is one thing and *settling* is another, and the second used to happen
+  # only when `install_release/1` returned. An exit, a throw or a raise went past
+  # the two branches that disarmed, leaving the marker armed - and, where
+  # `prepare_restart_new_emulator/7` had already written `new_start_erl.data`,
+  # leaving the complete pair the launcher acts on. That is the "boots a version
+  # nothing installed" hazard the whole protocol exists to prevent, reached through
+  # the one path that does not return.
+  #
+  # The second half is that failing to settle it has to be *said*. A best-effort
+  # removal whose result nobody looks at, and an unreadable marker classified as
+  # somebody else's, both end with an operator meeting a stranded marker as a
+  # surprise boot.
+  describe "the restart marker, when the install does not return" do
+    @tag :tmp_dir
+    test "is settled when install_release/1 raises", %{tmp_dir: dir} do
+      # The discriminator, and it needs OTP's file written before the raise: with
+      # the marker left behind the two agree, and the next start boots 1.2.3 with
+      # the release records calling it unpacked. The exception itself is let out
+      # unchanged - Castle has nothing to add to it - so what this asserts is that
+      # it arrived *and* that the filesystem was settled on the way.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      handler =
+        real_record(:install_release, fn _args ->
+          File.write!(provisional(dir), "16.0 1.2.3")
+          raise "the relup blew up"
+        end)
+
+      assert_raise RuntimeError, "the relup blew up", fn ->
+        Commands.install("1.2.3", dir, handler, configured(dir))
+      end
+
+      refute File.exists?(marker(dir)), "the marker survived an install that raised"
+
+      assert File.exists?(provisional(dir)),
+             "the fixture did not leave OTP's half of the pair behind"
+    end
+
+    @tag :tmp_dir
+    test "is settled when install_release/1 exits", %{tmp_dir: dir} do
+      # The other two classes go the same way. An `exit` is the one a real
+      # `:release_handler` produces most readily - a `gen_server` call to a process
+      # that went down while the upgrade was running.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, fn _args -> exit(:killed) end)
+
+      assert catch_exit(Commands.install("1.2.3", dir, handler, configured(dir))) == :killed
+      refute File.exists?(marker(dir))
+    end
+
+    @tag :tmp_dir
+    test "is settled when install_release/1 throws", %{tmp_dir: dir} do
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, fn _args -> throw(:no_matching_relup) end)
+
+      assert catch_throw(Commands.install("1.2.3", dir, handler, configured(dir))) ==
+               :no_matching_relup
+
+      refute File.exists?(marker(dir))
+    end
+
+    @tag :tmp_dir
+    test "gives the serialised region up on the way out", %{tmp_dir: dir} do
+      # `:global.trans/3` is `try Fun() after del_lock(...)`, so an exception
+      # releases the lock rather than wedging every later install. That is
+      # `global`'s guarantee and not Castle's, and it is worth a test anyway: the
+      # re-raise is a *new* way of leaving the region, and the failure it would
+      # cause - every subsequent install blocking for ever - is not one this suite
+      # would otherwise notice.
+      #
+      # The second install has to come from another process. The lock is keyed on
+      # the requester, so two calls from the test process would be reentrant and
+      # this would pass against a leaked lock.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      raising = real_record(:install_release, fn _args -> raise "the relup blew up" end)
+
+      assert_raise RuntimeError, "the relup blew up", fn ->
+        Commands.install("1.2.3", dir, raising, configured(dir))
+      end
+
+      second = installer(dir, "1.2.2", as: :second, install: prepares_then_reboots(dir))
+
+      assert {{:ok, _}, [[~c"1.2.3"]], _} = Task.await(second, 30_000)
+      assert armed_version(dir) == "1.2.3"
+    end
+
+    @tag :tmp_dir
+    test "does not disarm the marker a successful restart install left", %{tmp_dir: dir} do
+      # The reason this is `try/catch/else` and not `try/after`. An `after` cannot
+      # see which way the block went, so it would take away the marker whose whole
+      # purpose is to outlive this call - and the install would report a reboot
+      # that the next start had nothing to act on.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, prepares_then_reboots(dir))
+
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
+      assert armed_version(dir) == "1.2.3"
+      assert File.exists?(provisional(dir))
+    end
+  end
+
+  # Being unable to settle the marker is an outcome Castle has to have something
+  # to say about and no way to cause, so it is reached through
+  # `Castle.Deployment.read/1` and `rm/1` - the seam `stat/1` established, and for
+  # the reason it gives. A fixture would need a mode, and root and some
+  # filesystems ignore modes, so it would only sometimes describe the state it
+  # names and would pass either way.
+  describe "the restart marker, when it cannot be settled" do
+    @tag :tmp_dir
+    test "says so when this attempt's marker cannot be removed", %{tmp_dir: dir} do
+      # A failed install that leaves the marker where it is, beside the
+      # `new_start_erl.data` its own preparation wrote. Silence here is an operator
+      # restarting a system whose install failed and getting the version it failed
+      # to reach.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, prepares_then_fails(dir, "1.2.3"))
+
+      assert {:error, message} =
+               Commands.install(
+                 "1.2.3",
+                 dir,
+                 handler,
+                 configured(dir),
+                 unremovable_marker(dir)
+               )
+
+      # The failure the operator asked about is still reported - this is a second
+      # fact, not a replacement for the first.
+      assert message =~ "Install of 1.2.3 failed."
+      assert message =~ "bad_relup_file"
+
+      # And then what it means. The marker, why it is still there, and what the
+      # next start will now do about it.
+      assert message =~ "The restart marker this install armed is still there"
+      assert message =~ marker(dir)
+      assert message =~ "could not be removed (permission denied)"
+      assert message =~ "the next ordinary start of this system will boot the version"
+      assert message =~ "Remove the marker before restarting this system"
+
+      # The marker really is still there, so the message is not describing a state
+      # it also cleaned up.
+      assert armed_version(dir) == "1.2.3"
+    end
+
+    @tag :tmp_dir
+    test "says so when it cannot tell whether the marker is its own", %{tmp_dir: dir} do
+      # An unreadable marker used to be classified as another attempt's and left
+      # alone, which reads as caution and is not: a marker that cannot be read is
+      # no evidence about whose it is, and the file it might be is the one the next
+      # start acts on. So it refuses to remove it *and* refuses to be quiet.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, prepares_then_fails(dir, "1.2.3"))
+
+      assert {:error, message} =
+               Commands.install(
+                 "1.2.3",
+                 dir,
+                 handler,
+                 configured(dir),
+                 unreadable_marker(dir)
+               )
+
+      assert message =~ "Install of 1.2.3 failed."
+      assert message =~ "cannot be accounted for"
+      assert message =~ "could not be read (I/O error)"
+      assert message =~ "will not remove a marker that may be a later attempt's"
+      assert message =~ "Remove the marker before restarting this system"
+    end
+
+    @tag :tmp_dir
+    test "says so, and says what happened, when the install raised as well",
+         %{tmp_dir: dir} do
+      # The two findings meeting. An exception is normally let out unchanged,
+      # because `Castle` is the boundary that raises and Castle has nothing to add
+      # to it - but a stranded marker is the thing an operator most needs told, and
+      # a stacktrace is where it would be buried. So this one branch reports
+      # instead, with the exception folded in rather than dropped.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      handler =
+        real_record(:install_release, fn _args ->
+          File.write!(provisional(dir), "16.0 1.2.3")
+          raise "the relup blew up"
+        end)
+
+      assert {:error, message} =
+               Commands.install(
+                 "1.2.3",
+                 dir,
+                 handler,
+                 configured(dir),
+                 unremovable_marker(dir)
+               )
+
+      assert message =~
+               "Install of 1.2.3 raised, and the restart marker it armed could not be settled."
+
+      assert message =~ "The restart marker this install armed is still there"
+      assert message =~ "Remove the marker before restarting this system"
+
+      # The exception is not lost, and neither is where it came from.
+      assert message =~ "The failure itself:"
+      assert message =~ "the relup blew up"
+      assert message =~ "(RuntimeError)"
+
+      assert armed_version(dir) == "1.2.3"
+    end
+
+    @tag :tmp_dir
+    test "is quiet about a marker a start of the deployment consumed", %{tmp_dir: dir} do
+      # The ordinary case that must not be reported: any start or daemon of the
+      # deployment consumes the marker, so a failed install can perfectly well find
+      # nothing at the path. That is the outcome disarming wanted, not a failure to
+      # reach it - so `:enoent` is success, from both the read and the removal.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      handler =
+        real_record(:install_release, fn _args ->
+          File.rm!(marker(dir))
+          {:error, {:bad_relup_file, ~c"relup"}}
+        end)
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
+      assert message == "Install of 1.2.3 failed. {:bad_relup_file, ~c\"relup\"}"
+      refute message =~ "restart marker"
+    end
+  end
+
+  # The steps of the arming protocol are one caller's sequence, and two callers
   # can run it at once: `release_handler` serialises `install_release/1`, but that
   # is downstream of the read, the classification and the arming, so both callers
   # get past the marker check before either publishes. The loser then clears the
@@ -528,12 +761,12 @@ defmodule Castle.CommandsTest do
 
       # The discriminator, and the whole of what the region buys. Without it the
       # second caller reads the running release, classifies the same transition
-      # and passes `unclaimed/2` here, while the first is still in front of its
+      # and passes `unclaimed/3` here, while the first is still in front of its
       # own arming - after which one of them destroys the other's evidence.
       refute_receive {:looked_up, :second}, 200
 
       send(first.pid, :proceed)
-      assert {{:ok, lines}, [[~c"1.2.3"]]} = Task.await(first, 30_000)
+      assert {{:ok, lines}, [[~c"1.2.3"]], _} = Task.await(first, 30_000)
       assert Enum.join(lines, " ") =~ "The emulator is restarting."
 
       # Only now does the second caller look, and what it finds is a marker beside
@@ -542,13 +775,64 @@ defmodule Castle.CommandsTest do
       # before as well; the difference is that it is now said about a pair that is
       # complete rather than said while taking half of it away.
       assert_receive {:looked_up, :second}, 10_000
-      assert {{:error, message}, []} = Task.await(second, 30_000)
+      assert {{:error, message}, [], _} = Task.await(second, 30_000)
       assert message =~ "a restart install is pending - it names 1.2.3"
 
       assert armed_version(dir) == "1.2.3"
 
       assert File.exists?(provisional(dir)),
              "the waiting caller cleared the reboot's own new_start_erl.data"
+    end
+
+    @tag :tmp_dir
+    test "leaves the target configured by the one that installed it", %{tmp_dir: dir} do
+      # The defect this describes was not in the marker protocol at all: it was in
+      # `Castle.install/1` composing `materialise/3` and `install/4`, so two
+      # callers both materialised before either reached the lock. Materialising
+      # ends by renaming a resolved configuration onto the target's `sys.config` -
+      # a replace, necessarily, because that is the file `:release_handler` reads -
+      # so the loser's providers overwrote the configuration the winner's
+      # provisional release was about to boot, and the loser was then refused for
+      # the winner's marker. The install that was refused decided what the install
+      # that succeeded booted.
+      #
+      # Two providers that yield *distinguishable* results is what makes it
+      # visible. With both callers answering `{:ok, []}` the end state is identical
+      # whichever of them ran, which is why every existing test passed against it.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      first =
+        installer(dir, "1.2.2",
+          as: :first,
+          hold: true,
+          install: prepares_then_reboots(dir),
+          configure: configures("[{first, resolved}].\n")
+        )
+
+      assert_receive {:looked_up, :first}
+
+      second =
+        installer(dir, "1.2.2",
+          as: :second,
+          configure: configures("[{second, resolved}].\n")
+        )
+
+      assert_receive {:started, :second}
+      refute_receive {:looked_up, :second}, 200
+
+      send(first.pid, :proceed)
+      assert {{:ok, _}, [[~c"1.2.3"]], [_configured]} = Task.await(first, 30_000)
+
+      # The refused caller is refused *before* it materialises, which is the half
+      # that moving the materialisation inside the lock would not have fixed on its
+      # own: inside the region but ahead of `unclaimed/3`, it would still have
+      # replaced the configuration on its way to being told no.
+      assert {{:error, message}, [], []} = Task.await(second, 30_000)
+      assert message =~ "a restart install is pending - it names 1.2.3"
+
+      # And the discriminator. The version waiting for its reboot holds the
+      # configuration of the install that armed it.
+      assert configuration(dir, "1.2.3") == "[{first, resolved}].\n"
     end
 
     @tag :tmp_dir
@@ -567,8 +851,8 @@ defmodule Castle.CommandsTest do
       refute_receive {:looked_up, :second}, 200
 
       send(first.pid, :proceed)
-      assert {{:error, _}, [[~c"1.2.3"]]} = Task.await(first, 30_000)
-      assert {{:ok, _}, [[~c"1.2.3"]]} = Task.await(second, 30_000)
+      assert {{:error, _}, [[~c"1.2.3"]], _} = Task.await(first, 30_000)
+      assert {{:ok, _}, [[~c"1.2.3"]], _} = Task.await(second, 30_000)
 
       assert armed_version(dir) == "1.2.3"
     end
@@ -598,14 +882,14 @@ defmodule Castle.CommandsTest do
       refute_receive {:looked_up, :hot}, 200
 
       send(restarting.pid, :proceed)
-      assert {{:ok, lines}, _} = Task.await(restarting, 30_000)
+      assert {{:ok, lines}, _, _} = Task.await(restarting, 30_000)
       assert Enum.join(lines, " ") =~ "The emulator is restarting."
       armed = File.read!(marker(dir))
 
       # The hot caller arms nothing of its own, so it neither adopts nor disarms
       # the marker the restarting one left: the reboot that is still owed happens
       # on the version that asked for it.
-      assert {{:ok, ["Now running 1.2.3 (previously 1.2.2)."]}, _} = Task.await(hot, 30_000)
+      assert {{:ok, ["Now running 1.2.3 (previously 1.2.2)."]}, _, _} = Task.await(hot, 30_000)
       assert File.read!(marker(dir)) == armed
     end
   end
@@ -813,7 +1097,7 @@ defmodule Castle.CommandsTest do
     test "refuses to install, without installing", %{tmp_dir: dir} do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
-      assert {:error, message} = Commands.install("1.2.3", dir, handler, erts_less())
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, PeerStub, erts_less())
 
       assert message =~
                "Cannot install 1.2.3: the deployment and the emulator's root are different directories"
@@ -925,42 +1209,52 @@ defmodule Castle.CommandsTest do
 
   # What `which_releases/0` reports for a node running `vsn` on a record it read
   # from a RELEASES file: it names applications, so the check `unpack/3` and
-  # `install/3` make passes.
+  # `install/5` make passes.
   defp running_record(vsn) do
     [{~c"sample", to_charlist(vsn), [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}]
   end
 
   # A handler whose running release was read from a RELEASES file, so it names
-  # applications and the check unpack/3 and install/3 make passes, with `fun`
+  # applications and the check unpack/3 and install/5 make passes, with `fun`
   # answering `reply`.
   defp real_record(fun, reply) do
     Stub.stub(:which_releases, running_record("1.2.2"))
     Stub.stub(fun, reply)
   end
 
-  # An `install/4` of 1.2.3 in a task of its own, from a node running `from`,
+  # An `install/5` of 1.2.3 in a task of its own, from a node running `from`,
   # reporting where it got to over messages so that two of them can be
-  # interleaved deterministically. It answers `{result, install_release calls}`,
-  # because both are per-process: `Castle.ReleaseHandlerStub` keeps its replies
-  # and its record of calls in the dictionary of whichever process called it, and
-  # here that is the task rather than the test.
+  # interleaved deterministically. It answers
+  # `{result, install_release calls, materialise calls}`, because all three are
+  # per-process: `Castle.ReleaseHandlerStub` and `Castle.PeerStub` keep their
+  # replies and their record of calls in the dictionary of whichever process
+  # called them, and here that is the task rather than the test.
   #
   # `hold: true` stops the caller inside `which_releases/0` until it is sent
   # `:proceed`. That is the seam the interleaving needs: the first thing the
-  # serialised region does and the last one before the marker is armed.
+  # serialised region does and the last one before anything is written.
+  #
+  # `configure:` is what this caller's peer does, and it is a reply rather than a
+  # fixed `{:ok, []}` so that a test can give two callers materialisations whose
+  # results are told apart. That is the only way to see *whose* configuration a
+  # version ended up with, which is the thing composing materialisation in front
+  # of the lock got wrong.
   defp installer(rel_dir, from, opts) do
     test = self()
     name = Keyword.fetch!(opts, :as)
     lookup = lookup(test, name, from, Keyword.get(opts, :hold, false))
     reply = Keyword.get(opts, :install, {:ok, ~c"1.2.2", ~c"upgrade"})
+    configure = Keyword.get(opts, :configure, {:ok, []})
 
     Task.async(fn ->
       Stub.stub(:which_releases, lookup)
       Stub.stub(:install_release, reply)
+      PeerStub.stub(configure)
 
       send(test, {:started, name})
 
-      {Commands.install("1.2.3", rel_dir, Stub), Stub.calls(:install_release)}
+      {Commands.install("1.2.3", rel_dir, Stub, PeerStub), Stub.calls(:install_release),
+       PeerStub.calls()}
     end)
   end
 
@@ -996,10 +1290,74 @@ defmodule Castle.CommandsTest do
   # assert the wrong message while looking like it asserted the right one.
   defp erts_less, do: DeploymentStub.stub(System.tmp_dir!(), to_string(:code.root_dir()))
 
+  # A deployment whose ERTS guard is inert - no `RELEASE_ROOT`, which is what
+  # `mix test` runs in and what every case that omits this argument already gets -
+  # and whose filesystem refuses one operation on the marker.
+  #
+  # `nil` for both roots rather than the real ones, deliberately: `ensure_own_erts/2`
+  # returns early on a `release_root` of `nil` without asking for the other, so a
+  # `root_dir` that is never read is a `root_dir` this fixture is not claiming
+  # anything about.
+  #
+  # The refusal is scoped to the marker by path, so that nothing else these
+  # installs do is affected by it - the version directory, OTP's file and the
+  # working directory the marker is staged in all go through `File` directly.
+  defp unremovable_marker(rel_dir) do
+    DeploymentStub.stub(nil, nil)
+    DeploymentStub.stub_rm(refusing(marker(rel_dir), :eacces, &File.rm/1))
+  end
+
+  defp unreadable_marker(rel_dir) do
+    DeploymentStub.stub(nil, nil)
+    DeploymentStub.stub_read(refusing(marker(rel_dir), :eio, &File.read/1))
+  end
+
+  # `reason` for `path`, and the real operation for anything else.
+  defp refusing(path, reason, real) do
+    fn asked -> if asked == path, do: {:error, reason}, else: real.(asked) end
+  end
+
   # Enough of an unpacked version directory for `materialise/3`: what is in it is
   # the peer's business, and the peer is a stub here. Everything it would look
   # for is covered against a real one in `Castle.PeerTest`.
   defp unpacked(dir), do: File.write!(Path.join(dir, "sys.config"), "[].\n")
+
+  # A target `install/5` can materialise: the version directory unpacked, which is
+  # what `materialise/3` looks for before it will reach a peer at all, and a peer
+  # that says it configured it.
+  #
+  # Every install case names one, and that is the point rather than an
+  # inconvenience. Materialising is a *step of the install* now, not something
+  # composed in front of it, so a case that did not say what the peer did would not
+  # have said what the version it installed is configured with - and that is
+  # exactly the thing the composition got wrong.
+  defp configured(rel_dir, vsn \\ "1.2.3") do
+    dir = Path.join(rel_dir, vsn)
+    File.mkdir_p!(dir)
+    unpacked(dir)
+
+    PeerStub.stub({:ok, []})
+  end
+
+  # A peer that writes a distinguishable `sys.config` into the version directory,
+  # the way the real one ends by renaming a resolved configuration onto it.
+  #
+  # This is what makes "whose configuration is the version left holding" an
+  # observable question. `Castle.PeerStub` answering `{:ok, []}` cannot: the end
+  # state is the same whichever caller materialised, which is why no test saw the
+  # composition being wrong.
+  defp configures(contents) do
+    fn rel_vsn_dir ->
+      File.write!(Path.join(rel_vsn_dir, "sys.config"), contents)
+      {:ok, []}
+    end
+  end
+
+  # What the target's `sys.config` says, which is whichever materialisation wrote
+  # it last.
+  defp configuration(rel_dir, vsn) do
+    rel_dir |> Path.join(vsn) |> Path.join("sys.config") |> File.read!()
+  end
 
   defp marker(rel_dir), do: Path.join(rel_dir, "castle-restart-pending")
   defp provisional(rel_dir), do: Path.join(rel_dir, "new_start_erl.data")

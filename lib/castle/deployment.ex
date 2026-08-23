@@ -1,14 +1,27 @@
 defmodule Castle.Deployment do
   @moduledoc false
 
-  # The two facts about the running deployment that say whether the release
-  # brought its own ERTS, and nothing else. They live here so that there is one
-  # place each is read - and so that a test can hand `Castle.Commands` a stub
-  # that answers them differently, which is the only way to reach a state
-  # `mix test` never runs in. The comparison itself stays in
-  # `Castle.Commands.ensure_own_erts/2`, so what a test exercises is the real
-  # rule over substituted inputs, the way the release-record check exercises the
-  # real rule over a substituted `which_releases/0`.
+  # The facts about the running deployment that Castle cannot arrange and a test
+  # cannot produce on demand. They live here so that there is one place each is
+  # read - and so that a test can hand `Castle.Commands` a stub that answers them
+  # differently, which is the only way to reach a state `mix test` never runs in.
+  # The rules built on them stay in `Castle.Commands`, so what a test exercises is
+  # the real rule over substituted inputs, the way the release-record check
+  # exercises the real rule over a substituted `which_releases/0`.
+  #
+  # Two roots, for the ERTS guard, and three filesystem operations: the `stat/1`
+  # that guard falls back to, and the `read/1` and `rm/1` that settle the restart
+  # marker's ownership on the way out of a failed install. All three are here for
+  # one reason - the answers that matter are the *failing* ones, and every way of
+  # arranging a failing `read` or `rm` from a fixture is a mode that root and some
+  # filesystems ignore. See `stat/1`.
+  #
+  # **This is not a general filesystem seam and must not become one.** The
+  # primitives that *publish* the marker - `Castle.Peer.work_dir/1`,
+  # `write_private/2` and `publish/2` - are deliberately called directly and not
+  # through here: what they guarantee is the point of them, and a stub would
+  # prove nothing about it. What these two carry is the opposite kind of thing,
+  # an outcome Castle has to have something to say about and no way to cause.
 
   @doc """
   The root `:release_handler` resolves its own relative paths against.
@@ -67,4 +80,33 @@ defmodule Castle.Deployment do
   """
   @spec stat(Path.t()) :: {:ok, File.Stat.t()} | {:error, File.posix()}
   def stat(path), do: File.stat(path)
+
+  @doc """
+  Reads a file, for deciding whether the restart marker is still this attempt's.
+
+  Here for the reason `stat/1` is, and the reason is sharper: the answer that
+  changes what Castle *says* is the one where the marker cannot be read at all,
+  and a marker Castle published is a regular file in a directory it verified it
+  could write to - so the only ways to make this fail are a mode applied
+  underneath it, a filesystem that went away, or a name that stopped being a
+  file. None of those is something a test may arrange and then rely on.
+
+  An unreadable marker used to be treated as another attempt's and left where it
+  was, which is how an install could fail while leaving behind exactly the file
+  the next start acts on. Telling the two apart is what this exists for.
+  """
+  @spec read(Path.t()) :: {:ok, binary()} | {:error, File.posix()}
+  def read(path), do: File.read(path)
+
+  @doc """
+  Removes a file, for clearing the restart marker this attempt armed.
+
+  Here for the same reason as `read/1`. The argument this replaced was that a
+  removal could not fail where the publish had succeeded, since both need
+  permission on the same directory - which is true only if nothing changed in
+  between, and `install_release/1` runs in between and can take as long as an
+  upgrade takes.
+  """
+  @spec rm(Path.t()) :: :ok | {:error, File.posix()}
+  def rm(path), do: File.rm(path)
 end

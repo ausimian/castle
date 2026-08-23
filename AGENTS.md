@@ -519,16 +519,27 @@ Castle's job is configuration and release management on a running node.
   API surface is [#11](https://github.com/ausimian/castle/issues/11)'s to settle.
 - **`unpack/1`, `install/1`, `commit/1`, `remove/1`, `releases/0`** — wrappers
   over `:release_handler`, with the target version's configuration materialised
-  ahead of `install` and `commit` so that it exists before the version is booted,
-  the record check inside `unpack` and `install`, and the ERTS guard inside all
-  of them but `releases/0`. The boundary composes
-  materialise-then-install, so a node that will be refused for its record
-  materialises the target's configuration before it hears so. That is what the
-  check costs by living inside the operation instead of in front of it, and it is
-  only work: materialising writes into the target's version directory, never to
-  the running system and never to a release record, and it is idempotent. Both
-  refusals fall before `install_release/1` is asked for anything, which is the
-  line that matters.
+  before `install` and `commit` hand it over, the record check inside `unpack`
+  and `install`, and the ERTS guard inside all of them but `releases/0`.
+
+  **`Castle.install/1` composes nothing, and it used to.** It called
+  `Commands.materialise/3` and then `Commands.install/4`, and that composition
+  was the bug: two callers both configured the target before either reached the
+  lock. Materialising is now the third step *inside* `Commands.install/5`, after
+  the record check and after the pending-marker refusal and before the marker is
+  armed — so a node that will be refused, for its record or for a pending restart
+  install, is refused without having configured anything. The note this replaces
+  called materialising "only work" on the grounds that it writes into the target's
+  version directory and is idempotent; it ends in a rename onto `sys.config`, so
+  it is not. See the restart-marker section for the whole of it.
+
+  `Castle.commit/1` does still compose materialise-then-commit, which is why an
+  ERTS-less deployment hears "Cannot configure" from `commit` and "Cannot
+  install" from `install`. That asymmetry is exact rather than untidy, and
+  `erts_guard_test.exs` pins both.
+
+  Every refusal still falls before `install_release/1` is asked for anything,
+  which is the line that matters.
 - **`Castle.running/1`** — succeeds when the version it is given is the release
   the system is running. `install_release/1`'s reply says only that the upgrade
   was accepted: a transition that restarts the emulator is replied to and then
@@ -575,7 +586,7 @@ Castle's job is configuration and release management on a running node.
   emulator upgrade and says nothing about a script an operator supplies.)
 
 - **The restart marker** — `releases/castle-restart-pending`, armed by
-  `install/4` before `install_release/1` is asked for anything and cleared on
+  `install/5` before `install_release/1` is asked for anything and cleared on
   every path where the install failed. Forecastle's `env.sh` fragment consumes
   it on the next start and boots the version it names. The two halves are
   useless apart and landed together
@@ -603,8 +614,8 @@ Castle's job is configuration and release management on a running node.
   disarming each other's marker.
 
   **So the pair is owned by an install *attempt*, and four things make it so.**
-  `arm_restart/4` is three of them and the order is the protocol; the fourth is
-  that there is only ever one caller in the install at all.
+  `unclaimed/3` and `arm/4` are three of them and the order is the protocol; the
+  fourth is that there is only ever one caller in the install at all.
 
   1. **One pending restart install at a time.** A marker already at the path
      refuses the install rather than being adopted or replaced, which is what
@@ -619,7 +630,7 @@ Castle's job is configuration and release management on a running node.
      attempt that refused *after* clearing would take an already-requested
      reboot away silently.
   3. **The marker names the attempt that armed it**, on a second line, and
-     `disarm/2` removes it only if it still does. The marker's name is shared and
+     `disarm/3` removes it only if it still does. The marker's name is shared and
      the marker is short-lived — *any* `start` or `daemon` of the deployment
      consumes it, whether or not that start goes on to boot — so removing it by
      name would take a later attempt's marker away. The attempt is the operating
@@ -691,12 +702,49 @@ Castle's job is configuration and release management on a running node.
   Only `install` takes it. `unpack`, `commit` and `remove` arm nothing and hold no
   two-file invariant of their own — `release_handler` serialising its own record
   writes is the whole of what they need — and putting `commit` behind an install
-  that is waiting on a reboot would be a deadlock dressed as caution. The
-  materialisation `Castle.install/1` does *first* is outside it too, and
-  deliberately: it writes into the target's own version directory and touches no
-  release record, its own primitives already refuse rather than replace, and
-  holding this lock across a peer VM's boot would put every install behind
-  another's configuration step. Nothing about the marker protocol depends on it.
+  that is waiting on a reboot would be a deadlock dressed as caution.
+
+  **Materialising the target's configuration is inside the region, and the
+  argument for keeping it outside was wrong.** That argument was: it writes only
+  into the target's own version directory, its own primitives refuse rather than
+  replace, and holding this lock across a peer VM's boot would put every install
+  behind another's configuration step. The middle claim is false about the step
+  that matters. The staging refuses rather than replaces and
+  `sys.config.pristine` refuses rather than replaces, but the *last* thing
+  materialising does is rename the resolved configuration onto `sys.config` — a
+  replace by design, and necessarily so, because that is the file
+  `release_handler` reads. So two callers materialising before either reached the
+  lock meant the loser's providers could replace the configuration the winner's
+  provisional release was about to boot, and the loser was then refused for the
+  winner's marker: a refused install decided what a successful one booted. That
+  providers may answer differently across evaluations is not a hypothetical — it
+  is the entire reason `sys.config.pristine` exists.
+
+  The third claim is true and is not a reason. It is a throughput argument about
+  concurrent installs, and this protocol refuses concurrent installs anyway; an
+  install that waits is slow, and an install whose configuration is somebody
+  else's is wrong.
+
+  **Inside the region is not enough on its own — it has to be after the
+  refusals.** `Commands.install_upgradable/5` runs the record check, then
+  `unclaimed/3`, then materialises, then arms. A caller refused for a pending
+  restart install must be refused *before* it configures anything, because the
+  version it would be configuring is the one the pending install's reboot is
+  about to boot. Moving the materialisation inside the lock while leaving it in
+  front of `unclaimed/3` fixes nothing, and there is a test whose only job is to
+  fail against exactly that arrangement.
+
+  **`Castle.commit/1` still materialises outside any lock, and that is a boundary
+  rather than a claim.** It is not the same case: commit makes permanent a
+  version this node already installed and is running, so materialising produces
+  what a boot at commit time would produce, and there is no marker, no reboot,
+  and no window between a configuration and a boot of it for another caller to
+  land in. What is left open is an operator running `commit` of a version at the
+  same moment as an `install` of that same version, where the two renames onto one
+  `sys.config` are unordered. Nothing is known to do it, putting `commit` behind
+  the install lock would be the deadlock above, and a lock of its own on the
+  version directory would close it — that is the trade, written down rather than
+  taken.
 
   **It is published the way `sys.config.pristine` is** — staged in an owner-only
   working directory and hard-linked into place — and for the same two reasons a
@@ -759,11 +807,63 @@ Castle's job is configuration and release management on a running node.
   `install_release/1` is asked for anything, and so does a stale
   `new_start_erl.data` that cannot be cleared — because the alternative in both
   cases is a reboot that comes back on the wrong version with nothing saying so.
-  Clearing the marker, by contrast, is best-effort on purpose: a releases
-  directory the marker cannot be removed from is one it could not have been
-  linked into, and that already refused.
 
-  **The report changes with it.** `installed/4` says the version was installed,
+  **Settling the marker afterwards happens on every way out, including the ones
+  that do not return, and failing to settle it is reported.** Both halves of that
+  replaced something weaker.
+
+  The region is `Commands.installed/5`, and it is an *implicit* `try` — the
+  function body, with `catch` and `else` clauses, which is the form
+  `credo --strict` asks for. It used to be a bare `case` over the reply with
+  `disarm` in the two failing branches, so an exit, a throw or a raise out of
+  `install_release/1` went past both: the marker stayed armed, and where
+  `prepare_restart_new_emulator/7` had already written `new_start_erl.data` the
+  pair was complete and the next start booted a version whose install had blown
+  up. That is the hazard the whole protocol exists to prevent, reintroduced
+  through the one path that is not a return. It is `catch`/`else` and **not**
+  `after`: an `after` cannot see which way the block went, so it would disarm the
+  successful restart install too, taking away the marker whose entire purpose is
+  to outlive the call. There is a test for that.
+
+  An exception is re-raised unchanged once the marker is settled — `Castle` is
+  the boundary that raises, `Kernel.CLI` catches on the node and the calling VM
+  re-raises, and Castle has nothing to add to an exception out of
+  `release_handler` that is worth losing the stacktrace for. The one exception to
+  that is a marker it could not settle, where the exception is folded into the
+  message instead, because that is the fact an operator most needs and a
+  stacktrace is where it would be buried.
+
+  Clearing the marker used to be best-effort on the argument that a releases
+  directory the marker cannot be removed from is one it could not have been
+  linked into, so the install would already have refused. **That holds only if
+  nothing changed in between, and `install_release/1` runs in between** — for as
+  long as an upgrade takes, with the system's own code being replaced. Worse, an
+  *unreadable* marker was classified as another attempt's and left alone, which
+  reads as caution and is not: a marker that cannot be read is no evidence about
+  whose it is, and the file it might be is the one the next start acts on.
+
+  So `disarm/3` has four answers and two of them are failures. **Ours** is
+  removed, and a removal that fails is reported. **Theirs** is left, which is a
+  success — a later attempt's marker is a reboot still owed. **Gone** is a start
+  of the deployment having consumed it, which is the outcome that was wanted, so
+  `:enoent` from either the read or the removal is success. **Unverifiable** is
+  reported: Castle will not remove a marker it cannot show is its own, and will
+  not pretend the question was answered. What the operator is told names the
+  file, says `new_start_erl.data` may already be beside it, says that an ordinary
+  restart will therefore boot the version the install did not finish, and asks
+  for the marker to be removed before the system is restarted.
+
+  The read and the removal go through `Castle.Deployment.read/1` and `rm/1`, for
+  the reason `stat/1` is there: the answers that decide what Castle *says* are
+  the failing ones, and every fixture that makes a `read` or `rm` fail on a
+  regular file in a writable directory does it with a mode, which root and some
+  filesystems ignore — so the fixture would only sometimes describe the state it
+  names and would pass either way. That seam is for outcomes Castle has to speak
+  about and cannot cause; it is **not** a general filesystem seam, and the
+  primitives that *publish* the marker stay called directly for the reason given
+  above.
+
+  **The report changes with it.** `reported/5` says the version was installed,
   that the emulator is restarting, and that the version stays provisional until
   it is committed — instead of "Now running", which is false for as long as the
   reboot takes and which automation reads.
@@ -788,7 +888,7 @@ module.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
-| `lib/castle/deployment.ex` | The two environment facts the ERTS guard rests on, and nothing else |
+| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`read`/`rm` whose *failures* decide what a refusal says |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
 | `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
@@ -1007,7 +1107,7 @@ unobservable things assertable: a preparation that writes `new_start_erl.data`
 and *then* fails, so that a same-version retry can be shown to clear it rather
 than pair with it; the filesystem as a hard restart before the reboot would find
 it, which is the marker alone and no pair; and a marker replaced between the
-arming and the disarming, so that `disarm/2` can be shown to leave a marker it
+arming and the disarming, so that `disarm/3` can be shown to leave a marker it
 did not write. None of those has an end state that distinguishes it — a
 successful install leaves the marker armed either way, and a failed one leaves it
 gone either way — which is the same reason `Castle.Peer`'s primitives are public.
@@ -1021,26 +1121,70 @@ attempt's evidence.
 `install_release/1`.** The state that used to be reachable is two callers past the
 running-release lookup and neither of them armed, so what has to be held open is
 the *front* of the serialised region — and the lookup is both the first thing in
-it and the last thing before the marker is armed. So `installer/3` runs
-`install/4` in a task of its own with a `which_releases/0` that reports where it
+it and the last thing before anything is written. So `installer/3` runs
+`install/5` in a task of its own with a `which_releases/0` that reports where it
 got to and, optionally, waits to be released; a second caller is started while the
 first is held there, and the discriminator is that its lookup never happens
-(`refute_receive {:looked_up, :second}`). That is the only kind of assertion
-available, and it is honest about why: the end state is the *same* either way —
-the second caller is refused for a marker it finds and changes nothing — because
-the interleaving that destroys evidence needs a caller suspended between step 1
-and step 2, which has no seam and needs none once there cannot be two.
-`Task.await` and `assert_receive` carry generous timeouts because `global`'s lock
-retry backs off by up to a second or two, and every stub reply and call record
-lives in the *task's* process dictionary, so a caller answers with its own
-`Stub.calls(:install_release)` rather than the test reading them.
+(`refute_receive {:looked_up, :second}`). `Task.await` and `assert_receive` carry
+generous timeouts because `global`'s lock retry backs off by up to a second or
+two, and every stub reply and call record lives in the *task's* process
+dictionary, so a caller answers with its own `Stub.calls(:install_release)` and
+its own `PeerStub.calls()` rather than the test reading them.
 
-Three of them, and the third is not about the marker: one relup for 1.2.3 whose
-transition from 1.2.2 is hot and from 1.2.1 restarts the emulator, installed
-concurrently by two callers running different versions. It says the classification
-belongs to the caller that made it — which is the second half of why the region
-reaches past the arming — and that the hot caller neither adopts nor disarms the
-marker the restarting one is waiting on.
+Four of them. The second is the other direction — a failed first install hands the
+region on, and the waiter arms its own marker. The third is not about the marker
+at all: one relup for 1.2.3 whose transition from 1.2.2 is hot and from 1.2.1
+restarts the emulator, installed concurrently by two callers running different
+versions. It says the classification belongs to the caller that made it — the
+second half of why the region reaches past the arming — and that the hot caller
+neither adopts nor disarms the marker the restarting one is waiting on.
+
+**The fourth is about the configuration, and it is the one that needs providers
+whose results can be told apart.** `Castle.PeerStub` therefore accepts a
+*function* reply, like `Castle.ReleaseHandlerStub` does, so a caller's
+materialisation can write a distinguishable `sys.config` into the version
+directory — which is what the real one ends by renaming into place. Two callers
+are given different ones, the first is held at the lookup and goes on to arm and
+"reboot", the second is refused for the pending marker, and the assertions are
+that the second's peer was **never called** (`PeerStub.calls() == []`) and that
+the target is left holding the first's configuration. With both callers answering
+`{:ok, []}` there is nothing to see: the end state is identical whichever of them
+ran, which is exactly why the composition survived three rounds of review. Note
+what this test fails against, because it is the point of it — not just
+materialising outside the lock, but materialising *inside* the lock and in front
+of `unclaimed/3`, which is the fix that looks sufficient and is not.
+
+**The exception path has tests of its own, and the seam is
+`Castle.ReleaseHandlerStub`'s function reply again.** A raise, an exit and a
+throw out of `install_release/1`, each asserted to leave no marker behind, with
+`new_start_erl.data` written first in the raise case so that what survives would
+be the complete pair. A fourth asserts the opposite for a *successful* restart
+install — the marker stays — which is what forbids `try/after` in place of
+`catch`/`else`, since an `after` cannot tell the two apart and no other assertion
+here would notice.
+
+**Being unable to settle the marker is reached through `Castle.DeploymentStub`,
+not through a mode.** `stub_read/1` and `stub_rm/1` take a reply or a function of
+the path, so a refusal can be scoped to the marker alone while everything else the
+install touches goes through the real `File`. Unstubbed, both are the real thing,
+for the reason `stub_stat/1` is: a fixture that only sometimes turns on the state
+it names is a test that only sometimes tests anything. The four cases are a
+removal refused with `:eacces`, a read refused with `:eio`, both of those *and* a
+raise from `install_release/1` — where the exception has to be folded into the
+message rather than let out — and the quiet one, a marker a start of the
+deployment consumed, where `:enoent` must not be reported as a failure. That last
+one is what keeps the reporting from being noise on an ordinary interrupted
+install. The `DeploymentStub` in these is given `nil` for both roots, so the ERTS
+guard is inert exactly as it is under `mix test` with no `RELEASE_ROOT`.
+
+Every install case now names a `configured(dir)` — the version directory unpacked
+and a peer that says it configured it — because materialising is a step of the
+install rather than something composed in front of it. That is deliberate rather
+than an inconvenience: a case that did not say what the peer did would not have
+said what the version it installed is configured with. The ERTS-guard cases pass
+an **unstubbed** `Castle.PeerStub` instead, which raises if it is reached, so
+"refuses without starting a peer" is asserted by the guard holding rather than by
+a separate look.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -1107,11 +1251,23 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   `Castle.install/1` in a VM of its own against the same deployment gets the
   filesystem half of the protocol and nothing more: `publish/2` refuses rather
   than replaces, so the marker cannot be silently taken over, and the window the
-  lock closes — two callers both past `unclaimed/2` before either publishes — is
+  lock closes — two callers both past `unclaimed/3` before either publishes — is
   open again between them. Widening the lock does not fix it; a lock the
   filesystem holds would, at the price of a stale one after a hard kill blocking
   every later install. Nothing is known to do this, and Castle does not detect
   it.
+- **`commit` materialises outside the install lock, so the two renames onto one
+  `sys.config` are unordered where they meet.** `Castle.install/1` now
+  materialises inside its serialised region, which is what stops two installs
+  deciding each other's configuration. `Castle.commit/1` still composes
+  materialise-then-commit, and the case left open is an operator running a
+  `commit` of some version at the same moment as an `install` of that *same*
+  version — a narrow one, since commit is for a version this node has already
+  installed and is running. Putting `commit` behind the install lock would be a
+  deadlock dressed as caution, since an install waiting on a reboot is exactly
+  when a commit is wanted; a second lock on the version directory, taken by
+  materialisation itself, would close it. That is the trade and it has not been
+  taken. Nothing is known to do this, and Castle does not detect it.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

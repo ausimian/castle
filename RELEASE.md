@@ -145,10 +145,33 @@
   either had, and the second would clear the `new_start_erl.data` the first one's
   reboot depends on - leaving the first system to come back on the version it was
   upgrading away from, while the second reported that nothing had been changed.
-  An install that has to wait waits, and then finds the first one's marker. What
-  is serialised is the whole operation and not only the arming: which kind of
-  transition an install is, is decided from the release the system is running,
-  and another install completing in between would change that answer.
+  An install that has to wait waits, and then finds the first one's marker.
+
+  What is serialised is `Castle.install/1` itself, and that includes
+  materialising the target's configuration. It is worth saying which parts, since
+  "the whole operation" was claimed here while the configuration step was still
+  outside: materialising ends by renaming a resolved configuration onto the
+  target's `sys.config`, so two callers doing it before either reached the lock
+  meant the loser's config providers - evaluated in a VM of their own, with
+  whatever environment that caller had - could replace the configuration the
+  winner's provisional release was about to boot, after which the loser was
+  refused for the winner's marker. The install that was refused decided what the
+  install that succeeded booted. Configuration providers are not obliged to
+  produce the same answer twice, which is the reason `sys.config.pristine` exists
+  in the first place.
+
+  So the region now runs from the release-record lookup through the
+  configuration step to `install_release/1` and the marker being settled, and a
+  caller that is going to be told a restart install is pending is told *before*
+  it configures anything. Only the ERTS guard is outside, because it reads two
+  directories and refuses without touching anything. `Castle.commit/1` still
+  configures outside any lock, which is a boundary rather than an oversight - it
+  makes permanent a version this node installed and is running, with no marker,
+  no reboot and no window between a configuration and a boot of it.
+
+  Which kind of transition an install is, is decided from the release the system
+  is running, and another install completing in between would change that answer -
+  which is the other reason the region reaches past the arming.
 
   A restart install while another one is already pending
   is refused rather than allowed to take over its marker, saying so and changing
@@ -160,6 +183,24 @@
   that install wrote. It is published by linking a file that is already complete
   into place, the way the pristine configuration above is, so no start can read a
   marker that is half written and a race is refused rather than silently won.
+
+  The marker is settled on **every** way out of the install, including the ones
+  that do not return: an exit, a throw or a raise out of `install_release/1` is
+  caught, the marker dealt with, and the failure then let out unchanged. Before,
+  only a returned error cleared it - so an exception left the marker armed, and
+  where `:release_handler` had already written its own file the pair was complete
+  and the next start booted a version whose install had blown up.
+
+  And an install that cannot settle its marker now **says so, and says what it
+  means**, rather than reporting the original failure alone. A marker Castle
+  could not remove, or could not read well enough to tell whether it was still
+  its own, is a live instruction to the next start of that system: the failure
+  message names the file, says that `new_start_erl.data` may already be beside
+  it, says that an ordinary restart will therefore boot the version the install
+  did not finish, and asks for the marker to be removed first. Clearing it used
+  to be best effort on the argument that a directory the marker cannot be removed
+  from is one it could not have been linked into - which holds only if nothing
+  changed in between, and `install_release/1` runs in between.
 
   What the install *reports* is different for such a transition, because
   `install_release/1` replies the same `{ok, Vsn, Descr}` for a completed hot

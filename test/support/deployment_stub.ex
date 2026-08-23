@@ -29,20 +29,43 @@ defmodule Castle.DeploymentStub do
   two answers no fixture can produce on demand - a `stat` refused with `:eacces`,
   and a filesystem reporting no inode numbers - are reached at all.
   """
-  def stub_stat(reply) do
-    Process.put({__MODULE__, :stat}, reply)
-    __MODULE__
-  end
+  def stub_stat(reply), do: put(:stat, reply)
+
+  @doc """
+  Registers what the filesystem will say when the restart marker is read, or when
+  it is removed.
+
+  Unregistered, both are the real thing, for the reason `stub_stat/1` is. They are
+  here because the answers that decide what `disarm/3` *says* are the failing
+  ones, and every fixture that produces a failing `read` or `rm` on a regular file
+  in a writable directory does it with a mode - which root and some filesystems
+  ignore, so the fixture would only sometimes describe the state it names, and
+  would pass either way.
+
+  A reply that is a function of one argument is called with the path, which is
+  what lets a failure be made to bite on the marker alone.
+  """
+  def stub_read(reply), do: put(:read, reply)
+  def stub_rm(reply), do: put(:rm, reply)
 
   def release_root, do: fetch(:release_root)
   def root_dir, do: fetch(:root_dir)
 
-  def stat(path) do
-    case Process.get({__MODULE__, :stat}, :unstubbed) do
-      :unstubbed -> File.stat(path)
+  def stat(path), do: filesystem(:stat, path, &File.stat/1)
+  def read(path), do: filesystem(:read, path, &File.read/1)
+  def rm(path), do: filesystem(:rm, path, &File.rm/1)
+
+  defp filesystem(operation, path, real) do
+    case Process.get({__MODULE__, operation}, :unstubbed) do
+      :unstubbed -> real.(path)
       reply when is_function(reply, 1) -> reply.(path)
       reply -> reply
     end
+  end
+
+  defp put(operation, reply) do
+    Process.put({__MODULE__, operation}, reply)
+    __MODULE__
   end
 
   defp fetch(fact) do

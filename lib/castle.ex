@@ -42,8 +42,21 @@ defmodule Castle do
     report!(Commands.unpack(name))
   end
 
+  # Materialising is *inside* `Commands.install/5`, and this composing it here is
+  # the bug that put it there. Materialisation ends in a rename onto the target's
+  # `sys.config` - a replace by design, and it has to be, because that is the file
+  # `:release_handler` reads - so it is not the harmless idempotent work the note
+  # below used to call it. Two callers here both materialised before either
+  # entered the serialised region, and the loser's providers - evaluated in a
+  # second VM, with whatever environment that call had - overwrote the
+  # configuration the winner's provisional release was about to boot, after which
+  # the loser was refused for the winner's marker. The refused install decided the
+  # configuration of the one that succeeded.
+  #
+  # So there is nothing to compose: `Castle.install/1` is one call, and "an
+  # install is serialised" is now true of *this* function rather than of a part of
+  # it. See `Castle.Commands.install/5` and `serialised/2`.
   def install(vsn) when is_binary(vsn) do
-    materialise(vsn)
     report!(Commands.install(vsn, rel_dir()))
   end
 
@@ -65,23 +78,23 @@ defmodule Castle do
   end
 
   # Makes sure the target version's configuration exists before the version is
-  # handed to `:release_handler`, and fails here if it cannot be made to. It
-  # runs ahead of both operations that need it, and everything about the target
-  # that can refuse to go on - a peer that will not start, a boot script that is
-  # not there, a provider that raises - refuses from inside this call.
+  # handed to `:release_handler`, and fails here if it cannot be made to.
+  # Everything about the target that can refuse to go on - a peer that will not
+  # start, a boot script that is not there, a provider that raises - refuses from
+  # inside this call.
   #
-  # `Commands.install/3` then refuses a running node whose release record OTP
-  # synthesised, which is a fact about this node rather than about the target,
-  # and so cannot be answered here. Both refusals are before `install_release/1`
-  # has been asked for anything, which is the line that matters: nothing after
-  # that point may fail without saying that an install happened.
-  #
-  # The order means a node that will be refused for its record materialises the
-  # target's configuration before it hears so. That is what the record check
-  # costs by living inside the operation instead of in front of it, and it is
-  # only work: materialising writes into the target's version directory, never to
-  # the running system and never to a release record, and it is idempotent, so
-  # the refusal still leaves the system exactly as it was.
+  # **`commit/1` is the only caller, and `install/1` must not become one again.**
+  # This is a *replace*: the last thing it does is rename the resolved
+  # configuration onto `sys.config`. Composed in front of an operation it turns
+  # into two steps that another caller can get between, which is exactly what
+  # `Commands.install/5` had to take back inside its own lock. `commit/1` is
+  # different in kind rather than merely luckier - it makes permanent a version
+  # this node already installed and is running, so materialising produces what a
+  # boot at commit time would produce, and there is no marker, no reboot and no
+  # window between a configuration and a boot of it for a second caller to land
+  # in. Putting `commit` behind the install lock would instead be a deadlock
+  # dressed as caution, since an install waiting on a reboot is exactly when a
+  # commit is wanted.
   defp materialise(vsn), do: report!(Commands.materialise(rel_vsn_dir(vsn)))
 
   # The release directory, and the version directory of the release being

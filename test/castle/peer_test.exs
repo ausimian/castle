@@ -372,6 +372,38 @@ defmodule Castle.PeerTest do
       assert message =~ "Cannot read #{sys_config}. {1, :erl_parse,"
     end
 
+    test "reports a target whose Castle does not answer this call", %{tmp_dir: root} do
+      # The cross-version contract, seen from the far side. `resolve/1` runs in
+      # the *target* release's own code, so `{Castle.Peer, :resolve, 1}` is an
+      # agreement between one version of Castle and the next - and a target built
+      # against a Castle that predates it answers something this cannot use. Not
+      # an exception, which the catch below `call/2` already covers, and not an
+      # `{:error, binary}` either: a third thing, which has to be refused with
+      # the reason an operator can act on rather than passed on as configuration.
+      #
+      # The fixture is a castle application built for the target alone. It is why
+      # `build/2` has `:override`: the release file still names castle once, at
+      # the version preboot starts, and only the code behind the name differs.
+      fake = SyntheticRelease.stub_castle(Path.join(root, "old-castle"), :not_implemented)
+
+      vsn_dir =
+        SyntheticRelease.build(root,
+          override: [fake],
+          config: with_providers([{PeerProviderStub, []}], [])
+        )
+
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "Castle.Peer.resolve/1 answered :not_implemented"
+      assert message =~ "predates this mechanism"
+
+      # Refused rather than resolved from, so nothing was written.
+      assert File.read!(sys_config) == before
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+
     test "gives up on a peer that never boots, at the deadline", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
       File.write!(Path.join(vsn_dir, "preboot.boot"), "not a boot script")
@@ -845,6 +877,35 @@ defmodule Castle.PeerTest do
       assert File.read!(path) == ""
     end
 
+    test "reports a close that failed, and does not narrow the file", %{tmp_dir: root} do
+      # `fill/3` takes three steps and the *close* is the one no closed handle can
+      # single out. A handle that is already closed fails both the write and the
+      # close, and `with :ok <- written, :ok <- closed` reports the write - so the
+      # test above pins `written/3` and says nothing about `closed/2`, and both
+      # produce the same "Cannot write" prefix besides. Only a handle whose write
+      # succeeds and whose close does not can tell them apart.
+      #
+      # A process is that handle. `File.io_device/0` is `pid | file_descriptor`,
+      # so this is within what `fill/3` accepts: `:file.write/2` sends a pid
+      # `{:put_chars, …}` over the io protocol, while `File.close/1` sends it a
+      # `:file_request`, which is what lets one answer and the other refuse.
+      path = Path.join(root, "sys.config")
+      File.write!(path, "what was there before")
+      File.chmod!(path, 0o644)
+
+      assert {:error, message} =
+               Castle.Peer.fill(closing_with(:enospc), path, "the configuration")
+
+      # The close's own reason, which the write cannot produce here because the
+      # write succeeded.
+      assert message =~ "Cannot write #{path}. no space left on device"
+
+      # And the mode goes on only once both have succeeded, so a file that was
+      # not written in full is never given the mode that says it was.
+      assert mode(path) == 0o644
+      assert File.read!(path) == "what was there before"
+    end
+
     test "reports a mode it could not set on the file it wrote", %{tmp_dir: root} do
       # The `chmod` is the one step here that goes by path, because OTP has
       # nothing that sets a mode on an open file - so it can fail where the write
@@ -907,6 +968,26 @@ defmodule Castle.PeerTest do
       assert message =~ "Cannot create #{Path.join(missing, "castle-")}"
       assert message =~ "no such file or directory"
       refute File.exists?(missing)
+    end
+
+    test "reports a staging file it cannot publish, and publishes nothing",
+         %{tmp_dir: root} do
+      # `publish/2`'s third answer. `:eexist` is the name being taken, which is a
+      # race the loser is told about and reads around; anything else is a failure
+      # to publish at all, and it has to be reported rather than folded into
+      # "taken" - the caller's next move for a taken name is to read what is
+      # there, and here there is nothing to read.
+      #
+      # A staging file that is not there is the deterministic way in, and no mode
+      # is involved. `File.ln/2` refuses it and creates no destination, which is
+      # the second half of what this asserts: a publish that did not happen has
+      # left no name behind for a start of the deployment to act on.
+      staging = Path.join(root, "never-staged")
+      destination = Path.join(root, "sys.config.pristine")
+
+      assert {:error, message} = Castle.Peer.publish(staging, destination)
+      assert message =~ "Cannot write #{destination}. no such file or directory"
+      refute File.exists?(destination)
     end
 
     test "carries an unrestricted mode just as faithfully", %{tmp_dir: root} do
@@ -1220,6 +1301,26 @@ defmodule Castle.PeerTest do
   end
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
+  # An io device that accepts everything written to it and refuses to close, so
+  # that `fill/3`'s write can succeed where its close cannot. `:file.write/2`
+  # sends a pid an io request and `File.close/1` sends it a file request, which is
+  # the whole of why the two can be answered differently.
+  defp closing_with(reason) do
+    spawn_link(fn -> device(reason) end)
+  end
+
+  defp device(reason) do
+    receive do
+      {:io_request, from, reply_as, _request} ->
+        send(from, {:io_reply, reply_as, :ok})
+        device(reason)
+
+      {:file_request, from, reply_as, :close} ->
+        send(from, {:file_reply, reply_as, {:error, reason}})
+        device(reason)
+    end
+  end
 
   defp rel_files(vsn_dir), do: Enum.filter(File.ls!(vsn_dir), &String.ends_with?(&1, ".rel"))
 

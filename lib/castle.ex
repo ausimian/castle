@@ -5,6 +5,7 @@ defmodule Castle do
 
   alias Castle.Commands
   alias Castle.Deployment
+  alias Castle.Peer
 
   # Every function in this module is a command entry point: `bin/castle` sends
   # each one to the running node over `bin/<release> rpc`, and the launcher's
@@ -56,8 +57,30 @@ defmodule Castle do
   # So there is nothing to compose: `Castle.install/1` is one call, and "an
   # install is serialised" is now true of *this* function rather than of a part of
   # it. See `Castle.Commands.install/5` and `serialised/2`.
-  def install(vsn) when is_binary(vsn) do
-    report!(Commands.install(vsn, rel_dir()))
+  #
+  # **And that claim is tested here rather than one layer down, which is what the
+  # four defaulted arguments are for.** `Castle.Commands.install/5` already took
+  # the handler, the peer and the deployment so that its own suite could drive two
+  # concurrent callers through it; but a test that drives *it* cannot see anything
+  # composed in *this* function, so the composition that was the whole defect would
+  # have been reintroducible with every test still green. `rel_dir` joins them for
+  # the same reason it is an argument there - a suite needs a releases directory of
+  # its own to contend over, or the cases cannot run async - and the three module
+  # arguments follow it because a caller held at `which_releases/0` is the only
+  # seam the interleaving has.
+  #
+  # They are defaults rather than a separate entry point so that `bin/castle`
+  # keeps calling `Castle.install/1` over `rpc` and nothing about the deployment
+  # is chosen by a caller: see `rel_dir/0`.
+  def install(
+        vsn,
+        rel_dir \\ rel_dir(),
+        handler \\ :release_handler,
+        peer \\ Peer,
+        deployment \\ Deployment
+      )
+      when is_binary(vsn) do
+    report!(Commands.install(vsn, rel_dir, handler, peer, deployment))
   end
 
   def running(vsn) when is_binary(vsn) do

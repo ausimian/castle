@@ -230,6 +230,11 @@
   release built by Mix that is the file OTP writes; a deployment that sets
   `RELDIR` or the `sasl` `releases_dir` parameter moves the release records
   elsewhere, and Castle does not yet follow them.
+- `Castle.install/1` accepts four further arguments, all defaulted, naming the
+  releases directory and the modules it talks to. `Castle.install("1.2.3")` is
+  unchanged and is still what `bin/castle` calls; the arguments exist so that
+  concurrent installs can be exercised through the function an operator actually
+  invokes, rather than one layer below it.
 - `unpack/1`, `install/1`, `commit/1`, `remove/1` and
   `make_releases/0` now fail when the operation fails, instead of printing the
   reason and returning normally. These are invoked over `bin/castle`, which

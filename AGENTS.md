@@ -533,6 +533,18 @@ Castle's job is configuration and release management on a running node.
   version directory and is idempotent; it ends in a rename onto `sys.config`, so
   it is not. See the restart-marker section for the whole of it.
 
+  **And that claim is now tested at the boundary, which is what
+  `Castle.install/2..5` is for.** `install` takes the releases directory, the
+  handler, the peer and the deployment as defaulted arguments, exactly as
+  `Commands.install/5` does, for one reason: a concurrency test that drives
+  `Commands.install/5` cannot see anything composed in `Castle.install/1`, so the
+  defect above was reintroducible with the whole suite green. One case in
+  `commands_test.exs` runs two concurrent callers through `Castle.install/5`
+  instead, and fails if a `materialise/3` reappears in front of the install. The
+  arity-1 form is unchanged and is still what `bin/castle` calls over `rpc`;
+  nothing about the deployment is chosen by a caller in a release, because nothing
+  in a release passes the extra arguments.
+
   `Castle.commit/1` does still compose materialise-then-commit, which is why an
   ERTS-less deployment hears "Cannot configure" from `commit` and "Cannot
   install" from `install`. That asymmetry is exact rather than untidy, and
@@ -1153,6 +1165,20 @@ ran, which is exactly why the composition survived three rounds of review. Note
 what this test fails against, because it is the point of it — not just
 materialising outside the lock, but materialising *inside* the lock and in front
 of `unclaimed/3`, which is the fix that looks sufficient and is not.
+
+**It is also the one case that runs through `Castle.install/5` rather than
+`Commands.install/5`, and that is not a detail.** The defect was a composition in
+`Castle.install/1`, so a case that only ever called `Commands.install/5` was
+asserting about a function the defect was not in: putting `materialise/3` back in
+front of the install left it green. `installer/3` takes `through: :boundary` for
+this one, which runs the command boundary — so the two callers are two `rpc`s,
+which is what they are in a deployment. The boundary prints what succeeded and
+raises what failed, so `invoke/2` puts both back into the shape
+`Commands.install/5` returns: `with_io/1` inside the task, because that is whose
+group leader has to be swapped, and an implicit-`try` `attempt/1` to turn
+`Castle.Error` back into an `{:error, message}`. Every other case here stays on
+`Commands.install/5`, which is the right level for a claim about the serialised
+region itself.
 
 **The exception path has tests of its own, and the seam is
 `Castle.ReleaseHandlerStub`'s function reply again.** A raise, an exit and a

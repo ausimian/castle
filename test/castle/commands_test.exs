@@ -1,6 +1,8 @@
 defmodule Castle.CommandsTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias Castle.Commands
   alias Castle.DeploymentStub
   alias Castle.InitStub
@@ -796,6 +798,13 @@ defmodule Castle.CommandsTest do
       # the winner's marker. The install that was refused decided what the install
       # that succeeded booted.
       #
+      # **So this one goes through `Castle.install/5`, and that is the point of the
+      # arguments it takes.** Every other case here drives `Commands.install/5`,
+      # which is the right level for them - but the composition was one layer up,
+      # in the function `bin/castle` actually calls, and a case that never calls it
+      # would stay green while somebody put `materialise/3` back in front of the
+      # install. The two callers here are two `rpc`s, which is what they would be.
+      #
       # Two providers that yield *distinguishable* results is what makes it
       # visible. With both callers answering `{:ok, []}` the end state is identical
       # whichever of them ran, which is why every existing test passed against it.
@@ -805,6 +814,7 @@ defmodule Castle.CommandsTest do
         installer(dir, "1.2.2",
           as: :first,
           hold: true,
+          through: :boundary,
           install: prepares_then_reboots(dir),
           configure: configures("[{first, resolved}].\n")
         )
@@ -814,6 +824,7 @@ defmodule Castle.CommandsTest do
       second =
         installer(dir, "1.2.2",
           as: :second,
+          through: :boundary,
           configure: configures("[{second, resolved}].\n")
         )
 
@@ -1239,12 +1250,19 @@ defmodule Castle.CommandsTest do
   # results are told apart. That is the only way to see *whose* configuration a
   # version ended up with, which is the thing composing materialisation in front
   # of the lock got wrong.
+  #
+  # `through: :boundary` runs `Castle.install/5` instead of `Commands.install/5`.
+  # That distinction is load bearing rather than tidy: the defect was
+  # `Castle.install/1` composing `materialise/3` and the install, so a case that
+  # only ever calls `Commands.install/5` cannot see it come back. One case uses it,
+  # and says why.
   defp installer(rel_dir, from, opts) do
     test = self()
     name = Keyword.fetch!(opts, :as)
     lookup = lookup(test, name, from, Keyword.get(opts, :hold, false))
     reply = Keyword.get(opts, :install, {:ok, ~c"1.2.2", ~c"upgrade"})
     configure = Keyword.get(opts, :configure, {:ok, []})
+    through = Keyword.get(opts, :through, :commands)
 
     Task.async(fn ->
       Stub.stub(:which_releases, lookup)
@@ -1253,9 +1271,32 @@ defmodule Castle.CommandsTest do
 
       send(test, {:started, name})
 
-      {Commands.install("1.2.3", rel_dir, Stub, PeerStub), Stub.calls(:install_release),
-       PeerStub.calls()}
+      {invoke(through, rel_dir), Stub.calls(:install_release), PeerStub.calls()}
     end)
+  end
+
+  defp invoke(:commands, rel_dir), do: Commands.install("1.2.3", rel_dir, Stub, PeerStub)
+
+  # Through `Castle.install/5`, which is the function `bin/castle` reaches over
+  # `rpc` and the only place a composition in front of the serialised region could
+  # live. It is a command boundary rather than an operation, so it *prints* what
+  # succeeded and *raises* what failed; both are turned back into the shape
+  # `Commands.install/5` returns so that a case can be written either way round.
+  #
+  # `with_io/1` rather than `capture_io/1` because the result is wanted as well as
+  # the output, and it runs in the task's own process because that is whose group
+  # leader has to be swapped.
+  defp invoke(:boundary, rel_dir) do
+    case with_io(fn -> attempt(rel_dir) end) do
+      {{:error, _} = refusal, _output} -> refusal
+      {:ok, output} -> {:ok, String.split(output, "\n", trim: true)}
+    end
+  end
+
+  defp attempt(rel_dir) do
+    Castle.install("1.2.3", rel_dir, Stub, PeerStub)
+  rescue
+    error in Castle.Error -> {:error, Exception.message(error)}
   end
 
   # The `which_releases/0` a caller is given: it says that the lookup happened

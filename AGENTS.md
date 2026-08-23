@@ -591,9 +591,69 @@ Castle's job is configuration and release management on a running node.
   instruction. Castle's marker says a reboot was really asked for; the hook
   requires both, and requires them to name one version.
 
-  Consuming them is Forecastle's, and both are consumed: the pending marker is
-  claimed by rename, atomically, and OTP's is removed with it, so the selection
-  is one-shot and a second start of the same deployment selects nothing.
+  **Agreeing on a version is not enough, and the first version of this shipped
+  believing it was.** Two files that name the same version do not establish that
+  one install produced them. The sequence that breaks it has no exotic step in
+  it: an attempt to X fails after OTP's file is written, the operator retries X,
+  the retry arms a fresh marker beside the stale file, and a manual or hard
+  restart *before the retry reaches `install_release/1`* then presents a matching
+  pair. The launcher boots X, which nothing installed, and OTP's records call it
+  `unpacked` — the node runs one release while `which_releases/0` reports another.
+  Back-to-back or concurrent installs broke it the other way, by overwriting and
+  disarming each other's marker.
+
+  **So the pair is owned by an install *attempt*, and three things make it so.**
+  `arm_restart/4` is the whole of it and the order is the protocol.
+
+  1. **One pending restart install at a time.** A marker already at the path
+     refuses the install rather than being adopted or replaced. `publish/2`
+     decides it, by refusing rather than replacing; the `lstat` first is what
+     keeps step 2 from destroying a pending attempt's evidence, since anything in
+     flight holds the marker from before its own step 2 until its `disarm/2`.
+  2. **OTP's file is cleared before the marker is armed.** That is what closes
+     the window above: after it, `new_start_erl.data` existing means *this*
+     attempt's preparation wrote it. Removing it is safe —
+     `write_new_start_erl/3` goes through `file:write_file/2`, which creates the
+     file when it is absent. The order matters and must not be reversed: an
+     attempt that refused *after* clearing would take a concurrent install's
+     reboot away silently.
+  3. **The marker names the attempt that armed it**, on a second line, and
+     `disarm/2` removes it only if it still does. The marker's name is shared and
+     the marker is short-lived — *any* `start` or `daemon` of the deployment
+     consumes it, whether or not that start goes on to boot — so removing it by
+     name would take a later attempt's marker away. The attempt is the operating
+     system pid, the wall clock in nanoseconds and a serial: unique within a node
+     and across its restarts, which is as far as ownership has to reach, because
+     the marker never outlives the next start. It is not a secret and does not
+     need to be — anything able to forge it can write in the releases directory,
+     where it could write the marker itself. What it defends against is
+     confusion, not forgery. **The hook never reads it**: the version is the
+     first line, which is what `head -n 1` gives it, so the file carries this
+     without the shell parsing anything it did not before.
+
+  **It is published the way `sys.config.pristine` is** — staged in an owner-only
+  working directory and hard-linked into place — and for the same two reasons a
+  link was chosen there. A link publishes a file that is already complete, so no
+  start can read a marker that is empty or half written; and it refuses rather
+  than replaces, so the loser of a race is told instead of silently taking the
+  marker over. An exclusive create in place has neither property: it makes
+  *creation* atomic and leaves the file empty between the open and the write, and
+  a death in that window leaves an empty marker that blocks every later attempt.
+  `Castle.Commands` therefore calls `Castle.Peer.work_dir/1`,
+  `write_private/2` and `publish/2` **directly**, not through the injected module
+  `materialise/3` uses: those start no VM, there is nothing about them a stub
+  could stand for, and the guarantee is the point.
+
+  Consuming them is Forecastle's, and what is atomic there is the *claim*: the
+  pending marker is taken by rename, so exactly one start can act on the pair,
+  and OTP's file is then read and removed separately. The two removals are not
+  one operation and cannot be made one — no POSIX call renames two files
+  together. What that costs is bounded by the order: the marker goes first, so an
+  interruption anywhere after it leaves no marker and the next start boots the
+  permanent version. The selection is lost, never duplicated, and never applied
+  to a version nothing installed. Do not write that both are consumed
+  atomically: this note said it, Forecastle's `AGENTS.md` said it, and
+  Forecastle's release note said it, and it was false in all three.
 
   **It is armed from the relup, and it has to be, because the reply cannot answer
   the question.** `restart_emulator` is replied to with `{ok, Vsn, Descr}` —
@@ -628,12 +688,13 @@ Castle's job is configuration and release management on a running node.
   `syntax_check_script/1` accepts only `restart_emulator` after the point of no
   return.
 
-  **A marker that cannot be written refuses the install**, before
-  `install_release/1` is asked for anything, because the alternative is a reboot
-  that comes back on the version being upgraded away from with nothing saying so.
-  Clearing it, by contrast, is best-effort on purpose: a releases directory the
-  marker cannot be removed from is one it could not have been written into, and
-  that already refused.
+  **A marker that cannot be armed refuses the install**, before
+  `install_release/1` is asked for anything, and so does a stale
+  `new_start_erl.data` that cannot be cleared — because the alternative in both
+  cases is a reboot that comes back on the wrong version with nothing saying so.
+  Clearing the marker, by contrast, is best-effort on purpose: a releases
+  directory the marker cannot be removed from is one it could not have been
+  linked into, and that already refused.
 
   **The report changes with it.** `installed/4` says the version was installed,
   that the emulator is restarting, and that the version stays provisional until
@@ -863,13 +924,31 @@ carrying `restart_emulator`, from the from-release's downgrade section for a
 downgrade, and not armed for a hot script, for `restart_new_emulator` at the
 head, or when there is no relup at all. A relup with no entry for the running
 version is what makes the downgrade case a genuine second lookup rather than the
-first one succeeding by accident. The arming refusal is arranged by putting a
-*directory* at the marker's name, which is deterministic and needs no file modes
-— a fixture here may not turn on a mode that root or a filesystem can ignore —
-and what it stands for is a releases directory that cannot be written to. And
-`Stub.calls(:which_releases) == [[]]` on the successful install is now load
-bearing twice over: it says the record check happened in the call that acted,
+first one succeeding by accident. Both arming refusals are arranged by putting a
+*directory* where a file has to be — at the marker's name for the one, at
+`new_start_erl.data` for the other — which is deterministic and needs no file
+modes, since a fixture here may not turn on a mode that root or a filesystem can
+ignore. And `Stub.calls(:which_releases) == [[]]` on the successful install is now
+load bearing twice over: it says the record check happened in the call that acted,
 *and* that the classification did not ask a second time.
+
+**The attempt-ownership tests are about states that only exist while
+`install_release/1` is in flight**, so `Castle.ReleaseHandlerStub` accepts a
+*function* as a reply and calls it with the arguments. That is the only seam
+between the arming and the disarming, and it is what makes three otherwise
+unobservable things assertable: a preparation that writes `new_start_erl.data`
+and *then* fails, so that a same-version retry can be shown to clear it rather
+than pair with it; the filesystem as a hard restart before the reboot would find
+it, which is the marker alone and no pair; and a marker replaced between the
+arming and the disarming, so that `disarm/2` can be shown to leave a marker it
+did not write. None of those has an end state that distinguishes it — a
+successful install leaves the marker armed either way, and a failed one leaves it
+gone either way — which is the same reason `Castle.Peer`'s primitives are public.
+The concurrency case needs no seam: a marker already at the path is a pending
+attempt, and what is asserted is that the install is refused, that
+`install_release/1` was never called, and that *neither* the marker nor OTP's file
+was touched — the second half being the ordering that keeps a refusal from
+destroying a concurrent install's evidence.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -905,23 +984,29 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   stays down until somebody starts it — and comes back on the installed version
   when they do, because the markers are still waiting. See forecastle#10 for why
   a second restart authority was refused rather than added.
-- **A hard kill between arming the restart marker and completing the install
-  leaves both markers behind**, and the next start then boots the target. The
-  damage is bounded rather than absent: the target is unpacked with its
-  configuration materialised, so what happens is a cold boot of it rather than a
-  half-applied upgrade, and `releases/start_erl.data` still names the previous
-  permanent version, so the restart after that returns. Bounded is not closed.
+- **A hard kill during a restart install can only lose the reboot, not misapply
+  it** — and where the pair survives such a kill, booting the target is right
+  rather than tolerated. Which window it lands in decides which:
 
-  There is no test that plants the pair by hand, and that is a decision rather
-  than an omission. Both halves of the bound are already asserted by the restart
-  `:e2e` suite — the provisional boot of a `restart_emulator` target *is* a cold
-  boot of it, and killing it before the commit is the case that shows
-  `start_erl.data` bringing the previous version back. What a planted pair would
-  add is a state OTP's records contradict: forging the markers for a version the
-  handler has no `tmp_current` for leaves the node running one release while
-  `which_releases/0` reports another, and pinning that would be pinning an
-  incoherence rather than a property. If this is ever closed, the thing to change
-  is what the marker carries, not what a test plants.
+  Between the arming and `prepare_restart_new_emulator/7`, only the marker
+  exists — OTP's file was cleared on the way in — so there is no pair, the next
+  start boots the permanent version, and the marker is consumed and discarded.
+  After `prepare_restart_new_emulator/7`, both exist, and so does a
+  `tmp_current` record for the target: the relup was evaluated in the VM that
+  died, the target is unpacked with its configuration materialised, and
+  `transform_release/3` will make it `current` on the way up. That is the state
+  the reboot was going to produce, so the next start producing it is the
+  protocol working. `releases/start_erl.data` still names the previous permanent
+  version either way, so nothing is committed by a crash.
+
+  There is still no test that plants the pair by hand, and that is a decision
+  rather than an omission. What a planted pair adds is a state OTP's records
+  contradict — forging the markers for a version the handler has no
+  `tmp_current` for leaves the node running one release while `which_releases/0`
+  reports another — so pinning it would pin an incoherence. What *is* pinned is
+  the state each window leaves: a unit test observes the filesystem from inside
+  `install_release/1` and finds the marker alone, and the restart `:e2e` suite
+  covers the far window by killing the provisional release before the commit.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

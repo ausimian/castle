@@ -240,7 +240,16 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:ok, lines} = Commands.install("1.2.3", dir, handler)
-      assert File.read!(marker(dir)) == "1.2.3\n"
+
+      # The version on the first line, which is all the hook reads, and the
+      # attempt on the second, which is what makes the file this install's rather
+      # than this version's. Asserted as two lines rather than as a whole string
+      # so that the attempt stays opaque here: what it is made of is
+      # `Castle.Commands.attempt/0`'s business, and the only property this suite
+      # rests on is that it is there and that it differs between attempts.
+      assert [vsn, attempt] = File.read!(marker(dir)) |> String.split("\n", trim: true)
+      assert vsn == "1.2.3"
+      assert attempt != ""
 
       # And the report says what happened rather than what a hot upgrade's reply
       # would have suggested: the same {ok, ...} means the emulator is going down.
@@ -262,7 +271,7 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"downgrade"})
 
       assert {:ok, _} = Commands.install("1.2.1", dir, handler)
-      assert File.read!(marker(dir)) == "1.2.1\n"
+      assert armed_version(dir) == "1.2.1"
     end
 
     @tag :tmp_dir
@@ -327,21 +336,39 @@ defmodule Castle.CommandsTest do
     end
 
     @tag :tmp_dir
-    test "refuses the install when it cannot be armed", %{tmp_dir: dir} do
-      # A directory at the marker's name is what makes this deterministic; what it
-      # stands for is a releases directory that cannot be written to. Going ahead
-      # would reboot the system and come back on the version start_erl.data names,
-      # losing the upgrade with nothing saying so - so the install is refused
-      # before install_release/1 is asked for anything, which is the line
-      # everything else here is on the right side of too.
+    test "refuses the install when something else holds the name", %{tmp_dir: dir} do
+      # A directory at the marker's name is what makes this deterministic; a
+      # fixture here may not turn on a mode that root or a filesystem can ignore.
+      # Going ahead would reboot the system and come back on the version
+      # start_erl.data names, losing the upgrade with nothing saying so - so the
+      # install is refused before install_release/1 is asked for anything, which
+      # is the line everything else here is on the right side of too.
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       File.mkdir!(marker(dir))
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert message =~ "Cannot install 1.2.3: #{marker(dir)}"
+      assert message =~ "there is already a directory at that path"
+      assert Stub.calls(:install_release) == []
+    end
+
+    @tag :tmp_dir
+    test "refuses the install when it cannot be armed", %{tmp_dir: dir} do
+      # The other half of that: the marker's name is free, and OTP's file - which
+      # has to be cleared before the marker is armed - cannot be got rid of. A
+      # directory at *its* name is the deterministic stand-in for a releases
+      # directory nothing may write to, and the refusal has to come before
+      # install_release/1 for the same reason.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      File.mkdir!(provisional(dir))
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler)
       assert message =~ "Cannot install 1.2.3: the upgrade to 1.2.3 restarts the emulator"
-      assert message =~ Path.join(dir, "castle-restart-pending")
-      assert message =~ "losing the upgrade"
+      assert message =~ provisional(dir)
+      assert message =~ "would pair with the marker this install is about to arm"
+      refute File.exists?(marker(dir))
       assert Stub.calls(:install_release) == []
     end
 
@@ -352,6 +379,122 @@ defmodule Castle.CommandsTest do
 
       assert {:error, _} = Commands.install("1.2.3", dir, handler, erts_less())
       refute File.exists?(marker(dir))
+    end
+
+    @tag :tmp_dir
+    test "leaves nothing of its own in the releases directory", %{tmp_dir: dir} do
+      # The marker is staged in a working directory of its own and hard-linked
+      # into place - the way `Castle.Peer` publishes `sys.config.pristine`, and
+      # for the same reasons: a link publishes a file that is already complete,
+      # and refuses rather than replaces. What that must not leave behind is the
+      # staging, so the only `castle-` name here afterwards is the marker itself.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert Path.wildcard(Path.join(dir, "castle-*")) == [marker(dir)]
+    end
+  end
+
+  # Two files that merely agree on a version are not evidence that one install
+  # produced them. `new_start_erl.data` is written before the reboot and removed
+  # by nothing, so a failed attempt leaves OTP's half of the pair behind, and a
+  # retry to the same version used to arm a fresh marker beside it - after which a
+  # restart before `install_release/1` was reached presented a matching pair for
+  # an install that never happened.
+  #
+  # What makes the pair an attempt's rather than a version's: OTP's file is
+  # cleared before the marker is armed, the marker is published exclusively so two
+  # attempts cannot share it, and the marker names the attempt that wrote it so
+  # that no attempt removes another's.
+  describe "the restart marker, as this attempt's" do
+    @tag :tmp_dir
+    test "clears the file a failed attempt left before arming", %{tmp_dir: dir} do
+      # The reviewer's sequence, run: an attempt to 1.2.3 gets as far as OTP
+      # writing new_start_erl.data and then fails, and the same version is
+      # installed again. The retry has to leave that file gone, because until it
+      # is written afresh there is no pair for a restart to act on.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, prepares_then_fails(dir, "1.2.3"))
+
+      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      refute File.exists?(marker(dir)), "the marker survived a failed install"
+      assert File.exists?(provisional(dir)), "the fixture did not leave OTP's file behind"
+
+      # The retry, which must not be able to pair with what the first left.
+      Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert armed_version(dir) == "1.2.3"
+
+      refute File.exists?(provisional(dir)),
+             "a stale new_start_erl.data survived the arming that came after it"
+    end
+
+    @tag :tmp_dir
+    test "is alone on disk until install_release/1 has written OTP's half",
+         %{tmp_dir: dir} do
+      # What a hard restart between the arming and the reboot finds, observed
+      # from inside the only call that happens between them. A marker with no
+      # `new_start_erl.data` beside it is not a pair, so the hook does nothing
+      # with it and the system comes back on the permanent version - which is the
+      # direction this protocol is built to fail in. The state is unobservable
+      # from outside the call, because a successful install leaves the marker
+      # armed either way.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      File.write!(provisional(dir), "16.0 1.2.3")
+
+      handler =
+        real_record(:install_release, fn _args ->
+          send(self(), {:when_asked, File.exists?(marker(dir)), File.exists?(provisional(dir))})
+          {:ok, ~c"1.2.2", ~c"upgrade"}
+        end)
+
+      assert {:ok, _} = Commands.install("1.2.3", dir, handler)
+      assert_received {:when_asked, true, false}
+    end
+
+    @tag :tmp_dir
+    test "refuses while another restart install is pending", %{tmp_dir: dir} do
+      # One at a time. Two attempts sharing the marker overwrite and disarm each
+      # other, and the survivor's marker says nothing about which of them reached
+      # :release_handler. The install is refused with nothing touched - notably
+      # not the pending marker, and not OTP's file, which the refusal has to fall
+      # in front of rather than after.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      File.write!(marker(dir), "1.2.4\nsomeone-elses-attempt\n")
+      File.write!(provisional(dir), "16.0 1.2.4")
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler)
+      assert message =~ "a restart install is pending - it names 1.2.4"
+      assert message =~ "consumed by the next start of this deployment"
+      assert File.read!(marker(dir)) == "1.2.4\nsomeone-elses-attempt\n"
+      assert File.exists?(provisional(dir))
+      assert Stub.calls(:install_release) == []
+    end
+
+    @tag :tmp_dir
+    test "does not remove a marker it did not arm", %{tmp_dir: dir} do
+      # Any start of the deployment consumes the marker, whether or not it goes on
+      # to boot, so a marker at that path when an install fails is not
+      # necessarily the one that install armed. Removing it by name would take a
+      # later attempt's reboot away. Arranged by replacing the marker from inside
+      # install_release/1, which is the only moment between the arming and the
+      # disarming.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+
+      foreign = "1.2.4\nsomeone-elses-attempt\n"
+
+      handler =
+        real_record(:install_release, fn _args ->
+          File.rm!(marker(dir))
+          File.write!(marker(dir), foreign)
+          {:error, :whatever}
+        end)
+
+      assert {:error, _} = Commands.install("1.2.3", dir, handler)
+      assert File.read!(marker(dir)) == foreign
     end
   end
 
@@ -705,6 +848,25 @@ defmodule Castle.CommandsTest do
   defp unpacked(dir), do: File.write!(Path.join(dir, "sys.config"), "[].\n")
 
   defp marker(rel_dir), do: Path.join(rel_dir, "castle-restart-pending")
+  defp provisional(rel_dir), do: Path.join(rel_dir, "new_start_erl.data")
+
+  # The version the marker names, which is its first line and the only part the
+  # launcher's hook reads.
+  defp armed_version(rel_dir) do
+    rel_dir |> marker() |> File.read!() |> String.split("\n") |> hd()
+  end
+
+  # An `install_release/1` that does what `prepare_restart_new_emulator/7` does
+  # before it fails: writes `new_start_erl.data` naming the target, and then
+  # errors. That is the state no end-state fixture can produce, because the file
+  # only comes into being while the call is in flight - and it is the state that
+  # made the pair correlate by version rather than by attempt.
+  defp prepares_then_fails(rel_dir, vsn) do
+    fn _args ->
+      File.write!(provisional(rel_dir), "16.0 #{vsn}")
+      {:error, {:bad_relup_file, ~c"relup"}}
+    end
+  end
 
   # A relup where `release_handler` reads one: `releases/<vsn>/relup`, holding a
   # single `{Vsn, Ups, Downs}` term. Written as a term rather than as text so that

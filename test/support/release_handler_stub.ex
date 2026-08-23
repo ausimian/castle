@@ -12,6 +12,13 @@ defmodule Castle.ReleaseHandlerStub do
   @doc """
   Registers the value the named function replies with, and returns this module
   so that it can be passed straight to the function under test.
+
+  A reply that is a function of one argument is called with the call's arguments
+  and its result used as the reply. That is for the tests about *ordering* around
+  a mutating call: `install_release/1` is the one thing that happens between
+  arming the restart marker and reporting, and `prepare_restart_new_emulator/7`
+  writing `new_start_erl.data` before it can still fail is a state no end-state
+  fixture can produce, because it only exists while a call is in flight.
   """
   def stub(fun, reply) when is_atom(fun) do
     Process.put({__MODULE__, fun}, reply)
@@ -45,6 +52,7 @@ defmodule Castle.ReleaseHandlerStub do
 
     case Process.get({__MODULE__, fun}, :unstubbed) do
       :unstubbed -> raise "#{fun}/#{length(args)} was called without a registered reply"
+      reply when is_function(reply, 1) -> reply.(args)
       reply -> reply
     end
   end

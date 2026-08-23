@@ -133,6 +133,22 @@
   performed, because the alternative is a reboot that silently comes back on the
   version it was upgrading away from.
 
+  Agreeing on a version is not on its own enough, so the pair belongs to one
+  install *attempt* rather than to a version. Any `new_start_erl.data` left by an
+  earlier attempt is cleared before a new marker is armed - otherwise a retry of
+  the same version would arm a marker beside a file it did not write, and a
+  restart before the retry reached `:release_handler` would boot a version that
+  nothing had installed. A restart install while another one is already pending
+  is refused rather than allowed to take over its marker, saying so and changing
+  nothing; the marker is consumed by the next start of the deployment, so a
+  restart clears one left behind by an install that was interrupted. And the
+  marker records which attempt armed it, so a failed install removes only its own
+  - a start of the deployment consumes the marker whether or not it goes on to
+  boot, so the file at that path when an install fails is not necessarily the one
+  that install wrote. It is published by linking a file that is already complete
+  into place, the way the pristine configuration above is, so no start can read a
+  marker that is half written and a race is refused rather than silently won.
+
   What the install *reports* is different for such a transition, because
   `install_release/1` replies the same `{ok, Vsn, Descr}` for a completed hot
   upgrade and for one that is about to reboot. Rather than say "Now running", it

@@ -41,6 +41,9 @@ Forecastle 1.x and Elixir 1.18 or later.
   the shared Erlang installation.
 - Give actionable recovery instructions when `:release_handler` booted without
   an accepted `RELEASES` file.
+- Fix the wording when a restart install is refused because something unusual,
+  such as a named pipe, is already at the path Castle uses for its restart
+  marker. The message used to read "a other".
 - Report restart installs without raising `CaseClauseError`.
 - Return an empty release list without raising `Enum.EmptyError`.
 - Report `RELEASES` read and write errors instead of raising `MatchError`.

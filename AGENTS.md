@@ -1345,6 +1345,14 @@ ignore. And `Stub.calls(:which_releases) == [[]]` on the successful install is n
 load bearing twice over: it says the record check happened in the call that acted,
 *and* that the classification did not ask a second time.
 
+The other things that can hold the marker's name are planted the same way, and
+each of `File.lstat/1`'s answers has to read as a sentence: a **dangling
+symlink**, which also shows that nothing was written through it since what it
+pointed at is still not there, and a **fifo** made with `mkfifo`, which is the
+only one of the `:other` types a test can create without privileges or a mode.
+That last one is why `describe_type/1` has an `:other` clause — the catch-all
+put "a other" into a refusal that ships.
+
 **The attempt-ownership tests are about states that only exist while
 `install_release/1` is in flight**, so `Castle.ReleaseHandlerStub` accepts a
 *function* as a reply and calls it with the arguments. That is the only seam
@@ -1486,6 +1494,77 @@ target's own providers over the materialised file, with `SAMPLE_GREETING` change
 underneath it, and answers with the new value. What lets it is that materialising
 leaves no `config_provider_booted` marker behind and preserves the header Mix
 wrote, so Elixir's pipeline is still armed in the file the launcher reads.
+
+### What `mix test --cover` measures
+
+`mix test --cover` measures `lib`, and `test_coverage` in `mix.exs` names the
+seven `test/support` modules out of it. A fixture is covered by being run at
+all, so counting them moved the total without their ever being the thing
+measured — and two of them moved it *down* for a reason that is not about the
+suite. `Castle.PeerProviderStub` sat at 4.17% and `Castle.IoSink` at 76% while
+being exercised by every peer test, because they execute in the peer's VM and
+`cover` runs on this node. The list is module names rather than a pattern: a
+regex over `Stub` would swallow a production module spelled that way, which is
+the one thing an exclusion must not do.
+
+Lib-only that is **87.95%** — `Castle.Commands` 94.85%, `Castle` 90.48%,
+`Castle.Peer` 79.81%, `Castle.Deployment` and `Castle.Error` 100%.
+
+**The threshold is 85 because 90 is unreachable by construction rather than for
+want of tests.** Everything below the `## In the peer` comment in
+`lib/castle/peer.ex` — `resolve/1`, the standard-error relay, the pipeline and
+the compile-environment check — runs in the peer's VM, which has no node name
+and `is_alive() == false`, so `cover` cannot be started on it. That is 33 lines,
+about 7% of the shipped total, executed by `Castle.PeerTest` on every run and
+counted as missed, which puts the ceiling near 93%. Do not raise it by calling
+those functions on the test node: that runs Elixir's pipeline in the very VM the
+whole mechanism exists to keep it out of, and it would assert less than the peer
+tests already do. Splitting them into a module of their own to exclude it is
+worse still — `{Castle.Peer, :resolve, 1}` is a contract with the *next* version
+of Castle, so the MFA is not free to move for a metric.
+
+`--cover` is deliberately not part of `mix precommit`. Every test here is
+justified by what it fails against, and a merge-blocking percentage cannot tell
+a test that discriminates from one written to move the number.
+
+**What is left uncovered, and why each is a decision.** Every one of them is a
+failing branch, and the fixture is the problem in each case:
+
+* **A filesystem that stops behaving between one statement and the next.**
+  `arm/4`'s three ways of failing to publish — a working directory that cannot
+  be made, an `lstat` that fails for anything but `:enoent`, and a staged marker
+  that cannot be written or linked — together with `unarmed/3` and `detail/1`,
+  the message all three share. Reaching any of them needs a mode, a read-only
+  mount or a cross-device link, and a mode is refused here for the reason
+  `stub_stat/1` exists: root and some filesystems ignore one, so the fixture
+  would only sometimes describe the state it names. The one of the three the
+  filesystem *can* be made to produce is covered — `armed(:taken, …)`, the name
+  claimed between `unclaimed/3` and the publish, which is the second VM
+  `serialised/2` cannot reach and the case `publish/2` refusing rather than
+  replacing exists for. The seam is the materialisation, being the one step
+  between those two.
+* Same class, and the same answer: `armed_version/1`'s unreadable marker;
+  `describe_type/1`'s remaining catch-all, which only `:device` reaches now and
+  a device node needs root to make; `Castle.Peer`'s `empty/1` and
+  `release_file/1` listing failures; `closed/2`; `publish/2`'s non-`:eexist`
+  error; and the two writes at the end of `expand/2`.
+* **The compiler's own default-argument clauses**, five lines, for the arities
+  nothing calls: `install/2` and `install/3` in both `Castle` and
+  `Castle.Commands`, and `commit/2` and `commit/3`. There is no behaviour there
+  — a case that called an intermediate arity would be moving the number and
+  nothing else.
+* **A target release carrying a different `Castle.Peer`**, which is `call/2`'s
+  "may carry a version of Castle that predates this mechanism". A cross-version
+  condition: `Castle.SyntheticRelease` symlinks the running castle's own ebin
+  into the fixture, so reaching it needs a second `castle` application built to
+  answer differently, which is machinery out of proportion to one refusal.
+* **`stop/1`'s rescue**, which needs a control process that has already gone,
+  and about which the code deliberately makes nothing.
+* **A booted release**, which is Forecastle's `:e2e` suite, described just
+  above. That suite is where the in-peer section is exercised against a real
+  release rather than a synthetic one, where the marker is consumed by a real
+  launcher, where `running/1` is polled across a real reboot, and where the exit
+  statuses `bin/castle` returns are asserted. None of it is measured here.
 
 ## Known limitations
 

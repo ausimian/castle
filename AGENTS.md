@@ -914,13 +914,23 @@ Castle's job is configuration and release management on a running node.
   reboot takes and which automation reads.
 
 Every one of them is a command entry point, so `Castle` is the command
-boundary: an operation that fails raises `Castle.Error` there, which is what
-leaves a non-zero exit status behind for the shell that asked for it. Raising,
-not halting — the expression runs on the *running* node, so halting would take
-down the system under management; `Kernel.CLI` catches on the node and
-re-raises in the calling VM, and only that VM exits. `Castle.Commands` holds
-the operations themselves, returning their outcome instead of acting on the
-process, which is what makes them testable.
+boundary: an operation that fails raises there, which is what leaves a non-zero
+exit status behind for the shell that asked for it. Raising, not halting — the
+expression runs on the *running* node, so halting would take down the system
+under management; `Kernel.CLI` catches on the node and re-raises in the calling
+VM, and only that VM exits. `Castle.Commands` holds the operations themselves,
+returning their outcome instead of acting on the process, which is what makes
+them testable.
+
+**`Castle.Error` is what `report!/1` raises, and it is not everything a command
+raises.** `report!/1` turns a returned `{:error, message}` into one; an
+exception, a throw or an exit that the operation did not handle goes straight
+past it. That is deliberate for the one place it can happen on purpose —
+`installed/5` settles the marker and re-raises `install_release/1`'s failure
+unchanged, folding it into a message only where the marker could not be settled
+— so anything claiming that a failed command raises `Castle.Error`, in a `@doc`
+or here, has to say which failures. Automation told to rescue `Castle.Error`
+and nothing else would treat a `release_handler` that blew up as a success.
 
 `Castle.customize/1` is the one function in that module which is *not* one of
 them — it runs at build time, in a consumer's `mix.exs`, and returns a value
@@ -955,6 +965,54 @@ returns; a spec naming the lines, or an error tuple, would be describing
 `Castle.Commands`. Nothing checks them — there is no Dialyzer here — so they are
 kept by hand, and a claim in a `@doc` about what a command refuses is worth
 checking against `Castle.Commands` before it is trusted.
+
+**A definition with defaults needs one `@spec` per arity, and "every public
+function carries a spec" is a claim about arities.** `install/1..5` is five
+functions and therefore five specs; the first version of this carried two, for
+`install/1` and `install/5`, and left three unspecced while this file and
+`RELEASE.md` both said the surface was complete. Nothing catches that, and
+`mix docs` is no help either: ExDoc renders one spec against a defaulted
+definition, the widest arity's, so the page looks the same with two specs as
+with five. `credo --strict` passes, and there is no Dialyzer. So check it with
+`Code.Typespec.fetch_specs(Castle)` and count — against
+`Castle.__info__(:functions)`, which is the list that has to be covered —
+rather than by reading the source, which is what missed three of them.
+
+**The `@doc`s are claims, nothing checks them, and the first draft of them
+walked back into two rules this file had already settled.** Both are worth
+naming, because both were regressions rather than staleness:
+
+  * `upgradable/0`'s said the record is synthesised when the system started
+    "without a `releases/RELEASES` file it could read" — which is the
+    *readable* phrasing corrected above, admitting the malformed-terms
+    counterexample, and it named the file unqualified besides. A `@doc` that
+    describes a refusal has to say what the refusal says: name the authority
+    (the file `:release_handler` accepts, no single property of it being the
+    test), and qualify the path with `RELDIR` and `{sasl, releases_dir}`.
+  * `commit/1`'s said that committing an already-permanent version "succeeds
+    and changes nothing", which was true of the shape castle#14 replaced.
+    `Commands.commit/5` materialises inside its own serialised region, so the
+    target's `sys.config` is rewritten from current provider inputs before
+    `make_permanent/1` — which is itself a no-op for that version — is called
+    at all. OTP's step being idempotent is not the command being idempotent.
+
+Three more were ordinary staleness of the same kind, and the pattern is that a
+`@doc` describing a *sequence* goes stale where a `@doc` describing a value
+does not: `install/1`'s claimed two steps before `:release_handler` was asked
+for anything, when `install_upgradable/5` asks `which_releases/0` first and
+refuses for a pending marker in between, and the line that matters is
+`install_release/1` rather than any handler call; the rollback an install
+leaves was described as "anything that takes the system down brings that one
+back", which is false for the one reboot a restart install has already asked
+for and the launcher is holding a marker to carry out; and `unpacked` was
+glossed as "staged and never installed", which `running/1`'s own `@doc`
+already contradicts. `bin/castle commit`'s argumentless form was described as
+defaulting to "the version running now", where `castle.sh.eex` selects a
+`:current` release and exits non-zero when there is none.
+
+So: read a `@doc` about a sequence against the function that implements the
+sequence, not against the module's summary of it, and read one about
+`bin/castle` against Forecastle's `priv/castle.sh.eex`.
 
 Forecastle is what arranges for these to be reachable: it leaves the
 configuration Mix wrote alone, adds a `:preboot` script that starts `:castle`,

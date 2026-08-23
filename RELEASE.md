@@ -254,7 +254,10 @@
   The rollback that provisional state buys is real and needs nothing:
   `make_permanent/1` is the only thing that writes `releases/start_erl.data`, so
   a provisional release that dies before `Castle.commit/1` is followed by an
-  ordinary start of the version that was permanent before.
+  ordinary start of the version that was permanent before. The one restart that
+  is not that is the one the install asked for: while the pair is still
+  unconsumed the next start boots the target, which is the reboot being carried
+  out rather than a rollback being missed.
 
   The two-stage `restart_new_emulator` transition remains unsupported. It reboots
   into a temporary hybrid release whose version directory holds a boot script and
@@ -267,25 +270,37 @@
   the only one meant to be called from other Elixir code, and everything else is
   a command entry point that `bin/castle` reaches over `rpc`. That distinction is
   worth reading before calling any of them, because a command prints its report
-  and returns a bare `:ok`, and a command that fails raises `Castle.Error`
-  instead of returning an error - which is what leaves a non-zero exit status
-  behind for the shell, and is not what a caller expecting an ordinary function
-  would write code for.
+  and returns a bare `:ok`, and a command that fails raises rather than returning
+  an error - which is what leaves a non-zero exit status behind for the shell,
+  and is not what a caller expecting an ordinary function would write code for.
+  The moduledoc is careful about what it raises, because automation acts on it: a
+  refusal the command made and an error `:release_handler` returned become
+  `Castle.Error`, while an exception, throw or exit the operation did not handle
+  is let out unchanged - so a rescue narrowed to `Castle.Error` will miss a
+  command that blew up.
 
   Every command is documented with the `bin/castle` command that reaches it -
   `releases`, `upgradable`, `unpack`, `install`, `commit`, `remove` - and with
   what it refuses and what it leaves behind: that an install is provisional until
-  it is committed and a restart until then returns to the previous version, that
-  `bin/castle install` confirms the version is running rather than trusting the
-  reply, that removing a version deletes what nothing else is using, and that the
-  two questions - `upgradable` and `releases` - answer on a deployment where
-  everything else is refused. `Castle.running/1` is documented too: it has no
-  `bin/castle` command of its own, and it is what automation driving an upgrade
-  over `rpc` needs in order to confirm one.
+  it is committed, and what that does and does not promise (an ordinary restart
+  returns to the previous version, but the reboot a restart transition has
+  already asked for boots the target); the five steps an install takes before
+  `:release_handler.install_release/1` is asked for anything, in the order it
+  takes them; that `bin/castle install` confirms the version is running rather
+  than trusting the reply; that `bin/castle commit` with no version commits the
+  release awaiting commit and fails when there is none, and that an explicit
+  commit re-expands the target's configuration even for a version that is
+  already permanent; that removing a version deletes what nothing else is using;
+  and that the two questions - `upgradable` and `releases` - answer on a
+  deployment where everything else is refused. `Castle.running/1` is documented
+  too: it has no `bin/castle` command of its own, and it is what automation
+  driving an upgrade over `rpc` needs in order to confirm one.
 
-  Every public function now carries a `@spec`. `Castle.make_releases/0` is
-  deliberately not published: its only caller is the launcher, on the first start
-  of a deployment, and by hand it either does nothing or does what the next start
+  Every public function now carries a `@spec`, every arity of them:
+  `Castle.install/1` through `install/5` are one definition with defaults, so
+  they are five specs rather than two. `Castle.make_releases/0` is deliberately
+  not published: its only caller is the launcher, on the first start of a
+  deployment, and by hand it either does nothing or does what the next start
   would do anyway.
 
 ### Changed

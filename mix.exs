@@ -16,6 +16,7 @@ defmodule Castle.MixProject do
       aliases: aliases(),
       package: package(),
       docs: docs(),
+      test_coverage: test_coverage(),
       source_url: @source_url
     ]
   end
@@ -37,6 +38,51 @@ defmodule Castle.MixProject do
   # providers live in test/support.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_env), do: ["lib"]
+
+  # `mix test --cover` measures the shipped code, which is `lib` - the modules
+  # under `test/support` are fixtures, and a fixture is covered by being run at
+  # all. Left in, they moved the total without ever being the thing measured, and
+  # two of them moved it *down* for a reason that is not about tests: `mix test`
+  # compiles everything into one `cover` run on this node, while
+  # `Castle.PeerProviderStub` and most of `Castle.IoSink` execute inside the peer
+  # VM, which is a separate node with no `cover` on it. Their code genuinely runs
+  # and genuinely cannot be observed from here, so the figure they contributed was
+  # an artefact of where they run rather than a gap in the suite - and raising it
+  # would have meant calling them directly on the test node, which tests nothing.
+  #
+  # Named module by module rather than matched by a pattern. A regex over `Stub`
+  # or over `Castle.*Release` would quietly swallow a production module that
+  # happened to be spelled that way, which is the one thing an exclusion list
+  # must not do. Renaming a fixture makes the total drop, which is visible.
+  #
+  # The threshold is explicit because the default, 90, is unreachable here by
+  # construction rather than for want of tests. The second half of
+  # `Castle.Peer` - `resolve/1` and everything below the `## In the peer` comment -
+  # runs in the peer VM, which has no node name and `is_alive() == false`, so
+  # `cover` cannot be started on it. Around 7% of the shipped lines therefore
+  # execute on every run of `Castle.PeerTest` and are counted as missed, which
+  # puts the observable ceiling near 93%. Left at the default, `mix test --cover`
+  # reports a failure that no test can fix and that says nothing about the suite.
+  #
+  # It is deliberately not part of `mix precommit`. A percentage is the wrong
+  # shape of gate for this project: every test here is justified by what it fails
+  # against, and a merge-blocking number cannot tell a test that discriminates
+  # from one written to raise it. See AGENTS.md for what is left uncovered and
+  # why.
+  defp test_coverage do
+    [
+      summary: [threshold: 85],
+      ignore_modules: [
+        Castle.DeploymentStub,
+        Castle.InitStub,
+        Castle.IoSink,
+        Castle.PeerProviderStub,
+        Castle.PeerStub,
+        Castle.ReleaseHandlerStub,
+        Castle.SyntheticRelease
+      ]
+    ]
+  end
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do

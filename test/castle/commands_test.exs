@@ -401,6 +401,24 @@ defmodule Castle.CommandsTest do
       assert {:ok, _} = Commands.install("1.2.3", dir, handler, configured(dir))
       assert Path.wildcard(Path.join(dir, "castle-*")) == [marker(dir)]
     end
+
+    @tag :tmp_dir
+    test "refuses the install when something with no ordinary name holds it",
+         %{tmp_dir: dir} do
+      # The last of `File.lstat/1`'s five types, and the one whose atom is not a
+      # noun: a named pipe, a socket, anything the emulator has no name for all
+      # come back as `:other`, and the refusal has to read as a sentence without
+      # knowing which. A fifo, because it is the one of them a test can make with
+      # no privileges and no mode involved.
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      assert {_, 0} = System.cmd("mkfifo", [marker(dir)])
+      assert %File.Stat{type: :other} = File.lstat!(marker(dir))
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
+      assert message =~ "there is already something of another kind at that path"
+      assert Stub.calls(:install_release) == []
+    end
   end
 
   # Two files that merely agree on a version are not evidence that one install

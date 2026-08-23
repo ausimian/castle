@@ -1260,8 +1260,16 @@ defmodule Castle.Commands do
       "Move whatever is there out of the way."
   end
 
+  # Four of `File.lstat/1`'s five types reach here - `:regular` is the pending
+  # marker and is answered above - and each has to read as a noun phrase in that
+  # sentence. `:other` is the awkward one: a named pipe, a socket, anything the
+  # emulator has no name for, and it went into the shipped message as "a other",
+  # which is what a `"a #{type}"` catch-all does with the one type whose atom is
+  # not a noun. The catch-all stays for `:device` and for whatever OTP adds,
+  # since "a device" reads correctly.
   defp describe_type(:directory), do: "a directory"
   defp describe_type(:symlink), do: "a symbolic link"
+  defp describe_type(:other), do: "something of another kind"
   defp describe_type(other), do: "a #{other}"
 
   defp stale(provisional, vsn, reason, refusal) do

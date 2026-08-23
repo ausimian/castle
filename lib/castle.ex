@@ -131,17 +131,28 @@ defmodule Castle do
   # refuses, and `Forecastle.steps/1` hands such a list back untouched for that
   # refusal to happen. A second implementation of Mix's rule could only drift
   # from it.
+  # **The warning states the condition it observed and a conditional
+  # consequence, and asserts no verdict.** What this can see is one atom's
+  # absence from the list as given. What it cannot see is whether an archive
+  # appears anyway: a function step later in the list can pack one itself, or
+  # add `:tar` to the steps still to run, and `%Mix.Release{}` carries those
+  # remaining steps precisely so a step can. An earlier version of this said the
+  # release "is never packed" and that "nothing can install this version" - then
+  # acknowledged the counterexample in a trailing sentence without retracting
+  # either claim, which is the worst of both: a definite diagnosis on the error
+  # channel sending an operator to investigate a packaging failure that may not
+  # exist. Say what was seen, say what follows *unless* something else packs it,
+  # and stop.
   defp warn_missing_tar(steps) do
     if :assemble in steps and :tar not in steps do
       Mix.shell().error(
-        "warning: Castle.customize/1 was given a :steps list with no :tar step, " <>
-          "so this release is assembled but never packed into <name>-<vsn>.tar.gz. " <>
-          "That tarball is what is copied into a deployment's releases directory " <>
-          "for bin/castle unpack to read, so nothing can install this version onto " <>
-          "a running system. Add :tar after :assemble if this version is meant to " <>
-          "be installed anywhere. A deployment that is only ever upgraded from " <>
-          "needs no tarball of its own, and a step of your own may be packing one, " <>
-          "in which case there is nothing here to act on."
+        "warning: Castle.customize/1 was given a :steps list with no :tar step. " <>
+          "Unless a step of your own packs one, this release will not produce the " <>
+          "<name>-<vsn>.tar.gz that is copied into a deployment's releases " <>
+          "directory for bin/castle unpack to read - and bin/castle unpack is how " <>
+          "a version is installed onto a running system. Add :tar after :assemble " <>
+          "if this version is meant to be installed anywhere. A deployment that is " <>
+          "only ever upgraded *from* needs no tarball of its own."
       )
     end
   end

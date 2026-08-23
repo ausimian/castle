@@ -101,6 +101,29 @@ defmodule Castle.CustomizeTest do
       assert message =~ "bin/castle unpack"
     end
 
+    test "claims no verdict about whether an archive appears" do
+      # All this can see is one atom missing from the list as given. A function
+      # step later in the list can pack an archive itself, or add `:tar` to the
+      # steps still to run - `%Mix.Release{}` carries those precisely so a step
+      # can - so the absence of the atom is not the absence of a tarball.
+      #
+      # Asserted as the absence of the assertions, because that is the defect: an
+      # earlier version said the release "is never packed" and that "nothing can
+      # install this version", then acknowledged the counterexample in a trailing
+      # sentence without retracting either. A definite diagnosis on the error
+      # channel sends an operator after a packaging failure that may not exist.
+      Castle.customize(steps: [:assemble])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      refute message =~ "never packed"
+      refute message =~ "nothing can install"
+
+      # And the conditional is present rather than merely the claims being gone,
+      # so a message that dropped the consequence entirely fails too.
+      assert message =~ "Unless a step of your own packs one"
+    end
+
     test "says nothing when the list has one" do
       Castle.customize(steps: [:assemble, :tar])
 

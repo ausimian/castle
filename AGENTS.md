@@ -1539,23 +1539,70 @@ production module spelled that way, which is the one thing an exclusion must not
 do.
 
 **It is part of `mix precommit`**, which is what makes the threshold a gate
-rather than a number in a comment. Nothing else runs it, and CI's `test` matrix
-stays on a plain `mix test` deliberately, because cover's line attribution can
-differ between Elixir versions and the figure is measured on one toolchain — the
-pinned `precommit` job is where it is enforced.
+rather than a number in a comment. Nothing else runs it: CI's `test` matrix runs
+a plain `mix test`, and CI's `precommit` job is pinned to Elixir 1.19 / OTP 28.
+So the *only* place this number is checked against the rest of the `~> 1.18`
+range is a contributor's own machine, in the gate this project makes mandatory —
+which is exactly where a false failure does the most damage, because the lesson
+it teaches is to stop running the gate.
 
-Lib-only that is **88.58%** — 419 of 473 relevant lines. Per module:
-`Castle.Commands` 94.85%, `Castle` 90.48%, `Castle.Peer` 81.22%,
-`Castle.Deployment` and `Castle.Error` 100%.
+**The figure is not the same on every supported toolchain, and the threshold has
+to be a floor across them rather than a reading from one.** Measured, one cell
+per toolchain with its own `MIX_HOME` and `MIX_BUILD_ROOT`:
 
-**The threshold is the measured figure, 88.58, and not a rounder number near
-it.** One uncovered line added to `lib` gives 88.40% and fails; that was
-measured rather than assumed. It replaced an 85 that sat *below* the figure it
-was meant to floor, so it ratcheted nothing and licensed a thirteen-line
-regression. The cost of a threshold with no slack is that a refactor which
-legitimately removes covered lines fails it too, and the answer then is to
-re-measure and edit the number deliberately — the same rule every other claim
-here is held to.
+| Elixir / OTP | `Castle.Peer` | Total | relevant |
+| --- | --- | --- | --- |
+| 1.18.3 / 27 | 81.22% | 88.58% | 473 |
+| 1.18.4 / 27 | 81.22% | 88.58% | 473 |
+| 1.18.4 / 28 | 81.22% | 88.58% | 473 |
+| 1.19.5 / 27 | 81.22% | 88.58% | 473 |
+| 1.19.5 / 28 *(CI)* | 81.22% | 88.58% | 473 |
+| 1.20.3 / 28 | 80.84% | 88.40% | 474 |
+| 1.20.3 / 29 | 80.84% | 88.40% | 474 |
+
+Same tests, same 419 covered lines, a different denominator. It tracks the
+Elixir version and not OTP, and the difference is exactly one line: **1.20
+counts the head of `defp forward_standard_error do` (peer.ex:981) as executable
+where 1.19 does not.** Note where that lands — inside the `## In the peer`
+section, so the drift went straight into the set nothing can observe, making it
+34 unmeasurable lines on 1.20 rather than 33. Attribution drift is not
+distributed evenly over the module, and there is no reason to expect the next
+one to be either.
+
+Per module on the pinned toolchain: `Castle.Commands` 94.85%, `Castle` 90.48%,
+`Castle.Peer` 81.22%, `Castle.Deployment` and `Castle.Error` 100%.
+
+**So the threshold is 88 — the lowest reading, rounded down.** Two earlier
+values were wrong in opposite directions and both are worth keeping written
+down. 85 sat *below* the figure it was meant to floor, so it ratcheted nothing
+and licensed a thirteen-line regression. 88.58 was the pinned toolchain's exact
+reading with no slack, and it made the mandatory `mix precommit` fail on a clean
+tree under Elixir 1.20 — a false failure for anyone on a current release. The
+comment beside that number had *already said* attribution varies by version; the
+hazard was identified and the number ignored it, which is the more instructive
+half of the mistake. Do not set this from one machine, and do not raise it to
+88.40 or above: that re-creates the trap the moment another version attributes
+differently.
+
+**What 88 costs, measured on the toolchain with the least slack rather than
+estimated.** Adding uncovered lines to `lib` under Elixir 1.20.3:
+
+| added | total | exit |
+| --- | --- | --- |
+| 0 | 88.40% | 0 |
+| 1 | 88.21% | 0 |
+| 2 | 88.03% | 0 |
+| 3 | 87.84% | **3** |
+
+So it absorbs two and fails on the third; on 1.19 it absorbs three and fails on
+the fourth. That is more slack than a floor ideally has, and it is the
+deliberate price of enough headroom that one more line of version drift does not
+produce a false failure. The direction of the trade is the point: a floor that
+fires on a clean tree gets the gate bypassed, while a floor two lines loose still
+catches every regression large enough to matter — and a review that let two new
+uncovered branches through was not going to be saved by a percentage. Anything
+tighter than about 88.2 buys back one line of sensitivity and spends the drift
+headroom this paragraph exists because of.
 
 **What cannot be measured is the peer's VM, and the reason is where
 instrumentation is applied — not anything cover is unable to do.** An earlier
@@ -1567,8 +1614,9 @@ separate VM loading `Castle.Peer` from the target release's own beam files,
 which nothing has instrumented. Cover's only mechanism for reaching another VM
 is `:cover.start/1` over a *distributed* node, and this peer deliberately has
 none. So `resolve/1` and everything below the `## In the peer` comment — 33
-lines, about 7% of the shipped total — runs on every `Castle.PeerTest` and is
-counted as missed, which puts the observable ceiling near 93%.
+lines on 1.19 and 34 on 1.20, about 7% of the shipped total — runs on every
+`Castle.PeerTest` and is counted as missed, which puts the observable ceiling
+near 93%.
 
 Do not raise it by calling those functions on the test node: that runs Elixir's
 pipeline in the very VM the whole mechanism exists to keep it out of, mutates
@@ -1578,7 +1626,9 @@ worse — `{Castle.Peer, :resolve, 1}` is a contract with the *next* version of
 Castle, so the MFA is not free to move for a metric.
 
 **Why 90% is not the threshold, stated as arithmetic rather than as a claim of
-impossibility.** 90% needs 426 covered, seven more than there are. Twenty-one
+impossibility.** 90% needs 426 covered on 1.19's denominator of 473 — 427 on
+1.20's 474 — so seven more than there are, eight on the newer attribution.
+Twenty-one
 missed lines are observable in principle, and they divide cleanly:
 
 * **Five are the compiler's own generated clauses**, one line per defaulted

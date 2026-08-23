@@ -55,23 +55,41 @@ defmodule Castle.MixProject do
   # happened to be spelled that way, which is the one thing an exclusion list
   # must not do. Renaming a fixture makes the total drop, which is visible.
   #
-  # **The threshold is the measured figure and nothing rounder.** 419 of 473
-  # relevant lines, which is 88.58%; a single uncovered line added to `lib` takes
-  # it to 88.37% and fails. It is set from a measurement rather than chosen, so a
-  # refactor that legitimately removes covered lines will fail it too - and the
-  # right answer then is to re-measure and edit this number deliberately, which
-  # is the same rule every other claim in this project is held to. It replaced an
-  # 85 that sat *below* the figure it was meant to floor and so licensed a
-  # thirteen-line regression.
+  # **The threshold is a floor across the supported range, not this machine's
+  # reading.** `elixir: "~> 1.18"` invites in every version from 1.18 upwards,
+  # and cover's line attribution is not the same across them: 1.18.3 through
+  # 1.19.5 count 473 relevant lines and report 88.58%, while 1.20.3 counts one
+  # more in `Castle.Peer` and reports 88.40%. Same tests, same covered lines, a
+  # different denominator. So this is the *lowest* of those readings, rounded
+  # down, so that it absorbs a line of drift instead of sitting on one version's
+  # figure. The per-toolchain measurements are in AGENTS.md.
   #
-  # 90% would need 426 covered, seven more than there are. What is left is 33
-  # lines in the peer's VM (below) plus 21 that are observable in principle: five
-  # are the compiler's own default-argument clauses for arities nothing calls,
-  # and the other sixteen need a file mode, a device node, or a config provider
-  # sabotaging Castle's working directory. So the seven would have to include all
-  # five of the default-argument clauses, whose only effect is on this number.
-  # That is the move this project does not make. See AGENTS.md for the line-by-
-  # line account.
+  # Two earlier values were wrong in opposite directions, and both mistakes are
+  # worth keeping written down. 85 sat *below* the figure it was meant to floor,
+  # so it ratcheted nothing and licensed a thirteen-line regression. 88.58 was
+  # the pinned toolchain's exact reading with no slack, which made the *mandatory*
+  # `mix precommit` fail on a clean tree under Elixir 1.20 - a false failure for
+  # any contributor on a current release, and the comment beside it had already
+  # said attribution varies by version while the number ignored it. So: do not
+  # set this from one machine, and do not raise it to 88.40 or above, which
+  # re-creates the trap the moment another version attributes differently.
+  #
+  # 88 absorbs two uncovered lines added to `lib` and fails on the third, which
+  # was measured on 1.20 (the least slack of the range) rather than estimated -
+  # 88.40, 88.21, 88.03, then 87.84 and exit 3. That is looser than a floor
+  # ideally is, and it is the deliberate price of enough headroom that one more
+  # line of attribution drift does not fail a clean tree. The direction of the
+  # trade is the point: a floor that fires on a clean tree teaches people to
+  # bypass the gate.
+  #
+  # 90% would need 426 covered on 1.19's denominator, seven more than there are.
+  # What is left there is 33 lines in the peer's VM (below) plus 21 observable in
+  # principle: five are the compiler's own default-argument clauses for arities
+  # nothing calls, and the other sixteen need a file mode, a device node, or a
+  # config provider sabotaging Castle's working directory. So the seven would
+  # have to include all five of the default-argument clauses, whose only effect
+  # is on this number. That is the move this project does not make. See AGENTS.md
+  # for the line-by-line account.
   #
   # **What cannot be measured is the peer's VM, and the reason is where
   # instrumentation is applied rather than anything cover cannot do.**
@@ -87,7 +105,7 @@ defmodule Castle.MixProject do
   # observable ceiling near 93%.
   defp test_coverage do
     [
-      summary: [threshold: 88.58],
+      summary: [threshold: 88],
       ignore_modules: [
         Castle.DeploymentStub,
         Castle.InitStub,
@@ -123,10 +141,16 @@ defmodule Castle.MixProject do
         "credo --strict",
         # With `--cover`, so the threshold in `test_coverage/0` is a gate rather
         # than decoration: nothing else runs it, and a floor nothing enforces is
-        # a number in a comment. This is the only place it is enforced - the CI
-        # `test` matrix stays on a plain `mix test`, deliberately, because line
-        # attribution can differ between Elixir versions and the figure is
-        # measured on one toolchain.
+        # a number in a comment.
+        #
+        # **This runs on whatever Elixir the contributor has**, which is the
+        # thing to keep in mind before touching the threshold. CI's `test` matrix
+        # stays on a plain `mix test` and CI's `precommit` job is pinned to one
+        # version, so a floor set from that one version is not checked anywhere
+        # against the rest of the `~> 1.18` range - it is checked here, on a
+        # machine CI never sees, in the gate this project makes mandatory. That
+        # is why the number is a floor across the range and not a reading. See
+        # `test_coverage/0`.
         "test --cover"
       ]
     ]

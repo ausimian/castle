@@ -944,9 +944,19 @@ comment at the head of `lib/castle.ex` does.
 things a reader has to know before calling any of it: that this is the runtime
 half of a pair, and that these are commands rather than an API — a command
 prints its report and returns `:ok`, so the return value carries nothing, and a
-failure raises `Castle.Error` rather than returning `{:error, _}`. Every command
+refusal raises `Castle.Error` rather than returning `{:error, _}`. Every command
 `@doc` names the `bin/castle` command that reaches it, because that is the
 interface and the function is the thing behind it.
+
+**Say "a refusal", not "a failure", and the distinction is the one drawn just
+above.** `report!/1` turns a returned `{:error, message}` into `Castle.Error`,
+and that covers every refusal these commands make deliberately — but
+`installed/5` re-raises an exception, a throw or an exit out of
+`install_release/1` unchanged once the marker is settled, and anything a
+dependency raises comes through as itself. So automation that rescues
+`Castle.Error` alone misses a command that blew up rather than refused. This
+paragraph exists because the blanket version of the claim was written here in
+the same commit that corrected it in the `@moduledoc`, three paragraphs apart.
 
 Two decisions inside that. `make_releases/0` is `@doc false`: its only caller is
 the launcher's `env.sh` fragment, in the preboot VM of a `start` or `daemon`

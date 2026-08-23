@@ -126,10 +126,11 @@ defmodule Castle do
   A release that asks for no `:steps` at all gets
   `#{inspect(@default_steps)}`, which is Mix's default plus `:tar`. The
   difference is deliberate. `:tar` is
-  what packs `<name>-<vsn>.tar.gz`, and that tarball is what gets copied into a
-  deployment's `releases` directory for `bin/castle unpack <vsn>` to read, so a
-  version built without one can be assembled and run but can never be installed
-  onto a running system - which is the only reason to be using Castle.
+  what packs `<name>-<vsn>.tar.gz`, and that tarball is what gets copied into the
+  release directory `:release_handler` reads - see `unpack/1` - for
+  `bin/castle unpack <vsn>` to find, so a version built without one can be
+  assembled and run but can never be installed onto a running system, which is
+  the only reason to be using Castle.
 
   A `:steps` list that *is* given and has no `:tar` in it is honoured as it
   stands, with a warning. Honoured, because it is the project's own list and
@@ -232,7 +233,10 @@ defmodule Castle do
   # and the launcher's env.sh fragment evaluates make_releases/0 in the preboot
   # VM, on the first start of a deployment. There is no separate CLI layer to
   # carry the process status, so these functions are the command boundary, and
-  # it is here that a failure raises.
+  # it is here that a refusal raises. Not every failure: an exception, throw or
+  # exit out of `install_release/1` is re-raised unchanged by
+  # `Commands.installed/5` once the marker is settled, so it passes through this
+  # boundary rather than being converted at it.
   #
   # customize/1 is the exception and is not one of them: it runs at build time,
   # in a consumer's `mix.exs`, and returns a value rather than reporting an
@@ -333,10 +337,12 @@ defmodule Castle do
   `bin/castle unpack <vsn>`, which builds the argument as
   `<release name>-<vsn>` - `name` is the tarball's name without its `.tar.gz`
   suffix, the way `:release_handler.unpack_release/1` takes it, and not a bare
-  version. The tarball itself has to have been copied into the deployment's
-  `releases` directory first; it is the `<name>-<vsn>.tar.gz` that `mix
-  release`'s `:tar` step packs, which is why `customize/1` defaults `:steps` to
-  include it.
+  version. The tarball itself has to have been copied into the release directory
+  `:release_handler` reads first — `releases/` under the deployment root, unless
+  `RELDIR` or the `sasl` `releases_dir` parameter names another one, in which
+  case the handler looks there and only there. It is the `<name>-<vsn>.tar.gz`
+  that `mix release`'s `:tar` step packs, which is why `customize/1` defaults
+  `:steps` to include it.
 
   Unpacking stages a version: it extracts the applications, writes a release
   record for it as `unpacked`, and changes nothing about what the system is

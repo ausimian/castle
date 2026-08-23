@@ -383,6 +383,15 @@ Castle's job is configuration and release management on a running node.
   bookkeeping and leaves the applications themselves being extracted into, read
   from and deleted out of the emulator's root.
 
+  `EVsn` there is the *ERTS* version out of the release record, not the release
+  version, and `do_remove_release/4` deletes that directory only when no
+  remaining release refers to the same emulator. The two are unrelated numbers
+  and normally different ones - a release at `0.1.1` carrying `erts-16.2` - so
+  prose must not reuse `<vsn>` for both. Writing `erts-<vsn>` beside
+  `lib/<app>-<vsn>` reads as one version and names a directory that generally
+  does not exist; it had got into `remove/1`'s `@doc` and into the ERTS guard's
+  refusal message, which ships. Say `erts-<erts_vsn>`.
+
   **The comparison has three answers, not two.** `compare_dirs/2` is
   `Path.expand/1` on both and then a `stat` on device and inode, and it returns
   `:same`, `:different` or `{:indeterminate, why}`. The third is the one to keep:

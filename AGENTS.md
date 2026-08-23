@@ -919,16 +919,104 @@ re-raises in the calling VM, and only that VM exits. `Castle.Commands` holds
 the operations themselves, returning their outcome instead of acting on the
 process, which is what makes them testable.
 
+`Castle.customize/1` is the one function in that module which is *not* one of
+them — it runs at build time, in a consumer's `mix.exs`, and returns a value
+rather than reporting an outcome. See **Release integration** below. Anything
+that says "every function in `Castle`" has to say "but `customize/1`", and the
+comment at the head of `lib/castle.ex` does.
+
 Forecastle is what arranges for these to be reachable: it leaves the
 configuration Mix wrote alone, adds a `:preboot` script that starts `:castle`,
 and writes the `env.sh` fragment and `bin/castle` wrapper that call into this
 module.
 
+## Release integration
+
+`Castle.customize/1` is the public integration point, and the whole of it: a
+consumer's `mix.exs` names `Castle` and nothing else
+([#12](https://github.com/ausimian/castle/issues/12)). It takes `mix release`
+options and returns `mix release` options with the build-time steps spliced
+around `:assemble`. It lives in `Castle` rather than in a module of its own for
+that same reason.
+
+**The splice is `Forecastle.steps/1`, and there must not be a second
+implementation of it here.** That function finds `:assemble`, puts
+`pre_assemble/1` before it and `post_assemble/1` after it, keeps whatever
+surrounded them in the order it was given, and returns a list with no
+`:assemble` untouched. `customize/1` is `Keyword.update/4` over `:steps` with
+that as the function and nothing else. Forecastle's own release fixture stays on
+the explicit `pre_assemble`/`post_assemble` steps deliberately: Forecastle has
+to be testable without Castle's API, so do not "tidy" it onto `customize/1`.
+
+**The lazy `fn -> … end` release form is required rather than preferred, and the
+`@doc` says so.** Mix evaluates `mix.exs` on every load of the project, the
+`mix deps.get` and `mix deps.compile` runs included, so a `Castle.customize/1`
+written outside a function is a call to a module that has not been built yet.
+`Mix.Release.find_release/2` calls a 0-arity release option function only when a
+release is being built (`opts = if is_function(opts_fun_or_list, 0), do:
+opts_fun_or_list.()`), by which point every dependency is compiled — which is
+also what makes `Forecastle` loadable from here despite being `runtime: false`.
+
+**`:steps` defaults to `[:assemble, :tar]`, and Mix's own default is
+`[:assemble]`.** `Mix.Release.from_config!/4` is
+`Keyword.pop(opts, :steps, [:assemble])`, so a release that says nothing gets no
+tarball — and `Castle.unpack/1` reaches `:release_handler.unpack_release/1`,
+which reads `releases/<name>-<vsn>.tar.gz`. A version assembled without `:tar`
+can never be handed to a running deployment, and handing versions to running
+deployments is the whole of what Castle is for, so the default carries `:tar`.
+It is written out in `@default_steps` rather than taken from
+`Forecastle.steps/1`'s own default, so that what the `@doc` claims is a claim
+about this module's code.
+
+**A `:steps` list that *is* given without `:tar` is honoured, with a warning at
+the build. Refusing it, or adding `:tar` back, would be wrong — and this is the
+part a future reader will otherwise re-derive incorrectly.** The reason is that
+*the deployment an upgrade is installed onto needs no tarball of its own.*
+`unpack` reads the tarball of the version being installed, never of the version
+running, so a base deployment shipped as a directory — a container image, most
+obviously — is a perfectly good Castle deployment built with
+`steps: [:assemble]`, and refusing it would refuse a working configuration.
+`:tar` is also only Mix's own way of packing one — `make_tar/1`, private to
+`Mix.Tasks.Release` and so not callable — and a function step in the project's
+list can pack a tarball itself, so the absence of the atom is not the absence of
+a tarball. What `customize/1` knows is that the atom is not in the
+list; that is what the warning says, and it says nothing further — the same rule
+as the ERTS guard's message, which states the divergence and asserts no cause.
+
+Honouring it *silently* was the third option and is the one to keep rejecting.
+The cost is invisible until an operator meets it as a `bin/castle unpack` that
+cannot find a file, and that failure names a missing tarball rather than the
+release option that did not ask for one. The warning goes through
+`Mix.shell().error/1`, which is what Forecastle's own Windows warning uses. That
+is a reference to `Mix` from a module that ships inside the release, which is
+sound because the branch only ever runs at build time, where Mix is by
+definition loaded; nothing at runtime reaches it.
+
+**Nothing is said about a list with no `:assemble`, and nothing should be.**
+`Mix.Release.validate_steps!/1` requires exactly one, refuses the release and
+names the option, and `Forecastle.steps/1` returns such a list untouched so that
+refusal can happen. A `:steps` value that is not a list is handed back for the
+same reason: `Forecastle.steps/1` guards on `is_list/1`, and a
+`FunctionClauseError` out of it would name a module the project never mentioned,
+which is precisely what `customize/1` exists to prevent. Mix validates `:steps`
+*after* the lazy release function has been called — `find_release/2`, then
+`from_config!/4` — so its refusal is always downstream of this.
+
+**It changes exactly one option.** What a consumer still has to declare by hand
+is listed in the `@doc`, because the alternative is finding out from a failed
+upgrade: the `:appup` project key with `compilers: Mix.compilers() ++ [:appup]`,
+a relup from `mix forecastle.relup` left in the project root, and
+`include_executables_for: [:unix]` — Windows is unsupported and assembly only
+warns — plus the optional `rel/env.sh.eex`. `:steps` is the one option whose
+contents are Castle's business; the others are the project's own choices, and
+one Castle set silently would be one a consumer could not see in their own
+`mix.exs`.
+
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `lib/castle.ex` | The command boundary: print the outcome, or raise |
+| `lib/castle.ex` | The command boundary: print the outcome, or raise — plus `customize/1`, the build-time release integration, which is not a command |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
 | `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`read`/`rm` whose *failures* decide what a refusal says |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
@@ -1242,6 +1330,22 @@ an **unstubbed** `Castle.PeerStub` instead, which raises if it is reached, so
 "refuses without starting a peer" is asserted by the guard holding rather than by
 a separate look.
 
+`test/castle/customize_test.exs` needs none of that machinery, and should not
+acquire any: `customize/1` is a pure function on a keyword list, so there is no
+release to build and nothing to stub. Two things about how it is written are
+load bearing. **Every assertion is on the whole `:steps` list, in order** — a
+case that asked whether `:steps` was present, or whether the two Castle steps
+appeared somewhere in it, would pass against a splice that put them the wrong
+side of `:assemble`, which is the only way to get the splice wrong. And the
+missing-`:tar` decision is pinned in **both** halves: that the list is built as
+the project wrote it (no `:tar` appended) and that the warning is emitted, since
+a case that only looked for the warning would pass against a `customize/1` that
+quietly added one. The warning is observed through `Mix.Shell.Process`, so the
+file is `async: false` — Mix's shell is one setting for the whole node — and the
+setup restores whatever shell was there. The cases that assert *nothing* was
+said depend on that shell just as much as the one that asserts something was,
+which is why the whole file is sync rather than those two cases.
+
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
 `:e2e` suite ([#8](https://github.com/ausimian/castle/issues/8)), which
@@ -1314,10 +1418,17 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   it. It is the one limitation here that a lock cannot narrow, which is why the
   filesystem half of the protocol — `publish/2` refusing rather than replacing —
   has to stand on its own.
-- **The public API is undocumented.** `@moduledoc` is still the generated
-  placeholder and there are no `@doc` or `@spec` annotations
-  ([#11](https://github.com/ausimian/castle/issues/11)).
+- **The public API is undocumented, apart from `customize/1`.** `@moduledoc` is
+  still the generated placeholder and the commands carry no `@doc` or `@spec`
+  annotations ([#11](https://github.com/ausimian/castle/issues/11)).
+  `Castle.customize/1` has both, and was documented with #12 rather than left
+  for #11 because it is the function a consumer's `mix.exs` calls and nothing
+  else says how. It is the standard the rest has to be brought up to, not an
+  exception to be levelled down.
 - **The README is out of date.** It documents an `:appup` compiler and a
-  `mix castle.relup` task that moved to Forecastle in 0.3.0, and the release
-  management commands it describes on `bin/<release>` now live on `bin/castle`
+  `mix castle.relup` task that moved to Forecastle in 0.3.0, the release
+  management commands it describes on `bin/<release>` now live on `bin/castle`,
+  and its integration section still tells a consumer to place
+  `Forecastle.pre_assemble/1` and `Forecastle.post_assemble/1` around
+  `:assemble` by hand, which is what `Castle.customize/1` replaced
   ([#9](https://github.com/ausimian/castle/issues/9)).

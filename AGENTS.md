@@ -545,10 +545,15 @@ Castle's job is configuration and release management on a running node.
   nothing about the deployment is chosen by a caller in a release, because nothing
   in a release passes the extra arguments.
 
-  `Castle.commit/1` does still compose materialise-then-commit, which is why an
-  ERTS-less deployment hears "Cannot configure" from `commit` and "Cannot
-  install" from `install`. That asymmetry is exact rather than untidy, and
-  `erts_guard_test.exs` pins both.
+  **`Castle.commit/1` composes nothing either, and the asymmetry this used to
+  describe is gone.** It said an ERTS-less deployment hears "Cannot configure"
+  from `commit` and "Cannot install" from `install`, and that the difference was
+  exact rather than untidy. It was exact, and it was also the visible symptom of
+  the same composition: `commit` materialised in front of the operation, so the
+  configuration step's guard answered first. `Commands.commit/5` now materialises
+  inside its own serialised region, so every command names itself.
+  `erts_guard_test.exs` pins that in the new direction — a "Cannot configure"
+  reappearing there would mean a composition had come back at the boundary.
 
   Every refusal still falls before `install_release/1` is asked for anything,
   which is the line that matters.
@@ -711,10 +716,28 @@ Castle's job is configuration and release management on a running node.
   is told a restart install is pending: the same message as before, said about a
   pair that is complete instead of said while taking half of it away.
 
-  Only `install` takes it. `unpack`, `commit` and `remove` arm nothing and hold no
-  two-file invariant of their own — `release_handler` serialising its own record
-  writes is the whole of what they need — and putting `commit` behind an install
-  that is waiting on a reboot would be a deadlock dressed as caution.
+  **`install` and `commit` take it; `unpack` and `remove` do not.** Those two arm
+  nothing and hold no two-file invariant of their own, and `release_handler`
+  serialising its own record writes is the whole of what they need.
+
+  `commit` was left out at first, on the argument that putting it behind an
+  install "waiting on a reboot" would be a deadlock dressed as caution. **That
+  was wrong, and the error was about when the lock is held rather than about
+  commit.** An install never holds it across a reboot: `install_release/1`
+  replies *before* `init:reboot()`, the reboot runs in `release_handler`'s own
+  process, so `Commands.install/5` returns and its `trans` releases while the
+  system is still up — and after a restart transition the VM that held the lock
+  is gone entirely. `bin/castle install` then polls `Castle.running/1` over
+  separate rpcs that take no lock at all. The only thing a commit can wait for is
+  a *hot* install still inside `install_release/1`, and waiting there is correct:
+  committing part-way through an upgrade is the thing not to do.
+
+  What the omission left open was reachable and is the failure this protocol
+  exists to prevent. A duplicate install of the version being committed
+  materialises between `commit`'s two steps; the commit succeeds; that install
+  then fails as already installed; and *its* configuration is what the newly
+  permanent release boots on the next restart. A failed caller deciding what a
+  successful one boots, through the one operation left outside the region.
 
   **Materialising the target's configuration is inside the region, and the
   argument for keeping it outside was wrong.** That argument was: it writes only
@@ -746,17 +769,24 @@ Castle's job is configuration and release management on a running node.
   front of `unclaimed/3` fixes nothing, and there is a test whose only job is to
   fail against exactly that arrangement.
 
-  **`Castle.commit/1` still materialises outside any lock, and that is a boundary
-  rather than a claim.** It is not the same case: commit makes permanent a
-  version this node already installed and is running, so materialising produces
-  what a boot at commit time would produce, and there is no marker, no reboot,
-  and no window between a configuration and a boot of it for another caller to
-  land in. What is left open is an operator running `commit` of a version at the
-  same moment as an `install` of that same version, where the two renames onto one
-  `sys.config` are unordered. Nothing is known to do it, putting `commit` behind
-  the install lock would be the deadlock above, and a lock of its own on the
-  version directory would close it — that is the trade, written down rather than
-  taken.
+  **`commit` materialises inside the same region, and the argument for leaving it
+  outside was wrong twice over.** It went: commit is not the same case, because it
+  makes permanent a version this node already installed and is running, so there
+  is no marker, no reboot and no window between a configuration and a boot of it —
+  and putting it behind the install lock would be the deadlock above anyway.
+
+  The first half is true and does not license the second. The window is not
+  between a configuration and a *boot*; it is between commit's own two steps. A
+  duplicate install of the version being committed materialises there, the commit
+  succeeds, that install fails as already installed, and its configuration is what
+  the newly permanent release boots on the next restart. And the deadlock does not
+  exist — see above: an install never holds this lock across a reboot, so the only
+  thing commit can wait for is a hot install mid-`install_release/1`, which is
+  exactly when it should wait.
+
+  So `Commands.commit/5` takes `rel_dir` and materialises inside `serialised/2`,
+  the way `install` does, and `Castle.commit/1` composes nothing. The two renames
+  onto one `sys.config` are now ordered wherever they meet.
 
   **It is published the way `sys.config.pristine` is** — staged in an owner-only
   working directory and hard-linked into place — and for the same two reasons a
@@ -1281,19 +1311,9 @@ wrote, so Elixir's pipeline is still armed in the file the launcher reads.
   open again between them. Widening the lock does not fix it; a lock the
   filesystem holds would, at the price of a stale one after a hard kill blocking
   every later install. Nothing is known to do this, and Castle does not detect
-  it.
-- **`commit` materialises outside the install lock, so the two renames onto one
-  `sys.config` are unordered where they meet.** `Castle.install/1` now
-  materialises inside its serialised region, which is what stops two installs
-  deciding each other's configuration. `Castle.commit/1` still composes
-  materialise-then-commit, and the case left open is an operator running a
-  `commit` of some version at the same moment as an `install` of that *same*
-  version — a narrow one, since commit is for a version this node has already
-  installed and is running. Putting `commit` behind the install lock would be a
-  deadlock dressed as caution, since an install waiting on a reboot is exactly
-  when a commit is wanted; a second lock on the version directory, taken by
-  materialisation itself, would close it. That is the trade and it has not been
-  taken. Nothing is known to do this, and Castle does not detect it.
+  it. It is the one limitation here that a lock cannot narrow, which is why the
+  filesystem half of the protocol — `publish/2` refusing rather than replacing —
+  has to stand on its own.
 - **The public API is undocumented.** `@moduledoc` is still the generated
   placeholder and there are no `@doc` or `@spec` annotations
   ([#11](https://github.com/ausimian/castle/issues/11)).

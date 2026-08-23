@@ -88,8 +88,7 @@ defmodule Castle do
   end
 
   def commit(vsn) when is_binary(vsn) do
-    materialise(vsn)
-    report!(Commands.commit(vsn))
+    report!(Commands.commit(vsn, rel_dir()))
   end
 
   def remove(vsn) when is_binary(vsn) do
@@ -100,33 +99,40 @@ defmodule Castle do
     report!(Commands.releases())
   end
 
-  # Makes sure the target version's configuration exists before the version is
-  # handed to `:release_handler`, and fails here if it cannot be made to.
-  # Everything about the target that can refuse to go on - a peer that will not
-  # start, a boot script that is not there, a provider that raises - refuses from
-  # inside this call.
+  # **Nothing here composes materialisation any more, and neither entry point may
+  # start again.** It is a *replace*: the last thing it does is rename the
+  # resolved configuration onto `sys.config`. In front of an operation it is two
+  # steps another caller can get between, which is why `Commands.install/5` took
+  # it back inside its own lock — and `commit/1` has now followed, into
+  # `Commands.commit/5`.
   #
-  # **`commit/1` is the only caller, and `install/1` must not become one again.**
-  # This is a *replace*: the last thing it does is rename the resolved
-  # configuration onto `sys.config`. Composed in front of an operation it turns
-  # into two steps that another caller can get between, which is exactly what
-  # `Commands.install/5` had to take back inside its own lock. `commit/1` is
-  # different in kind rather than merely luckier - it makes permanent a version
-  # this node already installed and is running, so materialising produces what a
-  # boot at commit time would produce, and there is no marker, no reboot and no
-  # window between a configuration and a boot of it for a second caller to land
-  # in. Putting `commit` behind the install lock would instead be a deadlock
-  # dressed as caution, since an install waiting on a reboot is exactly when a
-  # commit is wanted.
-  defp materialise(vsn), do: report!(Commands.materialise(rel_vsn_dir(vsn)))
+  # `commit` was left out on the argument that it is different in kind: it makes
+  # permanent a version this node already installed and is running, so there is no
+  # marker, no reboot and no window between a configuration and a boot of it. The
+  # part that was wrong is what the argument then concluded — that putting commit
+  # behind the install lock would be "a deadlock dressed as caution, since an
+  # install waiting on a reboot is exactly when a commit is wanted". **An install
+  # never holds the lock while waiting on a reboot.** `install_release/1` replies
+  # before `init:reboot()` and the reboot runs in `release_handler`'s process, so
+  # `Commands.install/5` returns and its `trans` releases before the node goes
+  # down; `bin/castle install` then polls `Castle.running/1` over separate rpcs
+  # that take no lock, and after a restart transition the VM that held it is gone
+  # entirely. The only thing a commit can now wait for is a hot install still
+  # inside `install_release/1` — and waiting there is right, because committing
+  # part-way through an upgrade is what should not happen.
+  #
+  # What the composition actually left open was the reachable case: a duplicate
+  # install of the version being committed, materialising between the two calls.
+  # The commit succeeds, that install then fails as already installed, and its
+  # configuration is what the newly permanent release boots on the next restart —
+  # a failed caller deciding what a successful one boots, which is the failure
+  # this protocol exists to prevent, reachable through the one operation left
+  # outside it.
 
-  # The release directory, and the version directory of the release being
-  # operated on beneath it. Derived, never chosen by the caller: which file the
+  # The release directory. Derived, never chosen by the caller: which file the
   # configuration lands in, and which file the release records go in, are
   # properties of the installation rather than arguments, and a caller's working
-  # directory cannot make them name different ones. The version directory
-  # resolves for any version the running release knows about, because
-  # `:release_handler` unpacks every version into this same root.
+  # directory cannot make them name different ones.
   #
   # `Castle.Deployment.root_dir/0` says what that root does and does not decide,
   # and is the one place that says it. The part that bears on these two: it is
@@ -139,7 +145,6 @@ defmodule Castle do
   # `RELEASE_ROOT` - which is the one deployment where this derivation names the
   # wrong tree, and where every operation that would act on it refuses.
   defp rel_dir, do: Path.join(Deployment.root_dir(), "releases")
-  defp rel_vsn_dir(vsn), do: Path.join(rel_dir(), vsn)
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)
   defp report!({:error, message}), do: raise(Castle.Error, message)

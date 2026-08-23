@@ -1004,32 +1004,75 @@ defmodule Castle.CommandsTest do
     end
   end
 
-  describe "commit/3" do
-    test "reports what committing means" do
+  describe "commit/5" do
+    # Every case here names a `configured(dir)`, for the reason the install cases
+    # do: materialising is a step *of* the commit now rather than something
+    # composed in front of it at the boundary. It moved because the composition
+    # was racy - a duplicate install of the version being committed could
+    # materialise between the two calls, and its configuration would be what the
+    # newly permanent release booted. See `Castle.commit/1`.
+    @tag :tmp_dir
+    test "reports what committing means", %{tmp_dir: dir} do
       handler = Stub.stub(:make_permanent, :ok)
+      configured(dir)
 
-      assert Commands.commit("1.2.3", handler) ==
+      assert Commands.commit("1.2.3", dir, handler, PeerStub) ==
                {:ok, ["Committed 1.2.3. System restarts will now boot into this version."]}
 
       assert Stub.calls(:make_permanent) == [[~c"1.2.3"]]
     end
 
-    test "commits without asking whether the system can be upgraded from" do
+    @tag :tmp_dir
+    test "configures the version before making it permanent", %{tmp_dir: dir} do
+      # The ordering, asserted the way the install cases assert theirs: the
+      # handler stands ready to succeed, and what is checked is that the peer was
+      # asked first. A commit that made a version permanent and *then* configured
+      # it would leave the system permanently on a configuration nothing had
+      # resolved yet.
+      handler = Stub.stub(:make_permanent, :ok)
+      configured(dir)
+
+      assert {:ok, _} = Commands.commit("1.2.3", dir, handler, PeerStub)
+      assert PeerStub.calls() == [Path.join(dir, "1.2.3")]
+    end
+
+    @tag :tmp_dir
+    test "does not make it permanent if it cannot be configured", %{tmp_dir: dir} do
+      # And the other half: a configuration that cannot be resolved has to stop
+      # the commit, or the version becomes permanent with whatever was there
+      # before.
+      handler = Stub.stub(:make_permanent, :ok)
+
+      File.mkdir_p!(Path.join(dir, "1.2.3"))
+      |> then(fn _ -> unpacked(Path.join(dir, "1.2.3")) end)
+
+      PeerStub.stub({:error, "DATABASE_URL is not set"})
+
+      assert {:error, message} = Commands.commit("1.2.3", dir, handler, PeerStub)
+      assert message =~ "DATABASE_URL is not set"
+      assert Stub.calls(:make_permanent) == []
+    end
+
+    @tag :tmp_dir
+    test "commits without asking whether the system can be upgraded from", %{tmp_dir: dir} do
       # Deliberate, and not an omission. make_permanent/1 cannot write the
       # synthesised record back - do_make_permanent/2 returns early for a release
       # that is already permanent and errors for every other status - while a
       # refusal here would strand a version installed while the record was still
       # good, leaving the previous release to come back at the next restart.
       handler = synthesised_record(:make_permanent, :ok)
+      configured(dir)
 
-      assert {:ok, _} = Commands.commit("1.2.3", handler)
+      assert {:ok, _} = Commands.commit("1.2.3", dir, handler, PeerStub)
       assert Stub.calls(:which_releases) == []
     end
 
-    test "reports a failure to commit" do
+    @tag :tmp_dir
+    test "reports a failure to commit", %{tmp_dir: dir} do
       handler = Stub.stub(:make_permanent, {:error, {:bad_status, :unpacked}})
+      configured(dir)
 
-      assert {:error, message} = Commands.commit("1.2.3", handler)
+      assert {:error, message} = Commands.commit("1.2.3", dir, handler, PeerStub)
       assert message =~ "Commit of 1.2.3 failed."
       assert message =~ "bad_status"
     end
@@ -1117,15 +1160,21 @@ defmodule Castle.CommandsTest do
       assert Stub.calls(:which_releases) == []
     end
 
-    test "refuses to commit, without committing" do
+    test "refuses to commit, without committing or starting a peer" do
+      # `PeerStub` is unstubbed and raises if it is reached, so "refuses before it
+      # configures anything" is asserted by the guard holding rather than by a
+      # separate look - the same shape as the install case above, and it applies
+      # to `commit` now that materialising is a step inside it.
       handler = Stub.stub(:make_permanent, :ok)
 
-      assert {:error, message} = Commands.commit("1.2.3", handler, erts_less())
+      assert {:error, message} =
+               Commands.commit("1.2.3", "/unused", handler, PeerStub, erts_less())
 
       assert message =~
                "Cannot commit 1.2.3: the deployment and the emulator's root are different directories"
 
       assert Stub.calls(:make_permanent) == []
+      assert PeerStub.calls() == []
     end
 
     test "refuses to remove, without removing" do

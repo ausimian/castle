@@ -1251,7 +1251,9 @@ defmodule Castle.Commands do
       "reboot, and there is already #{describe_type(type)} at that path. Castle " <>
       "will not write through it or replace it, and there is nowhere else it can " <>
       "arm the install - that path is what the launcher reads on the next start. " <>
-      "Nothing has been changed. Move whatever is there out of the way."
+      "The upgrade did not happen and nothing was made permanent, but the target's " <>
+      "configuration has already been expanded: that is the step before this one. " <>
+      "Move whatever is there out of the way."
   end
 
   defp describe_type(:directory), do: "a directory"
@@ -1264,7 +1266,8 @@ defmodule Castle.Commands do
       "be cleared first (#{:file.format_error(reason)}). It has to be, because one " <>
       "left by an earlier attempt would pair with the marker this install is about " <>
       "to arm and tell the launcher to boot a version that was never installed. " <>
-      "Nothing has been changed."
+      "The upgrade did not happen and nothing was made permanent, but #{vsn}'s " <>
+      "configuration has already been expanded: that is the step before this one."
   end
 
   defp unarmed(marker, reason, refusal) do
@@ -1395,9 +1398,41 @@ defmodule Castle.Commands do
   nowhere else, which is the whole of the rollback property: until this runs, a
   restart returns to the version that was permanent before.
   """
-  @spec commit(String.t(), module(), module()) :: result()
-  def commit(vsn, handler \\ :release_handler, deployment \\ Castle.Deployment) do
+  @spec commit(String.t(), Path.t(), module(), module(), module()) :: result()
+  def commit(
+        vsn,
+        rel_dir,
+        handler \\ :release_handler,
+        peer \\ Peer,
+        deployment \\ Castle.Deployment
+      ) do
     with :ok <- ensure_own_erts("Cannot commit #{vsn}", deployment) do
+      serialised(rel_dir, fn ->
+        commit_materialised(vsn, rel_dir, handler, peer, deployment)
+      end)
+    end
+  end
+
+  # Materialising and committing under the *same* lock an install takes, and for
+  # the reason install takes it: both rename a `sys.config` into the version
+  # directory, and whichever renames last decides what the version boots.
+  #
+  # This composed at the boundary until it was found to be racy. A duplicate
+  # install of the version being committed could materialise between the two
+  # calls here; the commit would then succeed, that install would fail as already
+  # installed, and its configuration would be left as the configuration the newly
+  # permanent release boots on the next restart. A failed caller deciding what a
+  # successful one boots is the failure this whole protocol exists to prevent, and
+  # it was reachable through the one operation that had been left outside.
+  #
+  # **It cannot deadlock against an install, and the earlier belief that it could
+  # was wrong.** `install_release/1` replies before `init:reboot()` and the reboot
+  # runs in `release_handler`'s process, so `Commands.install/5` returns and its
+  # `trans` releases well before the node goes down - the lock is never held
+  # across a restart. `bin/castle install` then polls `Castle.running/1` through
+  # separate rpcs, none of which takes this lock at all.
+  defp commit_materialised(vsn, rel_dir, handler, peer, deployment) do
+    with {:ok, _} <- materialise(Path.join(rel_dir, vsn), peer, deployment) do
       case handler.make_permanent(to_charlist(vsn)) do
         :ok -> {:ok, ["Committed #{vsn}. System restarts will now boot into this version."]}
         {:error, reason} -> {:error, "Commit of #{vsn} failed. #{inspect(reason)}"}

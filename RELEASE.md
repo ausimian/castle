@@ -164,10 +164,15 @@
   configuration step to `install_release/1` and the marker being settled, and a
   caller that is going to be told a restart install is pending is told *before*
   it configures anything. Only the ERTS guard is outside, because it reads two
-  directories and refuses without touching anything. `Castle.commit/1` still
-  configures outside any lock, which is a boundary rather than an oversight - it
-  makes permanent a version this node installed and is running, with no marker,
-  no reboot and no window between a configuration and a boot of it.
+  directories and refuses without touching anything.
+
+  `commit` is serialised the same way, and for a reason that is not obvious: it
+  configures the version too, so a duplicate install of the version being
+  committed could configure it between commit's two steps - the commit would
+  succeed, that install would then fail as already installed, and its
+  configuration would be what the newly permanent release booted on the next
+  restart. A failed caller deciding what a successful one boots. `unpack` and
+  `remove` are not serialised: they configure nothing and arm nothing.
 
   Which kind of transition an install is, is decided from the release the system
   is running, and another install completing in between would change that answer -

@@ -38,18 +38,22 @@ defmodule Castle.ErtsGuardTest do
       # would find the Erlang installation's own releases/RELEASES and report
       # success, and remove/1 would be asking the handler to delete out of it.
       #
-      # `install` names *itself* and `commit` names the configuration step, and
-      # that asymmetry is exact rather than untidy. `Castle.commit/1` still
-      # composes `materialise/3` in front of the operation, so the first refusal it
-      # meets is the configuration step's. `Castle.install/1` no longer composes
-      # anything: materialising moved inside `Commands.install/5`, behind that
-      # function's own guard, so what an operator asked for is what the refusal
-      # names. Losing "Cannot configure" here is the visible half of that move.
+      # **Every command now names itself, and there is no asymmetry left to pin.**
+      # There was one: `commit` used to answer "Cannot configure", because
+      # `Castle.commit/1` composed `materialise/3` in front of the operation and
+      # the configuration step's guard was the first one it met. That composition
+      # is gone - it was racy, and `Commands.commit/5` materialises inside its own
+      # serialised region now, behind its own guard - so what an operator asked
+      # for is what the refusal names, for `commit` exactly as for `install`.
+      #
+      # This is the visible half of that move, and it is worth pinning in this
+      # direction rather than deleting: a "Cannot configure" reappearing here
+      # would mean a composition had come back at the boundary.
       refusals = [
         {&Castle.make_releases/0, "Cannot create"},
         {fn -> Castle.unpack("9.9.9") end, "Cannot unpack 9.9.9"},
         {fn -> Castle.install("9.9.9") end, "Cannot install 9.9.9"},
-        {fn -> Castle.commit("9.9.9") end, "Cannot configure 9.9.9"},
+        {fn -> Castle.commit("9.9.9") end, "Cannot commit 9.9.9"},
         {fn -> Castle.remove("9.9.9") end, "Cannot remove 9.9.9"}
       ]
 

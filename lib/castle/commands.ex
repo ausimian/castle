@@ -1449,6 +1449,13 @@ defmodule Castle.Commands do
   So the file that decides what an ordinary restart boots is written here and
   nowhere else, which is the whole of the rollback property: until this runs, a
   restart returns to the version that was permanent before.
+
+  **A returned error does not establish that it did not run.**
+  `set_permanent_files/5` comes before `write_releases/3`, so a failure in that
+  record write - or in the service update or `init:make_permanent/2` after it -
+  leaves `releases/start_erl.data` already naming `vsn`. Such a commit is
+  partial rather than absent, and the error says so instead of claiming the
+  version was not made permanent.
   """
   @spec commit(String.t(), Path.t(), module(), module(), module()) :: result()
   def commit(
@@ -1488,6 +1495,19 @@ defmodule Castle.Commands do
   # target configuration step has completed, but that need not mean a file was
   # changed: a provider-less release can complete it as a no-op. The message
   # reports the step, not a filesystem effect it cannot prove.
+  #
+  # **Nor may it claim the commit had no effect, and saying so was wrong.**
+  # `do_make_permanent/2` writes `releases/start_erl.data` through
+  # `set_permanent_files/5` and only *then* updates the release record through
+  # `write_releases/3` - which throws on a failed write, as do the Windows
+  # service update and the `ok = init:make_permanent/2` after it, and
+  # `handle_call/3` catches all three into the `{:error, reason}` seen here. So
+  # an error can arrive with the first write already on disk: the one file that
+  # decides what an ordinary restart boots may already name `vsn` even though
+  # the call failed. "Did not make it permanent" told an operator the rollback
+  # still held when it may not, which is the one thing they would act on. The
+  # message therefore reports the commit as possibly partial and sends them to
+  # the release state, rather than asserting an outcome this side cannot see.
   defp commit_materialised(vsn, rel_dir, handler, peer, deployment) do
     with {:ok, _} <- materialise(Path.join(rel_dir, vsn), peer, deployment) do
       case handler.make_permanent(to_charlist(vsn)) do
@@ -1497,7 +1517,9 @@ defmodule Castle.Commands do
         {:error, reason} ->
           {:error,
            "Commit failed for #{vsn}: #{inspect(reason)}. Castle completed the target " <>
-             "configuration step but did not make it permanent."}
+             "configuration step, and the commit may be partial: " <>
+             "releases/start_erl.data may already select #{vsn}. Run bin/castle " <>
+             "releases to inspect release state before restarting."}
       end
     end
   end

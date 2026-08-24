@@ -50,6 +50,11 @@ Forecastle 1.x and Elixir 1.18 or later.
   before restarting, retrying or removing a marker. Also explain the `unpacked`
   record left by an unfinished install and fix the former "a other" wording for
   named pipes and similar marker-path conflicts.
+- Report a failed commit as possibly partial instead of claiming the version was
+  not made permanent. `:release_handler` writes `releases/start_erl.data` before
+  it updates the release record, so an error can leave the file that selects the
+  boot version already naming the target; the message now says so and directs
+  the operator to inspect release state.
 - Report restart installs without raising `CaseClauseError`.
 - Return an empty release list without raising `Enum.EmptyError`.
 - Report `RELEASES` read and write errors instead of raising `MatchError`.

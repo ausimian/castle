@@ -978,9 +978,22 @@ is `<Operation> failed for <target>`. That distinction is operational state, not
 style. Install failures say the target configuration step completed and direct
 the operator to inspect release state; a non-returning install folded into a
 marker error says the install state may have changed. A failed
-`make_permanent/1` says the target configuration step completed but the version
-was not made permanent. "Completed" is deliberate: provider-less releases may
-change no configuration file.
+`make_permanent/1` says the target configuration step completed and that the
+commit **may be partial**, then directs the operator to release state.
+"Completed" is deliberate: provider-less releases may change no configuration
+file.
+
+**It must not say the version was not made permanent, and it did.**
+`do_make_permanent/2` writes `releases/start_erl.data` through
+`set_permanent_files/5` *before* `write_releases/3` updates the record, and a
+throw from that write — or from the Windows service update or the
+`ok = init:make_permanent/2` after it — is caught by `handle_call/3` and
+returned as `{:error, reason}`. So the file that decides what an ordinary
+restart boots can already name the target on a call that failed. Asserting the
+absence of an effect that may have happened is worse than reporting the
+uncertainty, because the rollback is the thing an operator acts on: the message
+states the partial case and sends them to `bin/castle releases`. Do not
+"tighten" it back into a claim about what was not done.
 
 Filesystem reasons in `Castle.Commands` and `Castle.Peer` both go through
 `Castle.FileReason`. It formats atoms with `:file.format_error/1`, retaining the

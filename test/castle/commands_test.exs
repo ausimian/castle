@@ -1477,7 +1477,19 @@ defmodule Castle.CommandsTest do
       assert message =~ "Commit failed for 1.2.3:"
       assert message =~ "bad_status"
       assert message =~ "Castle completed the target configuration step"
-      assert message =~ "did not make it permanent"
+
+      # `set_permanent_files/5` writes releases/start_erl.data before
+      # `write_releases/3` updates the record, so a returned error can arrive
+      # with the boot already selecting the target. The message has to report
+      # that as possibly partial and send the operator to release state; the
+      # refutation is the discriminator, since claiming the version was *not*
+      # made permanent reads as reassuring and tells them the rollback holds
+      # when it may not.
+      assert message =~ "the commit may be partial"
+      assert message =~ "releases/start_erl.data may already select 1.2.3"
+      assert message =~ "Run bin/castle releases"
+      refute message =~ "did not make it permanent"
+
       assert configuration(dir, "1.2.3") == "[].\n"
       assert PeerStub.calls() == [Path.join(dir, "1.2.3")]
     end

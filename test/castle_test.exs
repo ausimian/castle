@@ -11,11 +11,11 @@ defmodule CastleTest do
   # command boundary does with the answer it gets.
   describe "the command boundary" do
     test "raises, rather than returning, when an operation fails" do
-      assert_raise Castle.Error, ~r/^Failed to unpack no-such-release-9\.9\.9\./, fn ->
+      assert_raise Castle.Error, ~r/^Unpack failed for no-such-release-9\.9\.9:/, fn ->
         Castle.unpack("no-such-release-9.9.9")
       end
 
-      assert_raise Castle.Error, ~r/^Removal of 9\.9\.9 failed\./, fn ->
+      assert_raise Castle.Error, ~r/^Removal failed for 9\.9\.9:/, fn ->
         Castle.remove("9.9.9")
       end
     end

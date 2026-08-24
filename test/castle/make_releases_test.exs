@@ -9,6 +9,7 @@ defmodule Castle.MakeReleasesTest do
 
   alias Castle.Commands
   alias Castle.DeploymentStub
+  alias Castle.FileReason
   alias Castle.ReleaseHandlerStub, as: Stub
 
   @moduletag :tmp_dir
@@ -34,8 +35,8 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases(rel_dir, handler, erts_less())
       assert message =~ "Cannot create #{Path.join(rel_dir, "RELEASES")}"
-      assert message =~ "the deployment and the emulator's root are different directories"
-      assert message =~ "cannot be upgraded by Castle"
+      assert message =~ "deployment root #{System.tmp_dir!()} differs from emulator root"
+      assert message =~ "Castle cannot upgrade this deployment"
       assert Stub.calls(:create_RELEASES) == []
       assert Stub.calls(:which_releases) == []
     end
@@ -49,7 +50,7 @@ defmodule Castle.MakeReleasesTest do
       File.write!(Path.join(rel_dir, "RELEASES"), "")
 
       assert {:error, message} = Commands.make_releases(rel_dir, Stub, erts_less())
-      assert message =~ "the deployment and the emulator's root are different directories"
+      assert message =~ "deployment root #{System.tmp_dir!()} differs from emulator root"
     end
 
     test "creates it from the release running as permanent", %{tmp_dir: dir} do
@@ -93,9 +94,17 @@ defmodule Castle.MakeReleasesTest do
       Stub.stub(:create_RELEASES, {:error, :eacces})
 
       assert {:error, message} = Commands.make_releases(rel_dir(dir), handler)
-      assert message =~ "Cannot create #{Path.join(dir, "releases/RELEASES")}"
-      assert message =~ "from #{Path.join(dir, "releases/0.1.0/sample.rel")}."
-      assert message =~ "eacces"
+      assert message =~ "RELEASES creation failed for #{Path.join(dir, "releases/RELEASES")}"
+      assert message =~ "from #{Path.join(dir, "releases/0.1.0/sample.rel")}:"
+      assert message =~ FileReason.format(:eacces)
+    end
+
+    test "keeps an unrecognised atom beside its formatted filesystem reason", %{tmp_dir: dir} do
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [], :permanent}])
+      Stub.stub(:create_RELEASES, {:error, :not_an_errno})
+
+      assert {:error, message} = Commands.make_releases(rel_dir(dir), handler)
+      assert message =~ FileReason.format(:not_an_errno)
     end
   end
 
@@ -121,9 +130,24 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
 
-      assert message =~ "cannot tell whether the deployment and the emulator's root"
-      assert message =~ "/deployment could not be read (eacces)"
-      refute message =~ "are different directories"
+      assert message =~ "could not verify that the deployment and emulator roots are the same"
+      assert message =~ "cannot inspect /deployment: #{FileReason.format(:eacces)}"
+      refute message =~ "differs from emulator root"
+      assert Stub.calls(:create_RELEASES) == []
+    end
+
+    test "an unrecognised stat reason keeps its atom identity" do
+      deployment = DeploymentStub.stub("/deployment", "/installation")
+
+      DeploymentStub.stub_stat(fn
+        "/deployment" -> {:error, :not_an_errno}
+        path -> File.stat(path)
+      end)
+
+      handler = Stub.stub(:which_releases, [{~c"sample", ~c"0.1.0", [~c"kernel"], :permanent}])
+
+      assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
+      assert message =~ "cannot inspect /deployment: #{FileReason.format(:not_an_errno)}"
       assert Stub.calls(:create_RELEASES) == []
     end
 
@@ -145,10 +169,10 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
 
-      assert message =~ "cannot tell whether the deployment and the emulator's root"
-      assert message =~ "/installation could not be read (eacces)"
-      refute message =~ "#{System.tmp_dir!()} could not be read"
-      refute message =~ "are different directories"
+      assert message =~ "could not verify that the deployment and emulator roots are the same"
+      assert message =~ "cannot inspect /installation: #{FileReason.format(:eacces)}"
+      refute message =~ "cannot inspect #{System.tmp_dir!()}"
+      refute message =~ "differs from emulator root"
       assert Stub.calls(:create_RELEASES) == []
     end
 
@@ -164,9 +188,9 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
 
-      assert message =~ "cannot tell whether the deployment and the emulator's root"
+      assert message =~ "could not verify that the deployment and emulator roots are the same"
       assert message =~ "reports no inode numbers"
-      refute message =~ "are different directories"
+      refute message =~ "differs from emulator root"
       assert Stub.calls(:create_RELEASES) == []
     end
 
@@ -187,9 +211,9 @@ defmodule Castle.MakeReleasesTest do
 
       assert {:error, message} = Commands.make_releases("/unused", handler, deployment)
 
-      assert message =~ "cannot tell whether the deployment and the emulator's root"
+      assert message =~ "could not verify that the deployment and emulator roots are the same"
       assert message =~ "reports no inode numbers"
-      refute message =~ "are different directories"
+      refute message =~ "differs from emulator root"
       assert Stub.calls(:create_RELEASES) == []
     end
 

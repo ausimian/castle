@@ -1,6 +1,8 @@
 defmodule Castle.Peer do
   @moduledoc false
 
+  alias Castle.FileReason
+
   # Materialises the configuration of the release being upgraded *to*, by
   # running that release's own `Config.Provider` pipeline in a temporary VM
   # booted from that release's own boot script and code.
@@ -468,7 +470,7 @@ defmodule Castle.Peer do
         {:error, "Cannot read #{path} as a release file. It holds #{inspect(terms)}."}
 
       {:error, reason} ->
-        {:error, "Cannot read #{path}. #{format_error(reason)}"}
+        {:error, "Cannot read #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -516,7 +518,7 @@ defmodule Castle.Peer do
         release_file(rel_vsn_dir, Enum.filter(entries, &String.ends_with?(&1, ".rel")))
 
       {:error, reason} ->
-        {:error, "Cannot list #{rel_vsn_dir}. #{format_error(reason)}"}
+        {:error, "Cannot list #{rel_vsn_dir}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -529,16 +531,17 @@ defmodule Castle.Peer do
   end
 
   defp release_file(rel_vsn_dir, names) do
-    case unpacked_copy(names, Path.basename(rel_vsn_dir)) do
+    vsn = Path.basename(rel_vsn_dir)
+
+    case unpacked_copy(names, vsn) do
       {:ok, name} ->
         {:ok, Path.join(rel_vsn_dir, name)}
 
       :none ->
         {:error,
-         "Found more than one release file in #{rel_vsn_dir} - #{Enum.join(names, ", ")}. An " <>
-           "unpacked version directory holds two, a release file and the copy unpacking " <>
-           "leaves beside it, and these are not that pair - so the emulator to evaluate its " <>
-           "configuration with is ambiguous."}
+         "Cannot determine the release file in #{rel_vsn_dir}: found " <>
+           "#{Enum.join(names, ", ")}. Expected one file or an unpacked " <>
+           "<name>.rel/<name>-#{vsn}.rel pair."}
     end
   end
 
@@ -640,13 +643,14 @@ defmodule Castle.Peer do
     end
   end
 
-  ## Writing a file that holds configuration
+  ## Private staging primitives
   #
-  # Every file this module creates holds a release's configuration - the base,
-  # and the scratch copy the providers are resolved into - so none of them may be
-  # readable by anyone the `sys.config` it came from or is about to become would
-  # not let read it. An operator who restricts that file has said something, and
-  # it has to hold for the copies too.
+  # The configuration path uses these for the base and scratch files, and the
+  # restart protocol uses them for its marker. The primitives enforce filesystem
+  # facts only; their callers say which lifecycle operation was interrupted and
+  # what had already changed. Configuration files must not become readable by
+  # anyone `sys.config` excludes, and the same owner-only staging also protects a
+  # marker from being replaced before publication.
   #
   # What protects them is the *directory* they are made in, and it has to be,
   # because OTP cannot create a file with a mode. `:file.open/2`'s modes say how
@@ -822,18 +826,14 @@ defmodule Castle.Peer do
     case File.ls(path) do
       {:ok, []} -> :ok
       {:ok, entries} -> {:error, occupied(path, entries)}
-      {:error, reason} -> {:error, "Cannot list #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot list #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp occupied(path, entries) do
-    "Cannot assemble configuration in #{path}. Castle had just created that " <>
-      "directory and written nothing to it, and it already holds " <>
-      "#{Enum.join(entries, ", ")} - so something else can write where this " <>
-      "release's configuration is about to be, and a name planted there is a name " <>
-      "the configuration could be written through. Nothing has been written and " <>
-      "the directory has been removed. Check the umask the release runs under: a " <>
-      "new directory has to be private to the account doing the install."
+    "Cannot use #{path}: newly created directory contains #{Enum.join(entries, ", ")}. " <>
+      "Castle removed it without writing to it. " <>
+      "Check that the release umask creates owner-only directories."
   end
 
   @doc false
@@ -866,7 +866,7 @@ defmodule Castle.Peer do
   def create_exclusive(path) do
     case File.open(path, [:write, :exclusive, :raw]) do
       {:ok, handle} -> {:ok, handle}
-      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot create #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -898,14 +898,14 @@ defmodule Castle.Peer do
   defp written(handle, path, bytes) do
     case :file.write(handle, bytes) do
       :ok -> :ok
-      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp closed(handle, path) do
     case File.close(handle) do
       :ok -> :ok
-      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -915,14 +915,14 @@ defmodule Castle.Peer do
     case File.ln(staging, path) do
       :ok -> :ok
       {:error, :eexist} -> :taken
-      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp carry_mode(from, to) do
     case File.stat(from) do
       {:ok, %File.Stat{mode: mode}} -> chmod(to, Bitwise.band(mode, 0o7777))
-      {:error, reason} -> {:error, "Cannot read #{from}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot read #{from}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -1082,15 +1082,15 @@ defmodule Castle.Peer do
 
   ## Files
 
-  # Whether a file holding configuration may be created here at all: nothing
-  # granted to group or other, so there is no path through this directory for
-  # anyone else to open what is inside it by. Checked on every creation rather
-  # than assumed of the working directory, because assuming it at the call sites
-  # is the mistake this whole arrangement exists to make impossible.
+  # Whether a private staging file may be created here at all: nothing granted to
+  # group or other, so there is no path through this directory for anyone else to
+  # open what is inside it by. Checked on every creation rather than assumed of
+  # the working directory, because assuming it at the call sites is the mistake
+  # this whole arrangement exists to make impossible.
   defp private_dir(path) do
     case File.stat(path) do
       {:ok, %File.Stat{mode: mode}} -> private_mode(path, Bitwise.band(mode, 0o7777))
-      {:error, reason} -> {:error, "Cannot read #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot read #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -1099,18 +1099,16 @@ defmodule Castle.Peer do
       :ok
     else
       {:error,
-       "Cannot write in #{path}, whose mode is 0#{Integer.to_string(mode, 8)}. A file holding " <>
-         "a release's configuration is only ever created in a directory Castle has made " <>
-         "owner-only, so that nothing can open it while it is being written. Castle chmods " <>
-         "that directory to 0700 as it creates it, and a wider mode than that means the " <>
-         "filesystem holding the release did not take it."}
+       "Cannot write in #{path}: directory mode " <>
+         "0#{Integer.to_string(mode, 8)} allows access beyond its owner. Castle requires " <>
+         "owner-only mode 0700; check the release filesystem and permissions."}
     end
   end
 
   defp mkdir(path) do
     case File.mkdir(path) do
       :ok -> :ok
-      {:error, reason} -> {:error, "Cannot create #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot create #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -1124,7 +1122,7 @@ defmodule Castle.Peer do
   defp read(path) do
     case File.read(path) do
       {:ok, contents} -> {:ok, contents}
-      {:error, reason} -> {:error, "Cannot read #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot read #{path}. #{FileReason.format(reason)}"}
     end
   end
 
@@ -1137,31 +1135,31 @@ defmodule Castle.Peer do
         {:error, "Cannot read #{path}: expected one configuration term, found #{length(terms)}."}
 
       {:error, reason} ->
-        {:error, "Cannot read #{path}. #{format_error(reason)}"}
+        {:error, "Cannot read #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp write(path, contents) do
     case File.write(path, contents) do
       :ok -> :ok
-      {:error, reason} -> {:error, "Cannot write #{path}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp chmod(path, mode) do
     case File.chmod(path, mode) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "Cannot set the mode of #{path}. #{format_error(reason)}"}
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Cannot set the mode of #{path}. #{FileReason.format(reason)}"}
     end
   end
 
   defp rename(source, destination) do
     case File.rename(source, destination) do
       :ok -> {:ok, []}
-      {:error, reason} -> {:error, "Cannot write #{destination}. #{format_error(reason)}"}
+      {:error, reason} -> {:error, "Cannot write #{destination}. #{FileReason.format(reason)}"}
     end
   end
-
-  defp format_error(reason) when is_atom(reason), do: :file.format_error(reason)
-  defp format_error(reason), do: inspect(reason)
 end

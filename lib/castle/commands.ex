@@ -8,7 +8,7 @@ defmodule Castle.Commands do
   # `write_private/2`, `publish/2` - because those start nothing, and because
   # what they guarantee is exactly what arming a marker needs. Do not inject
   # them: a stub would prove nothing, and the guarantee is the point.
-  alias Castle.Peer
+  alias Castle.{FileReason, Peer}
 
   # A filesystem that reports no inode numbers has not said the two directories
   # differ; it has said nothing, which is a different answer.
@@ -36,7 +36,7 @@ defmodule Castle.Commands do
   # boots X with OTP's records calling it `unpacked`. So the pair has to belong
   # to one *attempt*, which is `@provisional_marker` being cleared before the
   # marker is armed, the marker being published exclusively, and the marker
-  # naming the attempt that wrote it. See `unclaimed/3` and `arm/4`.
+  # naming the attempt that wrote it. See `unclaimed/4` and `arm/4`.
   #
   # Those three are about one caller's sequence, and they are not on their own
   # enough either: two callers can run the sequence at once, and then the loser
@@ -133,7 +133,9 @@ defmodule Castle.Commands do
             {:ok, []}
 
           {:error, reason} ->
-            {:error, "Cannot create #{releases_file} from #{relfile}. #{inspect(reason)}"}
+            {:error,
+             "RELEASES creation failed for #{releases_file} from #{relfile}: " <>
+               FileReason.format(reason)}
         end
 
       [] ->
@@ -219,7 +221,8 @@ defmodule Castle.Commands do
   # is no way to tell them apart from here, and no reason to think they exhaust
   # the possibilities. An earlier version of this message asserted the first,
   # and its replacement asserted the second as the only alternative; both were
-  # wrong in the same way, which is why this one asserts no cause at all.
+  # wrong in the same way, which is why this one keeps its causes explicitly
+  # non-exhaustive.
   #
   # It also no longer claims that *everything* `:release_handler` touches
   # resolves under the emulator's root, because the release records alone do
@@ -236,20 +239,12 @@ defmodule Castle.Commands do
   # root. Saying so is the difference between a refusal an operator can act on
   # and one that sends them to rebuild something that was not the problem.
   defp refused_root(refusal, release_root, root_dir) do
-    "#{refusal}: the deployment and the emulator's root are different " <>
-      "directories - the deployment is #{release_root} and the emulator runs " <>
-      "in #{root_dir}. That is where :release_handler extracts applications, " <>
-      "resolves every lib/<app>-<vsn> it reads, and deletes erts-<erts_vsn> from, " <>
-      "because those paths are anchored to the emulator's root rather than to " <>
-      "the deployment. Pointing Castle at the deployment instead would only " <>
-      "move the release records away from the applications they describe. " <>
-      "Relocating the records with RELDIR or the sasl releases_dir parameter " <>
-      "does not help either, for the same reason: it moves the bookkeeping and " <>
-      "leaves the applications where they were. Common causes are building the " <>
-      "release with include_erts: false, which ships no emulator of its own, " <>
-      "and an ERL_ROOTDIR in the environment, which the release's erl honours " <>
-      "ahead of its own location; there may be others. This deployment cannot " <>
-      "be upgraded by Castle until the two directories are the same one."
+    "#{refusal}: deployment root #{release_root} differs from emulator root #{root_dir}. " <>
+      ":release_handler resolves applications under the emulator root, so Castle cannot " <>
+      "upgrade this deployment. Make the roots match before retrying. Common causes include " <>
+      "include_erts: false, which uses a shared emulator, and ERL_ROOTDIR, which overrides " <>
+      "its root; other causes are possible. Changing RELDIR or sasl releases_dir only moves " <>
+      "release records."
   end
 
   # The refusal for a comparison that could not be made. It says what was not
@@ -261,14 +256,8 @@ defmodule Castle.Commands do
   # the failure this guard exists to prevent, and it is the one of the two that
   # cannot be undone by looking again.
   defp refused_unknown(refusal, why) do
-    "#{refusal}: cannot tell whether the deployment and the emulator's root are " <>
-      "the same directory - #{why}. They are not the same path, so the question " <>
-      "was put to the filesystem, and it did not answer. Castle refuses rather " <>
-      "than assume: if they are two directories then :release_handler resolves " <>
-      "the applications under the emulator's root and not under the deployment, " <>
-      "and release records written on the assumption that they are one would " <>
-      "describe applications somewhere else. Resolve what stopped the lookup " <>
-      "and ask again."
+    "#{refusal}: could not verify that the deployment and emulator roots are the same: " <>
+      "#{why}. Fix the filesystem lookup and retry."
   end
 
   # Whether two paths name the same directory: `:same`, `:different`, or
@@ -303,9 +292,14 @@ defmodule Castle.Commands do
 
   defp identify(one, other, deployment) do
     case {deployment.stat(one), deployment.stat(other)} do
-      {{:ok, one_stat}, {:ok, other_stat}} -> by_inode(one_stat, other_stat)
-      {{:error, reason}, _} -> {:indeterminate, "#{one} could not be read (#{reason})"}
-      {_, {:error, reason}} -> {:indeterminate, "#{other} could not be read (#{reason})"}
+      {{:ok, one_stat}, {:ok, other_stat}} ->
+        by_inode(one_stat, other_stat)
+
+      {{:error, reason}, _} ->
+        {:indeterminate, "cannot inspect #{one}: #{FileReason.format(reason)}"}
+
+      {_, {:error, reason}} ->
+        {:indeterminate, "cannot inspect #{other}: #{FileReason.format(reason)}"}
     end
   end
 
@@ -399,25 +393,12 @@ defmodule Castle.Commands do
 
       {vsn, []} ->
         {:error,
-         "#{refusal}: #{vsn} is running from a release record OTP built from the boot " <>
-           "script, which names no applications - releases/RELEASES was missing, or could " <>
-           "not be read, when the system booted. An upgrade from that record reports " <>
-           "success and leaves any application whose version changed, but whose code the " <>
-           "upgrade does not load, running its old code. Creating the file now would not " <>
-           "change the record this node works from, so the system has to be restarted. " <>
-           "Before restarting, make sure the RELEASES file :release_handler reads is " <>
-           "either absent or one that :release_handler itself accepts - being present, " <>
-           "being readable and parsing as Erlang terms are each necessary and none of " <>
-           "them sufficient, so the test that matters is whether the handler takes it, " <>
-           "not any one property of the file. The release creates that file only when it " <>
-           "is absent, so anything left in place that the handler will not accept is " <>
-           "stepped over on every start and the system comes back on the same " <>
-           "synthesised record. Absent, or accepted, is what a restart needs. That file " <>
-           "is " <>
-           "releases/RELEASES under the release root unless RELDIR or the sasl " <>
-           "releases_dir parameter points elsewhere; where one of those does, the release " <>
-           "creates a file at the root that the handler will not read, so the one it does " <>
-           "read has to be put there by hand."}
+         "#{refusal}: #{vsn} is running from a synthesised release record with no " <>
+           "applications. Upgrading from this record can leave changed applications on old " <>
+           "code. At the default <release-root>/releases/RELEASES path, leave the file " <>
+           "absent or ensure :release_handler accepts it; being present, readable or " <>
+           "parseable is not sufficient. If RELDIR or sasl releases_dir points elsewhere, " <>
+           "place an accepted RELEASES file there. Restart, then retry."}
 
       nil ->
         {:error, "#{refusal}: no release is running."}
@@ -466,7 +447,7 @@ defmodule Castle.Commands do
     with :ok <- ensure_own_erts("Cannot configure #{vsn}", deployment) do
       case File.ls(rel_vsn_dir) do
         {:ok, [_ | _]} ->
-          peer.materialise(rel_vsn_dir)
+          peer.materialise(rel_vsn_dir) |> configuration_result(vsn)
 
         nothing ->
           {:error,
@@ -478,7 +459,17 @@ defmodule Castle.Commands do
 
   defp describe({:ok, []}), do: "is empty"
   defp describe({:error, :enoent}), do: "does not exist"
-  defp describe({:error, reason}), do: "cannot be read (#{:file.format_error(reason)})"
+  defp describe({:error, reason}), do: "cannot be read (#{FileReason.format(reason)})"
+
+  defp configuration_result({:error, message}, vsn),
+    do: {:error, configuration_error(vsn, message)}
+
+  defp configuration_result(result, _vsn), do: result
+
+  defp configuration_error(vsn, message) do
+    prefix = "Cannot configure #{vsn}:"
+    if String.starts_with?(message, prefix), do: message, else: "#{prefix} #{message}"
+  end
 
   @doc """
   Unpacks the named release tarball.
@@ -515,7 +506,7 @@ defmodule Castle.Commands do
          :ok <- ensure_upgradable("Cannot unpack #{name}", handler) do
       case handler.unpack_release(to_charlist(name)) do
         {:ok, vsn} -> {:ok, ["Unpacked #{vsn} ok"]}
-        {:error, reason} -> {:error, "Failed to unpack #{name}. #{inspect(reason)}"}
+        {:error, reason} -> {:error, "Unpack failed for #{name}: #{inspect(reason)}"}
       end
     end
   end
@@ -551,7 +542,7 @@ defmodule Castle.Commands do
   it from `code:root_dir()`, and a test needs somewhere to look.
 
   A transition that reboots the emulator is refused, with nothing touched, while
-  another such install is still pending - see `unclaimed/3`. One at a time is the
+  another such install is still pending - see `unclaimed/4`. One at a time is the
   price of the marker being evidence about a particular install rather than about
   a version.
 
@@ -563,15 +554,15 @@ defmodule Castle.Commands do
   to be composed in front of it.** `Castle.install/1` called
   `materialise/3` and then this, so two callers both materialised before either
   reached the lock. That is not the harmless idempotent work it was argued to be:
-  materialisation *ends in a rename onto the target's `sys.config`*, which is a
-  replace by design, because that is the file `:release_handler` reads and so the
-  file the resolved configuration has to land in. The staging refuses rather than
-  replaces and `sys.config.pristine` refuses rather than replaces; the last step
-  does neither, and cannot. So the loser's providers - evaluated in a VM of their
-  own, over whatever environment that caller had - overwrote the configuration
-  the winner's provisional release was about to boot, and the loser was then
-  refused for the winner's marker. A refused install decided what a successful
-  one booted.
+  for a release with providers, materialisation *can end in a rename onto the
+  target's `sys.config`*. That is a replace by design, because it is the file
+  `:release_handler` reads and where the resolved configuration has to land. The
+  staging refuses rather than replaces and `sys.config.pristine` refuses rather
+  than replaces; the last step does neither, and cannot. So the loser's providers
+  - evaluated in a VM of their own, over whatever environment that caller had -
+  overwrote the configuration the winner's provisional release was about to boot,
+  and the loser was then refused for the winner's marker. A provider-less release
+  may change no file, but the operation must be ordered for the releases that do.
 
   It is inside the region and *after* the refusals, which is the half that
   matters and the half a "move it inside the lock" would have missed: a caller
@@ -614,7 +605,7 @@ defmodule Castle.Commands do
   # nothing across processes, and `release_handler` serialising `install_release/1`
   # does not close that.** Its serialisation is *downstream* of the whole
   # protocol: two callers can both read the running release, both classify it,
-  # and both pass `unclaimed/3`, because all of that happens before either of
+  # and both pass `unclaimed/4`, because all of that happens before either of
   # them publishes anything. Refusing before clearing then buys nothing. The
   # loser's `clear_provisional/3` runs after the winner's `install_release/1`
   # has written `new_start_erl.data`, so it deletes the winner's live evidence;
@@ -641,19 +632,19 @@ defmodule Castle.Commands do
   # that it writes only into the target's own version directory, that its
   # primitives refuse rather than replace, and that holding this lock across a
   # peer VM's boot would put every install behind another's configuration step.
-  # The first two are wrong about the step that matters - the *rename onto
-  # `sys.config`* replaces, by design and necessarily - and the third is a
-  # throughput argument about concurrent installs, which this protocol refuses
-  # anyway. An install that waits is slower; an install whose configuration is
-  # somebody else's is wrong.
+  # The first two are wrong when providers produce a resolved configuration - the
+  # *rename onto `sys.config`* replaces, by design and necessarily - and the third
+  # is a throughput argument about concurrent installs, which this protocol
+  # refuses anyway. An install that waits is slower; an install whose
+  # configuration is somebody else's is wrong.
   #
   # The ERTS guard is now the only part deliberately left outside: it reads two
   # directories and can refuse without touching anything, and a refusal has no
   # reason to queue behind a reboot.
   #
-  # Nothing that writes a `sys.config` is outside it any more: `commit/5`
-  # materialises inside this same region too, so the two renames onto one
-  # `sys.config` are ordered wherever they meet. What remains outside is a caller
+  # Nothing that may write a `sys.config` is outside it any more: `commit/5`
+  # materialises inside this same region too, so competing renames onto one
+  # `sys.config` are ordered wherever they occur. What remains outside is a caller
   # in a VM of its own, which no lock over `[node()]` can reach - the filesystem
   # half of the protocol is what stands there, and it is written down as a
   # boundary in AGENTS.md.
@@ -714,7 +705,7 @@ defmodule Castle.Commands do
   # refuse has been asked.
   #
   #   1. `refuse_synthesised/2` - a fact about this node's release record.
-  #   2. `unclaimed/3` - a restart install is already pending. This is step 1 of
+  #   2. `unclaimed/4` - a restart install is already pending. This is step 1 of
   #      what used to be `arm_restart/4`, pulled in front of the materialisation
   #      *because* of it: a caller that is going to be refused here must not have
   #      replaced the target's `sys.config` on its way to being told, or the
@@ -739,7 +730,7 @@ defmodule Castle.Commands do
     restart? = restart_planned?(vsn, rel_dir, running)
 
     with :ok <- refuse_synthesised(refusal, running),
-         :ok <- unclaimed(restart?, rel_dir, refusal),
+         :ok <- unclaimed(restart?, rel_dir, refusal, deployment),
          {:ok, configured} <- materialise(Path.join(rel_dir, vsn), peer, deployment),
          {:ok, attempt} <- arm(restart?, vsn, rel_dir, refusal),
          {:ok, lines} <- installed(vsn, attempt, rel_dir, handler, deployment) do
@@ -815,16 +806,20 @@ defmodule Castle.Commands do
          ]}
 
       {:error, reason} ->
-        failed(rel_dir, attempt, deployment, "Install of #{vsn} failed. #{inspect(reason)}")
+        failed(rel_dir, attempt, deployment, install_failure(vsn, inspect(reason)))
 
       other ->
         failed(
           rel_dir,
           attempt,
           deployment,
-          "Install of #{vsn} returned an unexpected result. #{inspect(other)}"
+          install_failure(vsn, "unexpected result #{inspect(other)}")
         )
     end
+  end
+
+  defp install_failure(vsn, reason) do
+    "Install failed for #{vsn}: #{reason}. Castle completed the target configuration step."
   end
 
   # A failure `install_release/1` reported. The marker goes, and if it cannot the
@@ -833,8 +828,12 @@ defmodule Castle.Commands do
   # fact about what the next start of the system will now do.
   defp failed(rel_dir, attempt, deployment, message) do
     case disarm(attempt, rel_dir, deployment) do
-      :ok -> {:error, message}
-      {:stranded, why} -> {:error, "#{message} #{stranded(rel_dir, why)}"}
+      :ok ->
+        {:error,
+         "#{message} Run bin/castle releases to inspect the install state before retrying."}
+
+      {:stranded, why} ->
+        {:error, "#{message} #{stranded(why)}"}
     end
   end
 
@@ -855,9 +854,10 @@ defmodule Castle.Commands do
 
       {:stranded, why} ->
         {:error,
-         "Install of #{vsn} #{describe_exit(kind)}, and the restart marker it " <>
-           "armed could not be settled. #{stranded(rel_dir, why)} The failure " <>
-           "itself: #{Exception.format(kind, reason, stack)}"}
+         "Install failed for #{vsn}: :release_handler #{describe_exit(kind)} before Castle " <>
+           "could clear its restart marker. Castle completed the target configuration step, " <>
+           "and the install state may have changed. #{stranded(why)} Original failure: " <>
+           "#{Exception.format(kind, reason, stack)}"}
     end
   end
 
@@ -977,8 +977,10 @@ defmodule Castle.Commands do
   # the version whose `sys.config` this caller would otherwise have replaced on
   # its way to the refusal. Being refused and having decided the winner's
   # configuration are what this ordering keeps apart.
-  defp unclaimed(false, _rel_dir, _refusal), do: :ok
-  defp unclaimed(true, rel_dir, refusal), do: unclaimed(rel_dir, refusal)
+  defp unclaimed(false, _rel_dir, _refusal, _deployment), do: :ok
+
+  defp unclaimed(true, rel_dir, refusal, deployment),
+    do: unclaimed(rel_dir, refusal, deployment)
 
   # Steps 4a and 4b, run together because nothing may come between them: the
   # marker has to be in place before OTP writes its own and reboots, and it is
@@ -1002,14 +1004,15 @@ defmodule Castle.Commands do
   #      write, and a death in that window leaves an empty marker that blocks
   #      every later attempt.
   #
-  # The refusal in `unclaimed/3` comes before a) and must stay there. Reversed, an
+  # The refusal in `unclaimed/4` comes before a) and must stay there. Reversed, an
   # attempt would refuse *after* clearing OTP's file, which is how an install that
   # has already been asked for loses its reboot silently.
   #
   # This runs with no other caller in the install at all - `serialised/2` - and
-  # that is what the `unclaimed/3` note rests on. Neither replaces the other: the
-  # serialisation is why the marker means a finished attempt, and the order of
-  # these steps is why a refusal for any *other* reason still changes nothing.
+  # that is what the `unclaimed/4` note rests on. Neither replaces the other: the
+  # serialisation is why the marker means a finished attempt. A refusal here can
+  # follow configuration materialisation, unlike `unclaimed/4`, so the two
+  # pending-marker messages report those states separately.
   #
   # A failure at either step refuses the install rather than going ahead: the
   # reboot would come back on whichever version `releases/start_erl.data` names,
@@ -1020,8 +1023,8 @@ defmodule Castle.Commands do
   defp arm(true, vsn, rel_dir, refusal) do
     attempt = attempt()
 
-    with :ok <- clear_provisional(rel_dir, vsn, refusal),
-         :ok <- publish_marker(rel_dir, vsn, attempt, refusal) do
+    with {:ok, cleared} <- clear_provisional(rel_dir, vsn, refusal),
+         :ok <- publish_marker(rel_dir, vsn, attempt, refusal, cleared) do
       {:ok, attempt}
     end
   end
@@ -1048,30 +1051,42 @@ defmodule Castle.Commands do
     "#{System.pid()}-#{System.system_time(:nanosecond)}-#{serial}"
   end
 
-  # Step 1. `lstat` rather than `File.exists?/1`, because the three answers want
-  # three different things said: a regular file is a pending attempt and names
-  # its version, anything else is a name in use by something that is not a
-  # marker, and a lookup that failed is neither and says so.
-  defp unclaimed(rel_dir, refusal) do
+  # Step 1. `lstat` rather than `File.exists?/1`, because its four answers want
+  # four different things said: absence is free, a regular file is a pending
+  # attempt and names its version, anything else occupies the marker path, and a
+  # failed inspection establishes none of those. The call goes through the
+  # deployment seam because the last answer cannot be arranged reliably with a
+  # permission fixture, and its lifecycle claim - no peer call yet - needs a
+  # deterministic test.
+  defp unclaimed(rel_dir, refusal, deployment) do
     marker = Path.join(rel_dir, @restart_marker)
 
-    case File.lstat(marker) do
-      {:error, :enoent} -> :ok
-      {:ok, %File.Stat{type: :regular}} -> {:error, pending(marker, refusal)}
-      {:ok, %File.Stat{type: type}} -> {:error, occupied(marker, type, refusal)}
-      {:error, reason} -> {:error, unarmed(marker, reason, refusal)}
+    case deployment.lstat(marker) do
+      {:error, :enoent} ->
+        :ok
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, pending_before_configuration(marker, refusal)}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, occupied(marker, type, refusal)}
+
+      {:error, reason} ->
+        {:error, unarmed_before_configuration(marker, reason, refusal)}
     end
   end
 
   # Step 2. A file that is not there is the ordinary case and not an error; one
   # that will not go is refused, because going on would leave this attempt's
-  # marker pairable with an earlier attempt's file.
+  # marker pairable with an earlier attempt's file. The success result records
+  # only what this removal observed. It changes no release decision; it lets a
+  # later marker-race refusal distinguish a removed file from one already absent.
   defp clear_provisional(rel_dir, vsn, refusal) do
     provisional = Path.join(rel_dir, @provisional_marker)
 
     case File.rm(provisional) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
+      :ok -> {:ok, :removed}
+      {:error, :enoent} -> {:ok, :absent}
       {:error, reason} -> {:error, stale(provisional, vsn, reason, refusal)}
     end
   end
@@ -1080,17 +1095,17 @@ defmodule Castle.Commands do
   # one this call made - the rule `Castle.Peer` follows, and for the reason it
   # gives: staging that never got published cannot be told from another install's
   # work in progress, so nothing goes looking for it.
-  defp publish_marker(rel_dir, vsn, attempt, refusal) do
+  defp publish_marker(rel_dir, vsn, attempt, refusal, cleared) do
     marker = Path.join(rel_dir, @restart_marker)
 
     case Peer.work_dir(rel_dir) do
       {:ok, work} ->
         outcome = staged(Path.join(work, @restart_marker), marker, "#{vsn}\n#{attempt}\n")
         File.rm_rf(work)
-        armed(outcome, marker, refusal)
+        armed(outcome, marker, refusal, cleared)
 
       {:error, reason} ->
-        {:error, unarmed(marker, reason, refusal)}
+        {:error, unarmed_after_configuration(marker, reason, refusal)}
     end
   end
 
@@ -1098,9 +1113,13 @@ defmodule Castle.Commands do
     with :ok <- Peer.write_private(staging, bytes), do: Peer.publish(staging, marker)
   end
 
-  defp armed(:ok, _marker, _refusal), do: :ok
-  defp armed(:taken, marker, refusal), do: {:error, pending(marker, refusal)}
-  defp armed({:error, reason}, marker, refusal), do: {:error, unarmed(marker, reason, refusal)}
+  defp armed(:ok, _marker, _refusal, _cleared), do: :ok
+
+  defp armed(:taken, marker, refusal, cleared),
+    do: {:error, pending_after_configuration(marker, refusal, cleared)}
+
+  defp armed({:error, reason}, marker, refusal, _cleared),
+    do: {:error, unarmed_after_configuration(marker, reason, refusal)}
 
   # Cleared on every path out of a failed install - including the ones that do not
   # return, which is what `installed/5` catches for - because a marker left armed
@@ -1186,7 +1205,8 @@ defmodule Castle.Commands do
 
   ## What a marker that could not be settled says
 
-  # Why the marker is still there, and what that now means for the next start.
+  # Why the marker is still there, what that means for the next start, and the
+  # remedy that is safe for this particular failure.
   #
   # The second half is the part an operator cannot work out for themselves, and it
   # is the reason this is a failure rather than a log line: a marker at that path
@@ -1197,50 +1217,70 @@ defmodule Castle.Commands do
   # `:release_handler`'s own records calling it `unpacked`. That is precisely the
   # state the marker protocol exists to make unreachable.
   #
-  # The remedy is a removal, and it is named as one, because it is a thing the
-  # operator can do and Castle has just demonstrated it cannot: whatever stopped
-  # it - a mode, a read-only mount, a name that is no longer a regular file - is
-  # what there is to resolve.
-  defp stranded(rel_dir, why) do
-    "#{why} #{Path.join(rel_dir, @restart_marker)} is what tells the launcher to " <>
-      "boot a particular version on the next start, and #{@provisional_marker} - " <>
-      "which :release_handler writes before the reboot and never removes - may " <>
-      "already be beside it. Where it is, the two agree and the next ordinary " <>
-      "start of this system will boot the version this install did not finish, " <>
-      "which the release records will call unpacked. Remove the marker before " <>
-      "restarting this system, or do not restart it until that has been dealt " <>
-      "with. bin/castle releases will say where the system got to."
-  end
+  # The remedies differ. A marker proved to be this attempt's may be removed once
+  # the filesystem problem is fixed. An unreadable marker must not be removed on a
+  # guess, because it may belong to a later install whose reboot is still owed.
+  defp stranded(why), do: "#{why} Run bin/castle releases to inspect the current state."
 
   defp unverifiable(marker, reason) do
-    "The restart marker this install armed cannot be accounted for: #{marker} " <>
-      "could not be read (#{:file.format_error(reason)}), so Castle cannot tell " <>
-      "whether it is still the one this attempt published - and it will not remove " <>
-      "a marker that may be a later attempt's, because that would take away a " <>
-      "reboot that is still owed."
+    "Cannot read restart marker #{marker}: #{FileReason.format(reason)}. It may pair with " <>
+      "#{@provisional_marker} and affect the next start. Do not restart or remove it until " <>
+      "access is restored and its owning install is identified."
   end
 
   defp unremovable(marker, reason) do
-    "The restart marker this install armed is still there: #{marker} is this " <>
-      "attempt's and could not be removed (#{:file.format_error(reason)})."
+    "Cannot remove restart marker #{marker}: #{FileReason.format(reason)}. It may pair with " <>
+      "#{@provisional_marker} and make the next start boot a version whose install did not " <>
+      "finish while release records still list it as unpacked. Fix the filesystem problem " <>
+      "and remove this marker before restarting."
   end
 
   ## What each way of failing to arm says
 
-  defp pending(marker, refusal) do
-    "#{refusal}: #{marker} is already there, so a restart install is pending - " <>
-      "#{armed_version(marker)}. Two of them cannot share that file: the second " <>
-      "would overwrite the first, and whichever marker survived would say nothing " <>
-      "about which install reached :release_handler. Nothing has been changed. The " <>
-      "marker is consumed by the next start of this deployment, so a restart clears " <>
-      "it; if no install is in flight and the system is not going to be restarted, " <>
-      "remove that file."
+  # `unclaimed/4` finds the first marker before this attempt has touched
+  # configuration or OTP's restart selection. The marker alone does not prove
+  # whether a restart selection exists. `publish/2` finds the second after another
+  # VM wins the marker race, but only after this attempt has completed the target
+  # configuration step and either removed OTP's file or found it absent. That step
+  # need not change a file: a release without providers can complete it as a no-op.
+  # Carry the observed removal outcome into the diagnostic without changing the
+  # arming protocol.
+  defp pending_before_configuration(marker, refusal) do
+    provisional = Path.join(Path.dirname(marker), @provisional_marker)
+
+    "#{refusal}: restart marker #{marker} already exists (#{armed_version(marker)}). " <>
+      "The marker may affect a restart, but does not show whether a restart selection " <>
+      "exists. Castle did not run the target configuration step. Inspect #{marker} and " <>
+      "#{provisional}, then run bin/castle releases before restarting. Removing #{marker} " <>
+      "may cancel another install's reboot."
+  end
+
+  defp pending_after_configuration(marker, refusal, cleared) do
+    provisional = Path.join(Path.dirname(marker), @provisional_marker)
+
+    "#{refusal}: restart marker #{marker} already exists (#{armed_version(marker)}). " <>
+      "Castle completed the target configuration step; no release was installed. " <>
+      cleared_provisional(cleared, provisional)
+  end
+
+  defp cleared_provisional(:removed, provisional) do
+    "Castle removed #{provisional} before detecting the marker race, but cannot identify " <>
+      "which install wrote it. Run bin/castle releases before choosing whether to restart " <>
+      "or retry the competing install."
+  end
+
+  defp cleared_provisional(:absent, provisional) do
+    marker = Path.join(Path.dirname(provisional), @restart_marker)
+
+    "#{provisional} was already absent. The marker may affect the next restart. Inspect " <>
+      "#{marker} and #{provisional}, then run bin/castle releases before restarting. " <>
+      "Removing #{marker} may cancel another install's reboot."
   end
 
   defp armed_version(marker) do
     case File.read(marker) do
       {:ok, contents} -> named(contents |> String.split("\n") |> hd())
-      {:error, reason} -> "it cannot be read (#{:file.format_error(reason)})"
+      {:error, reason} -> "it cannot be read (#{FileReason.format(reason)})"
     end
   end
 
@@ -1251,13 +1291,8 @@ defmodule Castle.Commands do
   defp named(vsn), do: "it names #{vsn}"
 
   defp occupied(marker, type, refusal) do
-    "#{refusal}: #{marker} is where Castle records that an upgrade asked for a " <>
-      "reboot, and there is already #{describe_type(type)} at that path. Castle " <>
-      "will not write through it or replace it, and there is nowhere else it can " <>
-      "arm the install - that path is what the launcher reads on the next start. " <>
-      "The upgrade did not happen and nothing was made permanent, but the target's " <>
-      "configuration has already been expanded: that is the step before this one. " <>
-      "Move whatever is there out of the way."
+    "#{refusal}: restart marker path #{marker} contains #{describe_type(type)}. Move it, then " <>
+      "retry. Castle did not change configuration."
   end
 
   # Four of `File.lstat/1`'s five types reach here - `:regular` is the pending
@@ -1273,25 +1308,30 @@ defmodule Castle.Commands do
   defp describe_type(other), do: "a #{other}"
 
   defp stale(provisional, vsn, reason, refusal) do
-    "#{refusal}: the upgrade to #{vsn} restarts the emulator, and #{provisional} - " <>
-      "which :release_handler writes before the reboot and never removes - could not " <>
-      "be cleared first (#{:file.format_error(reason)}). It has to be, because one " <>
-      "left by an earlier attempt would pair with the marker this install is about " <>
-      "to arm and tell the launcher to boot a version that was never installed. " <>
-      "The upgrade did not happen and nothing was made permanent, but #{vsn}'s " <>
-      "configuration has already been expanded: that is the step before this one."
+    "#{refusal}: cannot clear stale restart data #{provisional}: " <>
+      "#{FileReason.format(reason)}. Leaving it could make the launcher boot a version " <>
+      "that was not installed. Remove it and retry. The upgrade did not run, but Castle " <>
+      "completed #{vsn}'s configuration step."
   end
 
-  defp unarmed(marker, reason, refusal) do
-    "#{refusal}: the upgrade restarts the emulator, and #{marker} - which is what " <>
-      "tells the launcher which version to boot when the system comes back - could " <>
-      "not be armed: #{detail(reason)}. Without it the restart would come back on " <>
-      "the version releases/start_erl.data names, losing the upgrade."
+  # The first path only inspected the name; the second tried to prepare or publish
+  # the marker after the configuration step completed. Completion does not imply
+  # that files changed: provider-less releases may make this step a no-op.
+  defp unarmed_before_configuration(marker, reason, refusal) do
+    "#{refusal}: cannot inspect restart marker #{marker}: #{detail(reason)}. Castle did not " <>
+      "change configuration. Fix the path or access, then retry."
+  end
+
+  defp unarmed_after_configuration(marker, reason, refusal) do
+    "#{refusal}: cannot create restart marker #{marker}: #{detail(reason)}. Without it, " <>
+      "the restart would return to the version in releases/start_erl.data. Castle " <>
+      "completed the target configuration step; no release was installed. Fix the path, " <>
+      "then retry."
   end
 
   # A `:file` reason from the `lstat`, or a message from one of the primitives in
   # `Castle.Peer`, which have already said which path and why.
-  defp detail(reason) when is_atom(reason), do: to_string(:file.format_error(reason))
+  defp detail(reason) when is_atom(reason), do: FileReason.format(reason)
   defp detail(message) when is_binary(message), do: String.trim_trailing(message, ".")
 
   @doc """
@@ -1426,8 +1466,8 @@ defmodule Castle.Commands do
   end
 
   # Materialising and committing under the *same* lock an install takes, and for
-  # the reason install takes it: both rename a `sys.config` into the version
-  # directory, and whichever renames last decides what the version boots.
+  # the reason install takes it: both operations can participate in a rename of
+  # `sys.config`, and whichever rename happens last decides what the version boots.
   #
   # This composed at the boundary until it was found to be racy. A duplicate
   # install of the version being committed could materialise between the two
@@ -1443,11 +1483,21 @@ defmodule Castle.Commands do
   # `trans` releases well before the node goes down - the lock is never held
   # across a restart. `bin/castle install` then polls `Castle.running/1` through
   # separate rpcs, none of which takes this lock at all.
+  #
+  # A returned `make_permanent/1` error is therefore not a preflight refusal. The
+  # target configuration step has completed, but that need not mean a file was
+  # changed: a provider-less release can complete it as a no-op. The message
+  # reports the step, not a filesystem effect it cannot prove.
   defp commit_materialised(vsn, rel_dir, handler, peer, deployment) do
     with {:ok, _} <- materialise(Path.join(rel_dir, vsn), peer, deployment) do
       case handler.make_permanent(to_charlist(vsn)) do
-        :ok -> {:ok, ["Committed #{vsn}. System restarts will now boot into this version."]}
-        {:error, reason} -> {:error, "Commit of #{vsn} failed. #{inspect(reason)}"}
+        :ok ->
+          {:ok, ["Committed #{vsn}. System restarts will now boot into this version."]}
+
+        {:error, reason} ->
+          {:error,
+           "Commit failed for #{vsn}: #{inspect(reason)}. Castle completed the target " <>
+             "configuration step but did not make it permanent."}
       end
     end
   end
@@ -1467,7 +1517,7 @@ defmodule Castle.Commands do
     with :ok <- ensure_own_erts("Cannot remove #{vsn}", deployment) do
       case handler.remove_release(to_charlist(vsn)) do
         :ok -> {:ok, ["Removed #{vsn}."]}
-        {:error, reason} -> {:error, "Removal of #{vsn} failed. #{inspect(reason)}"}
+        {:error, reason} -> {:error, "Removal failed for #{vsn}: #{inspect(reason)}"}
       end
     end
   end

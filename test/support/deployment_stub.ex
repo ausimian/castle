@@ -6,10 +6,11 @@ defmodule Castle.DeploymentStub do
   # and the guard is inert - which is the property that makes it safe, and also
   # the reason a refusal cannot be observed without substituting its input.
   #
-  # It answers the two facts and nothing else: the comparison, the path
-  # normalisation and the message are `Castle.Commands`', and they run for real
-  # against whatever this returns. Replies live in the calling process's
-  # dictionary, like `Castle.ReleaseHandlerStub`, and for the same reason.
+  # It answers the deployment facts and the filesystem outcomes whose failing
+  # forms a fixture cannot produce reliably. The comparison, classification and
+  # messages are `Castle.Commands`', and they run for real against whatever this
+  # returns. Replies live in the calling process's dictionary, like
+  # `Castle.ReleaseHandlerStub`, and for the same reason.
 
   @doc """
   Registers the pair of roots, and returns this module so that it can be passed
@@ -32,6 +33,15 @@ defmodule Castle.DeploymentStub do
   def stub_stat(reply), do: put(:stat, reply)
 
   @doc """
+  Registers the restart-marker path inspection result.
+
+  Unregistered, `lstat/1` calls the filesystem. A registered failure lets a test
+  prove that an install which cannot inspect the marker is refused before target
+  configuration is re-resolved.
+  """
+  def stub_lstat(reply), do: put(:lstat, reply)
+
+  @doc """
   Registers what the filesystem will say when the restart marker is read, or when
   it is removed.
 
@@ -52,6 +62,7 @@ defmodule Castle.DeploymentStub do
   def root_dir, do: fetch(:root_dir)
 
   def stat(path), do: filesystem(:stat, path, &File.stat/1)
+  def lstat(path), do: filesystem(:lstat, path, &File.lstat/1)
   def read(path), do: filesystem(:read, path, &File.read/1)
   def rm(path), do: filesystem(:rm, path, &File.rm/1)
 

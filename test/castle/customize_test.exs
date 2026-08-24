@@ -121,7 +121,8 @@ defmodule Castle.CustomizeTest do
 
       # And the conditional is present rather than merely the claims being gone,
       # so a message that dropped the consequence entirely fails too.
-      assert message =~ "Unless a step of your own packs one"
+      assert message =~ "No change is needed if another step creates the archive"
+      assert message =~ "A deployment used only as an upgrade base needs no tarball of its own"
     end
 
     test "says nothing when the list has one" do

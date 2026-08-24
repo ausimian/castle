@@ -9,19 +9,20 @@ defmodule Castle.Deployment do
   # the real rule over substituted inputs, the way the release-record check
   # exercises the real rule over a substituted `which_releases/0`.
   #
-  # Two roots, for the ERTS guard, and three filesystem operations: the `stat/1`
-  # that guard falls back to, and the `read/1` and `rm/1` that settle the restart
-  # marker's ownership on the way out of a failed install. All three are here for
-  # one reason - the answers that matter are the *failing* ones, and every way of
-  # arranging a failing `read` or `rm` from a fixture is a mode that root and some
-  # filesystems ignore. See `stat/1`.
+  # Two roots, for the ERTS guard, and four filesystem operations: the `stat/1`
+  # that guard falls back to, the `lstat/1` that classifies the restart-marker
+  # path before configuration changes, and the `read/1` and `rm/1` that settle
+  # marker ownership after a failed install. All four are here for one reason -
+  # the answers that matter are the *failing* ones, and every fixture that relies
+  # on a permission failure depends on a mode that root and some filesystems
+  # ignore. See `stat/1`.
   #
   # **This is not a general filesystem seam and must not become one.** The
   # primitives that *publish* the marker - `Castle.Peer.work_dir/1`,
   # `write_private/2` and `publish/2` - are deliberately called directly and not
   # through here: what they guarantee is the point of them, and a stub would
-  # prove nothing about it. What these two carry is the opposite kind of thing,
-  # an outcome Castle has to have something to say about and no way to cause.
+  # prove nothing about it. These operations carry the opposite kind of thing:
+  # outcomes Castle has to describe and no reliable way to cause in a fixture.
 
   @doc """
   The root `:release_handler` resolves its own relative paths against.
@@ -80,6 +81,18 @@ defmodule Castle.Deployment do
   """
   @spec stat(Path.t()) :: {:ok, File.Stat.t()} | {:error, File.posix()}
   def stat(path), do: File.stat(path)
+
+  @doc """
+  Inspects a path without following its final symbolic link.
+
+  The restart-marker preflight has to distinguish a missing path, a regular
+  marker and some other occupant. A failure to inspect is a fourth state, but it
+  cannot be produced reliably with permissions in a test. Keeping this read here
+  lets the lifecycle test establish that Castle refuses before configuration or
+  `install_release/1` is reached.
+  """
+  @spec lstat(Path.t()) :: {:ok, File.Stat.t()} | {:error, File.posix()}
+  def lstat(path), do: File.lstat(path)
 
   @doc """
   Reads a file, for deciding whether the restart marker is still this attempt's.

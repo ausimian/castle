@@ -5,6 +5,7 @@ defmodule Castle.CommandsTest do
 
   alias Castle.Commands
   alias Castle.DeploymentStub
+  alias Castle.FileReason
   alias Castle.InitStub
   alias Castle.PeerStub
   alias Castle.ReleaseHandlerStub, as: Stub
@@ -22,8 +23,20 @@ defmodule Castle.CommandsTest do
     test "reports what the peer could not do", %{tmp_dir: dir} do
       unpacked(dir)
       peer = PeerStub.stub({:error, "DATABASE_URL is not set"})
+      vsn = Path.basename(dir)
 
-      assert Commands.materialise(dir, peer) == {:error, "DATABASE_URL is not set"}
+      assert Commands.materialise(dir, peer) ==
+               {:error, "Cannot configure #{vsn}: DATABASE_URL is not set"}
+    end
+
+    @tag :tmp_dir
+    test "does not repeat lifecycle context supplied by the peer", %{tmp_dir: dir} do
+      unpacked(dir)
+      vsn = Path.basename(dir)
+      contextual = "Cannot configure #{vsn}: its provider failed"
+
+      assert Commands.materialise(dir, PeerStub.stub({:error, contextual})) ==
+               {:error, contextual}
     end
 
     @tag :tmp_dir
@@ -35,8 +48,8 @@ defmodule Castle.CommandsTest do
       #
       # This is the step's own contract rather than an ordering claim about
       # `install/5`: the ordering inside the install is asserted where the install
-      # is, by the marker and configuration cases below. `Castle.commit/1` is the
-      # caller that still composes this in front of an operation.
+      # is, by the marker and configuration cases below. Install and commit both
+      # call this step inside their own serialised operations.
       unpacked(dir)
       peer = PeerStub.stub({:error, "the compile environment does not agree"})
       Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
@@ -84,7 +97,10 @@ defmodule Castle.CommandsTest do
       File.write!(file, "")
 
       assert {:error, message} = Commands.materialise(file, PeerStub)
-      assert message =~ "Cannot configure 9.9.9: #{file} cannot be read (not a directory)."
+
+      assert message =~
+               "Cannot configure 9.9.9: #{file} cannot be read (#{FileReason.format(:enotdir)})."
+
       assert message =~ "Unpack the release first"
       assert PeerStub.calls() == []
     end
@@ -107,10 +123,14 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:which_releases, [{~c"sample", ~c"1.2.3", [], :permanent}])
 
       assert {:error, message} = Commands.upgradable(handler)
-      assert message =~ "This system cannot be upgraded: 1.2.3 is running from a release record"
-      assert message =~ "names no applications"
-      assert message =~ "running its old code"
-      assert message =~ "make sure the RELEASES file :release_handler reads is"
+
+      assert message =~
+               "This system cannot be upgraded: 1.2.3 is running from a synthesised release record"
+
+      assert message =~ "with no applications"
+      assert message =~ "leave changed applications on old code"
+      assert message =~ "<release-root>/releases/RELEASES"
+      assert message =~ "being present, readable or parseable is not sufficient"
 
       # The remedy names the state the file has to be in, not the reason the
       # record was synthesised. A bare "restart" loops forever on a file that is
@@ -118,7 +138,7 @@ defmodule Castle.CommandsTest do
       # absence - and a case analysis of the cause, which is what this said first,
       # has no advice at all for a file that was absent at boot and has been
       # created readably since, where a plain restart is all that is needed.
-      assert message =~ "Absent, or accepted, is what a restart needs."
+      assert message =~ "place an accepted RELEASES file there. Restart, then retry."
     end
 
     test "asks the release the system is running, and not another one" do
@@ -155,7 +175,7 @@ defmodule Castle.CommandsTest do
       handler = real_record(:unpack_release, {:error, {:no_such_file, ~c"sample-1.2.3.tar.gz"}})
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
-      assert message =~ "Failed to unpack sample-1.2.3."
+      assert message =~ "Unpack failed for sample-1.2.3:"
       assert message =~ "no_such_file"
     end
 
@@ -168,8 +188,11 @@ defmodule Castle.CommandsTest do
       handler = synthesised_record(:unpack_release, {:ok, ~c"1.2.3"})
 
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler)
-      assert message =~ "Cannot unpack sample-1.2.3: 1.2.2 is running from a release record"
-      assert message =~ "the system has to be restarted"
+
+      assert message =~
+               "Cannot unpack sample-1.2.3: 1.2.2 is running from a synthesised release record"
+
+      assert message =~ "Restart, then retry"
       assert Stub.calls(:unpack_release) == []
     end
 
@@ -208,8 +231,10 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:error, {:no_such_release, ~c"1.2.3"}})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Install of 1.2.3 failed."
+      assert message =~ "Install failed for 1.2.3:"
       assert message =~ "no_such_release"
+      assert message =~ "Castle completed the target configuration step"
+      assert configuration(dir, "1.2.3") == "[].\n"
     end
 
     @tag :tmp_dir
@@ -217,7 +242,7 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:whatever, ~c"1.2.2"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Install of 1.2.3 returned an unexpected result."
+      assert message =~ "Install failed for 1.2.3: unexpected result"
     end
 
     @tag :tmp_dir
@@ -230,9 +255,12 @@ defmodule Castle.CommandsTest do
       handler = synthesised_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Cannot install 1.2.3: 1.2.2 is running from a release record"
-      assert message =~ "running its old code"
-      assert message =~ "the system has to be restarted"
+
+      assert message =~
+               "Cannot install 1.2.3: 1.2.2 is running from a synthesised release record"
+
+      assert message =~ "leave changed applications on old code"
+      assert message =~ "Restart, then retry"
       assert Stub.calls(:install_release) == []
     end
 
@@ -376,7 +404,7 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:error, {:bad_relup_file, ~c"relup"}})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Install of 1.2.3 failed."
+      assert message =~ "Install failed for 1.2.3:"
       refute File.exists?(marker(dir))
     end
 
@@ -402,9 +430,63 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Cannot install 1.2.3: #{marker(dir)}"
-      assert message =~ "there is already a directory at that path"
+      assert message =~ "Cannot install 1.2.3: restart marker path #{marker(dir)}"
+      assert message =~ "restart marker path #{marker(dir)} contains a directory"
+      assert message =~ "Castle did not change configuration"
       assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
+    end
+
+    @tag :tmp_dir
+    test "reports a marker it cannot inspect before configuring", %{tmp_dir: dir} do
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+      configured(dir)
+
+      deployment = DeploymentStub.stub(nil, nil)
+      marker_path = marker(dir)
+
+      DeploymentStub.stub_lstat(fn
+        ^marker_path -> {:error, :eio}
+        path -> File.lstat(path)
+      end)
+
+      assert {:error, message} =
+               Commands.install("1.2.3", dir, handler, PeerStub, deployment)
+
+      assert message =~ "cannot inspect restart marker #{marker(dir)}"
+      assert message =~ FileReason.format(:eio)
+      assert message =~ "Castle did not change configuration"
+      refute message =~ "cannot create restart marker"
+      assert PeerStub.calls() == []
+      assert Stub.calls(:install_release) == []
+    end
+
+    @tag :tmp_dir
+    test "reports a marker it cannot create after configuring", %{tmp_dir: dir} do
+      rel_dir = Path.join(dir, "releases")
+      moved = Path.join(dir, "moved")
+      relup!(rel_dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      configured(rel_dir)
+
+      peer =
+        PeerStub.stub(fn rel_vsn_dir ->
+          File.write!(Path.join(rel_vsn_dir, "sys.config"), "resolved")
+          File.rename!(rel_dir, moved)
+          {:ok, []}
+        end)
+
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", rel_dir, handler, peer)
+      assert message =~ "cannot create restart marker #{marker(rel_dir)}"
+      assert message =~ FileReason.format(:enoent)
+      assert message =~ "Castle completed the target configuration step"
+      assert message =~ "no release was installed"
+      refute message =~ "cannot inspect restart marker"
+      assert PeerStub.calls() == [Path.join(rel_dir, "1.2.3")]
+      assert Stub.calls(:install_release) == []
+      assert File.read!(Path.join([moved, "1.2.3", "sys.config"])) == "resolved"
     end
 
     @tag :tmp_dir
@@ -419,9 +501,11 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "Cannot install 1.2.3: the upgrade to 1.2.3 restarts the emulator"
+      assert message =~ "Cannot install 1.2.3: cannot clear stale restart data"
       assert message =~ provisional(dir)
-      assert message =~ "would pair with the marker this install is about to arm"
+      assert message =~ "could make the launcher boot a version that was not installed"
+      assert message =~ "Castle completed 1.2.3's configuration step"
+      assert configuration(dir, "1.2.3") == "[].\n"
       refute File.exists?(marker(dir))
       assert Stub.calls(:install_release) == []
     end
@@ -479,9 +563,11 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "there is already a symbolic link at that path"
-      assert message =~ "will not write through it or replace it"
+      assert message =~ "restart marker path #{marker(dir)} contains a symbolic link"
+      assert message =~ "Move it, then retry"
+      assert message =~ "Castle did not change configuration"
       assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
       refute File.exists?(elsewhere)
     end
 
@@ -499,8 +585,13 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "there is already something of another kind at that path"
+
+      assert message =~
+               "restart marker path #{marker(dir)} contains something of another kind"
+
+      assert message =~ "Castle did not change configuration"
       assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
     end
 
     @tag :tmp_dir
@@ -512,28 +603,59 @@ defmodule Castle.CommandsTest do
       # the version would be.
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       File.write!(marker(dir), "")
+      refute File.exists?(provisional(dir))
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "a restart install is pending - it names no version"
+      assert message =~ "it names no version"
+      assert message =~ "The marker may affect a restart"
+      assert message =~ "does not show whether a restart selection exists"
+      assert message =~ "Castle did not run the target configuration step"
+      assert message =~ "Inspect #{marker(dir)} and #{provisional(dir)}"
+      assert message =~ "then run bin/castle releases before restarting"
+      assert message =~ "Removing #{marker(dir)} may cancel another install's reboot"
       assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
       assert File.read!(marker(dir)) == ""
     end
 
     @tag :tmp_dir
-    test "refuses the install when the name is claimed while the target is configured",
+    test "hedges a marker with no restart selection beside it", %{tmp_dir: dir} do
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      File.write!(marker(dir), "1.2.4\nsomeone-elses-attempt\n")
+      refute File.exists?(provisional(dir))
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.4)"
+      assert message =~ "The marker may affect a restart"
+      assert message =~ "does not show whether a restart selection exists"
+      assert message =~ "Castle did not run the target configuration step"
+      assert message =~ "Inspect #{marker(dir)} and #{provisional(dir)}"
+      assert message =~ "then run bin/castle releases before restarting"
+      assert message =~ "Removing #{marker(dir)} may cancel another install's reboot"
+      assert File.read!(marker(dir)) == "1.2.4\nsomeone-elses-attempt\n"
+      refute File.exists?(provisional(dir))
+      assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
+    end
+
+    @tag :tmp_dir
+    test "reports restart selection removed before a competing marker wins",
          %{tmp_dir: dir} do
       # `publish/2` deciding step 1 a second time over, which is the half of the
       # protocol the lock cannot supply. `serialised/2` is over `[node()]`, so the
       # window this covers is the documented limitation: a second VM writing into
       # the same releases directory, where the filesystem's refusal to replace is
       # the whole of the defence. The seam is the materialisation, because that is
-      # the one step between `unclaimed/3` and the publish - and the marker
-      # arriving there is a caller that got past `unclaimed/3` a moment earlier,
+      # the one step between `unclaimed/4` and the publish - and the marker
+      # arriving there is a caller that got past `unclaimed/4` a moment earlier,
       # which is exactly the state the lock closes on this node and cannot on
       # another.
       relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
       theirs = "1.2.3\nsomebody-elses-attempt\n"
+      File.write!(provisional(dir), "16.0 1.2.3")
+      assert File.exists?(provisional(dir))
 
       # The version directory as `configured/2` leaves it, with the peer's reply
       # then replaced by one that claims the marker on its way through.
@@ -548,13 +670,57 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, peer)
-      assert message =~ "is already there, so a restart install is pending - it names 1.2.3"
-      assert Stub.calls(:install_release) == []
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.3)"
+      assert message =~ "Castle completed the target configuration step"
+      assert message =~ "no release was installed"
+      assert message =~ "Castle removed #{provisional(dir)} before detecting the marker race"
+      assert message =~ "cannot identify which install wrote it"
 
-      # Told rather than allowed to take it over: whoever is waiting on that
-      # reboot still has the marker that asks for it, and this install's staging
-      # went with its working directory rather than being left beside it.
+      assert message =~
+               "Run bin/castle releases before choosing whether to restart or retry the competing install"
+
+      assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == [Path.join(dir, "1.2.3")]
+
+      # Told rather than allowed to take the marker over. Castle removed the file
+      # that was present without claiming which install wrote it, so the marker
+      # stays while the diagnostic directs the operator to inspect release state.
       assert File.read!(marker(dir)) == theirs
+      refute File.exists?(provisional(dir))
+      assert configuration(dir, "1.2.3") == "[].\n"
+      assert Path.wildcard(Path.join(dir, "castle-*")) == [marker(dir)]
+    end
+
+    @tag :tmp_dir
+    test "reports restart selection already absent when a competing marker wins",
+         %{tmp_dir: dir} do
+      relup!(dir, "1.2.3", [{~c"1.2.2", [], [:restart_emulator]}], [])
+      theirs = "1.2.3\nsomebody-elses-attempt\n"
+      refute File.exists?(provisional(dir))
+      configured(dir)
+
+      peer =
+        PeerStub.stub(fn _rel_vsn_dir ->
+          File.write!(marker(dir), theirs)
+          {:ok, []}
+        end)
+
+      handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+
+      assert {:error, message} = Commands.install("1.2.3", dir, handler, peer)
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.3)"
+      assert message =~ "Castle completed the target configuration step"
+      assert message =~ "no release was installed"
+      assert message =~ "#{provisional(dir)} was already absent"
+      assert message =~ "The marker may affect the next restart"
+      assert message =~ "Inspect #{marker(dir)} and #{provisional(dir)}"
+      assert message =~ "then run bin/castle releases before restarting"
+      assert message =~ "Removing #{marker(dir)} may cancel another install's reboot"
+      assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == [Path.join(dir, "1.2.3")]
+      assert File.read!(marker(dir)) == theirs
+      refute File.exists?(provisional(dir))
+      assert configuration(dir, "1.2.3") == "[].\n"
       assert Path.wildcard(Path.join(dir, "castle-*")) == [marker(dir)]
     end
   end
@@ -630,11 +796,17 @@ defmodule Castle.CommandsTest do
       handler = real_record(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message =~ "a restart install is pending - it names 1.2.4"
-      assert message =~ "consumed by the next start of this deployment"
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.4)"
+      assert message =~ "The marker may affect a restart"
+      assert message =~ "does not show whether a restart selection exists"
+      assert message =~ "Castle did not run the target configuration step"
+      assert message =~ "Inspect #{marker(dir)} and #{provisional(dir)}"
+      assert message =~ "then run bin/castle releases before restarting"
+      assert message =~ "Removing #{marker(dir)} may cancel another install's reboot"
       assert File.read!(marker(dir)) == "1.2.4\nsomeone-elses-attempt\n"
       assert File.exists?(provisional(dir))
       assert Stub.calls(:install_release) == []
+      assert PeerStub.calls() == []
     end
 
     @tag :tmp_dir
@@ -789,16 +961,19 @@ defmodule Castle.CommandsTest do
 
       # The failure the operator asked about is still reported - this is a second
       # fact, not a replacement for the first.
-      assert message =~ "Install of 1.2.3 failed."
+      assert message =~ "Install failed for 1.2.3:"
       assert message =~ "bad_relup_file"
+      assert length(:binary.matches(message, "Run bin/castle releases")) == 1
 
       # And then what it means. The marker, why it is still there, and what the
       # next start will now do about it.
-      assert message =~ "The restart marker this install armed is still there"
+      assert message =~ "Cannot remove restart marker #{marker(dir)}"
       assert message =~ marker(dir)
-      assert message =~ "could not be removed (permission denied)"
-      assert message =~ "the next ordinary start of this system will boot the version"
-      assert message =~ "Remove the marker before restarting this system"
+      assert message =~ FileReason.format(:eacces)
+      assert message =~ "boot a version whose install did not finish"
+      assert message =~ "release records still list it as unpacked"
+      assert message =~ "remove this marker before restarting"
+      refute message =~ "Do not restart or remove it"
 
       # The marker really is still there, so the message is not describing a state
       # it also cleaned up.
@@ -823,11 +998,12 @@ defmodule Castle.CommandsTest do
                  unreadable_marker(dir)
                )
 
-      assert message =~ "Install of 1.2.3 failed."
-      assert message =~ "cannot be accounted for"
-      assert message =~ "could not be read (I/O error)"
-      assert message =~ "will not remove a marker that may be a later attempt's"
-      assert message =~ "Remove the marker before restarting this system"
+      assert message =~ "Install failed for 1.2.3:"
+      assert message =~ "Cannot read restart marker #{marker(dir)}"
+      assert message =~ FileReason.format(:eio)
+      assert message =~ "Do not restart or remove it"
+      assert message =~ "until access is restored and its owning install is identified"
+      refute message =~ "remove this marker before restarting"
     end
 
     @tag :tmp_dir
@@ -856,13 +1032,16 @@ defmodule Castle.CommandsTest do
                )
 
       assert message =~
-               "Install of 1.2.3 raised, and the restart marker it armed could not be settled."
+               "Install failed for 1.2.3: :release_handler raised before Castle could clear its restart marker."
 
-      assert message =~ "The restart marker this install armed is still there"
-      assert message =~ "Remove the marker before restarting this system"
+      assert message =~ "Castle completed the target configuration step"
+      assert message =~ "install state may have changed"
+
+      assert message =~ "Cannot remove restart marker #{marker(dir)}"
+      assert message =~ "remove this marker before restarting"
 
       # The exception is not lost, and neither is where it came from.
-      assert message =~ "The failure itself:"
+      assert message =~ "Original failure:"
       assert message =~ "the relup blew up"
       assert message =~ "(RuntimeError)"
 
@@ -884,7 +1063,8 @@ defmodule Castle.CommandsTest do
         end)
 
       assert {:error, message} = Commands.install("1.2.3", dir, handler, configured(dir))
-      assert message == "Install of 1.2.3 failed. {:bad_relup_file, ~c\"relup\"}"
+      assert message =~ "Install failed for 1.2.3: {:bad_relup_file, ~c\"relup\"}"
+      assert message =~ "Castle completed the target configuration step"
       refute message =~ "restart marker"
     end
 
@@ -906,7 +1086,8 @@ defmodule Castle.CommandsTest do
       assert {:error, message} =
                Commands.install("1.2.3", dir, handler, configured(dir), DeploymentStub)
 
-      assert message == "Install of 1.2.3 failed. {:bad_relup_file, ~c\"relup\"}"
+      assert message =~ "Install failed for 1.2.3: {:bad_relup_file, ~c\"relup\"}"
+      assert message =~ "Castle completed the target configuration step"
       refute message =~ "restart marker"
     end
 
@@ -944,10 +1125,10 @@ defmodule Castle.CommandsTest do
                  )
 
         assert message =~
-                 "Install of 1.2.3 #{verb}, and the restart marker it armed could not be settled."
+                 "Install failed for 1.2.3: :release_handler #{verb} before Castle could clear its restart marker."
 
-        assert message =~ "The restart marker this install armed is still there"
-        assert message =~ "The failure itself:"
+        assert message =~ "Cannot remove restart marker #{marker(dir)}"
+        assert message =~ "Original failure:"
         assert armed_version(dir) == "1.2.3"
       end
     end
@@ -983,7 +1164,7 @@ defmodule Castle.CommandsTest do
 
       # The discriminator, and the whole of what the region buys. Without it the
       # second caller reads the running release, classifies the same transition
-      # and passes `unclaimed/3` here, while the first is still in front of its
+      # and passes `unclaimed/4` here, while the first is still in front of its
       # own arming - after which one of them destroys the other's evidence.
       refute_receive {:looked_up, :second}, 200
 
@@ -998,7 +1179,7 @@ defmodule Castle.CommandsTest do
       # complete rather than said while taking half of it away.
       assert_receive {:looked_up, :second}, 10_000
       assert {{:error, message}, [], _} = Task.await(second, 30_000)
-      assert message =~ "a restart install is pending - it names 1.2.3"
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.3)"
 
       assert armed_version(dir) == "1.2.3"
 
@@ -1056,10 +1237,10 @@ defmodule Castle.CommandsTest do
 
       # The refused caller is refused *before* it materialises, which is the half
       # that moving the materialisation inside the lock would not have fixed on its
-      # own: inside the region but ahead of `unclaimed/3`, it would still have
+      # own: inside the region but ahead of `unclaimed/4`, it would still have
       # replaced the configuration on its way to being told no.
       assert {{:error, message}, [], []} = Task.await(second, 30_000)
-      assert message =~ "a restart install is pending - it names 1.2.3"
+      assert message =~ "restart marker #{marker(dir)} already exists (it names 1.2.3)"
 
       # And the discriminator. The version waiting for its reboot holds the
       # configuration of the install that armed it.
@@ -1243,12 +1424,12 @@ defmodule Castle.CommandsTest do
     end
 
     @tag :tmp_dir
-    test "configures the version before making it permanent", %{tmp_dir: dir} do
+    test "completes the configuration step before making the version permanent",
+         %{tmp_dir: dir} do
       # The ordering, asserted the way the install cases assert theirs: the
       # handler stands ready to succeed, and what is checked is that the peer was
-      # asked first. A commit that made a version permanent and *then* configured
-      # it would leave the system permanently on a configuration nothing had
-      # resolved yet.
+      # asked first. A provider-less release may change no file, but a release
+      # with providers must finish that work before it is made permanent.
       handler = Stub.stub(:make_permanent, :ok)
       configured(dir)
 
@@ -1269,7 +1450,7 @@ defmodule Castle.CommandsTest do
       PeerStub.stub({:error, "DATABASE_URL is not set"})
 
       assert {:error, message} = Commands.commit("1.2.3", dir, handler, PeerStub)
-      assert message =~ "DATABASE_URL is not set"
+      assert message =~ "Cannot configure 1.2.3: DATABASE_URL is not set"
       assert Stub.calls(:make_permanent) == []
     end
 
@@ -1293,8 +1474,12 @@ defmodule Castle.CommandsTest do
       configured(dir)
 
       assert {:error, message} = Commands.commit("1.2.3", dir, handler, PeerStub)
-      assert message =~ "Commit of 1.2.3 failed."
+      assert message =~ "Commit failed for 1.2.3:"
       assert message =~ "bad_status"
+      assert message =~ "Castle completed the target configuration step"
+      assert message =~ "did not make it permanent"
+      assert configuration(dir, "1.2.3") == "[].\n"
+      assert PeerStub.calls() == [Path.join(dir, "1.2.3")]
     end
   end
 
@@ -1310,7 +1495,7 @@ defmodule Castle.CommandsTest do
       handler = Stub.stub(:remove_release, {:error, {:no_such_release, ~c"1.2.3"}})
 
       assert {:error, message} = Commands.remove("1.2.3", handler)
-      assert message =~ "Removal of 1.2.3 failed."
+      assert message =~ "Removal failed for 1.2.3:"
       assert message =~ "no_such_release"
     end
   end
@@ -1352,13 +1537,13 @@ defmodule Castle.CommandsTest do
       assert {:error, message} = Commands.unpack("sample-1.2.3", handler, erts_less())
 
       assert message =~
-               "Cannot unpack sample-1.2.3: the deployment and the emulator's root are different directories"
+               "Cannot unpack sample-1.2.3: deployment root #{System.tmp_dir!()} differs from emulator root"
 
       # Both directories are named, so that the operator can see which two the
       # guard compared rather than being told only that they differ.
       assert message =~ System.tmp_dir!()
       assert message =~ to_string(:code.root_dir())
-      assert message =~ "cannot be upgraded by Castle"
+      assert message =~ "Castle cannot upgrade this deployment"
       assert Stub.calls(:unpack_release) == []
 
       # And ahead of the record check, which on such a deployment is asking about
@@ -1374,7 +1559,7 @@ defmodule Castle.CommandsTest do
       assert {:error, message} = Commands.install("1.2.3", dir, handler, PeerStub, erts_less())
 
       assert message =~
-               "Cannot install 1.2.3: the deployment and the emulator's root are different directories"
+               "Cannot install 1.2.3: deployment root #{System.tmp_dir!()} differs from emulator root"
 
       assert Stub.calls(:install_release) == []
       assert Stub.calls(:which_releases) == []
@@ -1391,7 +1576,7 @@ defmodule Castle.CommandsTest do
                Commands.commit("1.2.3", "/unused", handler, PeerStub, erts_less())
 
       assert message =~
-               "Cannot commit 1.2.3: the deployment and the emulator's root are different directories"
+               "Cannot commit 1.2.3: deployment root #{System.tmp_dir!()} differs from emulator root"
 
       assert Stub.calls(:make_permanent) == []
       assert PeerStub.calls() == []
@@ -1406,7 +1591,7 @@ defmodule Castle.CommandsTest do
       assert {:error, message} = Commands.remove("1.2.3", handler, erts_less())
 
       assert message =~
-               "Cannot remove 1.2.3: the deployment and the emulator's root are different directories"
+               "Cannot remove 1.2.3: deployment root #{System.tmp_dir!()} differs from emulator root"
 
       assert Stub.calls(:remove_release) == []
     end
@@ -1419,7 +1604,7 @@ defmodule Castle.CommandsTest do
       peer = PeerStub.stub({:ok, []})
 
       assert {:error, message} = Commands.materialise(dir, peer, erts_less())
-      assert message =~ "the deployment and the emulator's root are different directories"
+      assert message =~ "deployment root #{System.tmp_dir!()} differs from emulator root"
       assert PeerStub.calls() == []
     end
 
@@ -1632,9 +1817,10 @@ defmodule Castle.CommandsTest do
   # for is covered against a real one in `Castle.PeerTest`.
   defp unpacked(dir), do: File.write!(Path.join(dir, "sys.config"), "[].\n")
 
-  # A target `install/5` can materialise: the version directory unpacked, which is
-  # what `materialise/3` looks for before it will reach a peer at all, and a peer
-  # that says it configured it.
+  # A target `install/5` can pass through its configuration step: the version
+  # directory is unpacked, which is what `materialise/3` checks before reaching a
+  # peer, and the peer completes without writing. That no-op is deliberate: a
+  # provider-less release may complete the step without changing a file.
   #
   # Every install case names one, and that is the point rather than an
   # inconvenience. Materialising is a *step of the install* now, not something

@@ -99,9 +99,10 @@ defmodule Castle do
   # to unpack - and that failure names a missing file rather than the release
   # option that did not ask for it.
   #
-  # It states the omission and stops. Nothing here knows the release was meant
-  # to be distributed: the system an upgrade is installed *onto* needs no
-  # tarball of its own, and `:tar` is Mix's own way of packing one - its
+  # It states the omission and preserves the valid qualifications. Nothing here
+  # knows the release was meant to be distributed: the system an upgrade is
+  # installed *onto* needs no tarball of its own, and `:tar` is Mix's own way of
+  # packing one - its
   # `make_tar/1` is private to `Mix.Tasks.Release` - rather than the only way,
   # so a function step in the list may be packing one itself.
   #
@@ -120,18 +121,15 @@ defmodule Castle do
   # acknowledged the counterexample in a trailing sentence without retracting
   # either claim, which is the worst of both: a definite diagnosis on the error
   # channel sending an operator to investigate a packaging failure that may not
-  # exist. Say what was seen, say what follows *unless* something else packs it,
-  # and stop.
+  # exist. Say what was seen, say what follows unless something else packs it,
+  # and keep the valid tarball-free base-deployment case explicit.
   defp warn_missing_tar(steps) do
     if :assemble in steps and :tar not in steps do
       Mix.shell().error(
-        "warning: Castle.customize/1 was given a :steps list with no :tar step. " <>
-          "Unless a step of your own packs one, this release will not produce the " <>
-          "<name>-<vsn>.tar.gz that is copied into a deployment's releases " <>
-          "directory for bin/castle unpack to read - and bin/castle unpack is how " <>
-          "a version is installed onto a running system. Add :tar after :assemble " <>
-          "if this version is meant to be installed anywhere. A deployment that is " <>
-          "only ever upgraded *from* needs no tarball of its own."
+        "warning: release :steps has no :tar step. Add :tar after :assemble to create " <>
+          "the <name>-<vsn>.tar.gz used by bin/castle unpack. No change is needed if " <>
+          "another step creates the archive. A deployment used only as an upgrade base needs " <>
+          "no tarball of its own."
       )
     end
   end

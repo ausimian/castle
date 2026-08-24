@@ -23,6 +23,9 @@ Forecastle 1.x and Elixir 1.18 or later.
 
 - Release-management commands now raise on refusal or a returned OTP error, so
   `bin/castle` exits non-zero. Successful command output is unchanged.
+- Operator-facing errors and warnings are shorter, distinguish preflight
+  refusals from attempted operations, report whether the configuration step ran,
+  and preserve paths, reasons and recovery steps.
 - `make_releases/0` now derives the release directory from the running emulator
   instead of the current working directory.
 - The minimum supported Elixir version is now 1.18.
@@ -41,9 +44,17 @@ Forecastle 1.x and Elixir 1.18 or later.
   the shared Erlang installation.
 - Give actionable recovery instructions when `:release_handler` booted without
   an accepted `RELEASES` file.
-- Fix the wording when a restart install is refused because something unusual,
-  such as a named pipe, is already at the path Castle uses for its restart
-  marker. The message used to read "a other".
+- Clarify restart-marker failures, including whether the configuration step ran,
+  whether `new_start_erl.data` was removed or already absent, and when release
+  records, `castle-restart-pending` and `new_start_erl.data` must be inspected
+  before restarting, retrying or removing a marker. Also explain the `unpacked`
+  record left by an unfinished install and fix the former "a other" wording for
+  named pipes and similar marker-path conflicts.
+- Report a failed commit as possibly partial instead of claiming the version was
+  not made permanent. `:release_handler` writes `releases/start_erl.data` before
+  it updates the release record, so an error can leave the file that selects the
+  boot version already naming the target; the message now says so and directs
+  the operator to inspect release state.
 - Report restart installs without raising `CaseClauseError`.
 - Return an empty release list without raising `Enum.EmptyError`.
 - Report `RELEASES` read and write errors instead of raising `MatchError`.

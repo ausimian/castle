@@ -354,16 +354,19 @@ Castle's job is configuration and release management on a running node.
   ERTS — one spelled through a `current` symlink, say — is the one failure here
   an operator cannot work around.
 
-  **What it detects is the divergence, not the missing ERTS, and the message
-  asserts no cause at all.** `include_erts: false` is the cause in almost every
+  **What it detects is the divergence, not any one cause, and the message says
+  so.** `include_erts: false` is the cause in almost every
   case but it is not the only one: the `erl` shim Mix writes is
   `ROOTDIR="${ERL_ROOTDIR:-…}"`, so an `ERL_ROOTDIR` in the environment diverges
   the two on a release that *did* bring its ERTS. Two directories are the whole
   of the evidence, and nothing here can tell those apart or knows that they
-  exhaust the possibilities, so both are offered as examples. This message has
+  exhaust the possibilities. The message names both mechanisms as common causes,
+  explicitly says other causes are possible, and does not claim either was
+  observed. This message has
   now been wrong twice in the same way — first asserting the missing ERTS, then
   asserting `ERL_ROOTDIR` as the only alternative — so state the divergence and
-  stop. A cause stated confidently from two directories is how a correct refusal
+  keep the examples non-exhaustive. A cause stated confidently from two
+  directories is how a correct refusal
   comes to be read as a bug in the guard, and it sends an operator to rebuild
   something that was not the problem. `Castle.Peer.emulator/2` is the one that
   may still speak of ERTS in particular, because it looked for the emulator and
@@ -461,10 +464,11 @@ Castle's job is configuration and release management on a running node.
   keeps its synthesised record either way, so the refusal still fires, and an
   operator told to check whether the file is "absent" or "present and unreadable"
   finds it is neither and has no applicable advice. A plain restart is exactly
-  right for them. So the message asks for `releases/RELEASES` to be *absent or
-  consultable* before the restart, which covers all three states and is shorter
-  than the branch it replaced. Do not turn it back into a case analysis of the
-  cause, and do not collapse it into a bare "restart the system" either.
+  right for them. So the message asks for the default
+  `<release-root>/releases/RELEASES` to be absent or accepted by
+  `:release_handler` before the restart, which covers all three states and is
+  shorter than the branch it replaced. Do not turn it back into a case analysis
+  of the cause, and do not collapse it into a bare "restart the system" either.
 
   **Name the authority, not the mechanism — and this is the lesson of five
   successive corrections to one sentence.** Each named a property of the file and
@@ -542,8 +546,10 @@ Castle's job is configuration and release management on a running node.
   armed — so a node that will be refused, for its record or for a pending restart
   install, is refused without having configured anything. The note this replaces
   called materialising "only work" on the grounds that it writes into the target's
-  version directory and is idempotent; it ends in a rename onto `sys.config`, so
-  it is not. See the restart-marker section for the whole of it.
+  version directory and is idempotent; for a release with providers it can end in
+  a rename onto `sys.config`, so it is not. A provider-less release may complete
+  the same step without changing a file. See the restart-marker section for the
+  whole of it.
 
   **And that claim is now tested at the boundary, which is what
   `Castle.install/2..5` is for.** `install` takes the releases directory, the
@@ -643,21 +649,29 @@ Castle's job is configuration and release management on a running node.
   disarming each other's marker.
 
   **So the pair is owned by an install *attempt*, and four things make it so.**
-  `unclaimed/3` and `arm/4` are three of them and the order is the protocol; the
+  `unclaimed/4` and `arm/4` are three of them and the order is the protocol; the
   fourth is that there is only ever one caller in the install at all.
 
-  1. **One pending restart install at a time.** A marker already at the path
-     refuses the install rather than being adopted or replaced, which is what
-     keeps step 2 from clearing the `new_start_erl.data` that attempt's
-     preparation wrote. `publish/2` decides it a second time over, by refusing
-     rather than replacing.
+  1. **One pending restart install at a time.** A marker found by `unclaimed/4`
+     refuses the install before step 2, rather than being adopted or replaced.
+     That pre-materialisation check reads only the marker, so it does not claim a
+     reboot is owed: the marker may affect a restart, but does not prove that
+     `new_start_erl.data` selects its version. It preserves both paths and tells
+     the operator to inspect `bin/castle releases` before restarting or removing
+     the marker. `publish/2` decides ownership a second time by refusing rather
+     than replacing. If another VM wins that later race, the diagnostic uses the
+     outcome step 2 actually observed. A removed file is not attributed to
+     either install; the operator inspects release state before choosing restart
+     or retry. A file already absent leaves restart-related guidance hedged.
   2. **OTP's file is cleared before the marker is armed.** That is what closes
      the window above: after it, `new_start_erl.data` existing means *this*
      attempt's preparation wrote it. Removing it is safe —
      `write_new_start_erl/3` goes through `file:write_file/2`, which creates the
-     file when it is absent. The order matters and must not be reversed: an
-     attempt that refused *after* clearing would take an already-requested
-     reboot away silently.
+     file when it is absent. The order matters and must not be reversed. The
+     node-local lock prevents another local install from being refused after
+     clearing. For the cross-VM race that lock cannot prevent, `:removed` or
+     `:absent` is carried through arming only to render a truthful diagnostic; it
+     does not change release behaviour.
   3. **The marker names the attempt that armed it**, on a second line, and
      `disarm/3` removes it only if it still does. The marker's name is shared and
      the marker is short-lived — *any* `start` or `daemon` of the deployment
@@ -757,15 +771,15 @@ Castle's job is configuration and release management on a running node.
   replace, and holding this lock across a peer VM's boot would put every install
   behind another's configuration step. The middle claim is false about the step
   that matters. The staging refuses rather than replaces and
-  `sys.config.pristine` refuses rather than replaces, but the *last* thing
-  materialising does is rename the resolved configuration onto `sys.config` — a
-  replace by design, and necessarily so, because that is the file
-  `release_handler` reads. So two callers materialising before either reached the
-  lock meant the loser's providers could replace the configuration the winner's
-  provisional release was about to boot, and the loser was then refused for the
-  winner's marker: a refused install decided what a successful one booted. That
-  providers may answer differently across evaluations is not a hypothetical — it
-  is the entire reason `sys.config.pristine` exists.
+  `sys.config.pristine` refuses rather than replaces, but when providers run the
+  last step renames their resolved configuration onto `sys.config` — a replace by
+  design, and necessarily so, because that is the file `release_handler` reads.
+  So two callers materialising before either reached the lock meant the loser's
+  providers could replace the configuration the winner's provisional release was
+  about to boot, and the loser was then refused for the winner's marker: a refused
+  install decided what a successful one booted. Provider-less releases may change
+  no file; providers answering differently across evaluations are the reason the
+  ordering and `sys.config.pristine` exist.
 
   The third claim is true and is not a reason. It is a throughput argument about
   concurrent installs, and this protocol refuses concurrent installs anyway; an
@@ -774,12 +788,29 @@ Castle's job is configuration and release management on a running node.
 
   **Inside the region is not enough on its own — it has to be after the
   refusals.** `Commands.install_upgradable/5` runs the record check, then
-  `unclaimed/3`, then materialises, then arms. A caller refused for a pending
+  `unclaimed/4`, then materialises, then arms. A caller refused for a pending
   restart install must be refused *before* it configures anything, because the
   version it would be configuring is the one the pending install's reboot is
   about to boot. Moving the materialisation inside the lock while leaving it in
-  front of `unclaimed/3` fixes nothing, and there is a test whose only job is to
+  front of `unclaimed/4` fixes nothing, and there is a test whose only job is to
   fail against exactly that arrangement.
+
+  `publish/2` can still find a marker created by another VM after `unclaimed/4`.
+  That refusal comes *after* materialisation, so its message says the target
+  configuration step completed, then reports whether step 2 removed
+  `new_start_erl.data` or found it absent. It never guesses which install wrote a
+  removed file. The first case directs the operator to inspect
+  `bin/castle releases` before choosing restart or retry; the second warns that
+  the marker may affect the next restart, names both files to inspect, and warns
+  that removing the marker may cancel another install's reboot. The earlier
+  `unclaimed/4` refusal says Castle did not run the configuration step and gives
+  the same path-specific caution. `bin/castle releases` shows release records; it
+  is not presented as a report of either file's state.
+
+  A non-regular entry at the marker path is also refused by `unclaimed/4`, before
+  the peer runs. Its `occupied/3` message therefore says configuration was not
+  changed. The directory, symbolic-link and other-kind cases all assert that the
+  peer received no call; wording alone is not evidence of the ordering.
 
   **`commit` materialises inside the same region, and the argument for leaving it
   outside was wrong twice over.** It went: commit is not the same case, because it
@@ -902,20 +933,28 @@ Castle's job is configuration and release management on a running node.
   of the deployment having consumed it, which is the outcome that was wanted, so
   `:enoent` from either the read or the removal is success. **Unverifiable** is
   reported: Castle will not remove a marker it cannot show is its own, and will
-  not pretend the question was answered. What the operator is told names the
-  file, says `new_start_erl.data` may already be beside it, says that an ordinary
-  restart will therefore boot the version the install did not finish, and asks
-  for the marker to be removed before the system is restarted.
+  not pretend the question was answered. The remedies are deliberately distinct.
+  If Castle knows the marker is its own but cannot remove it, the operator must
+  fix the filesystem problem and remove it before restarting. Its message calls
+  the target an unfinished install and says release records will still list it
+  as `unpacked`; "uncommitted" is wrong because commit was never reached. If
+  Castle cannot read the marker and therefore cannot establish ownership, the
+  operator must
+  neither restart nor remove it until access is restored and the owning install
+  is identified.
 
-  The read and the removal go through `Castle.Deployment.read/1` and `rm/1`, for
-  the reason `stat/1` is there: the answers that decide what Castle *says* are
-  the failing ones, and every fixture that makes a `read` or `rm` fail on a
-  regular file in a writable directory does it with a mode, which root and some
-  filesystems ignore — so the fixture would only sometimes describe the state it
-  names and would pass either way. That seam is for outcomes Castle has to speak
+  The preflight inspection, later read and removal go through
+  `Castle.Deployment.lstat/1`, `read/1` and `rm/1`, for the reason `stat/1` is
+  there: the answers that decide what Castle *says* are the failing ones, and
+  every fixture that makes them fail by permission does it with a mode, which
+  root and some filesystems ignore. That seam is for outcomes Castle has to speak
   about and cannot cause; it is **not** a general filesystem seam, and the
   primitives that *publish* the marker stay called directly for the reason given
-  above.
+  above. The lifecycle tests pin both sides: an inspection failure says Castle
+  did not change configuration or call `install_release/1`; a marker-creation
+  failure after the peer ran says the configuration step completed but no release
+  was installed. The no-op peer cases pin that completion does not claim a file
+  changed.
 
   **The report changes with it.** `reported/5` says the version was installed,
   that the emulator is restarting, and that the version stays provisional until
@@ -930,6 +969,41 @@ under management; `Kernel.CLI` catches on the node and re-raises in the calling
 VM, and only that VM exits. `Castle.Commands` holds the operations themselves,
 returning their outcome instead of acting on the process, which is what makes
 them testable.
+
+**The first words say whether Castle refused the operation or the handler tried
+it.** `Cannot <verb>` is reserved for preflight refusals: the ERTS guard, release
+record check, restart-marker checks and configuration failures that stop before
+the mutating handler call. Once `:release_handler` has been called, the message
+is `<Operation> failed for <target>`. That distinction is operational state, not
+style. Install failures say the target configuration step completed and direct
+the operator to inspect release state; a non-returning install folded into a
+marker error says the install state may have changed. A failed
+`make_permanent/1` says the target configuration step completed and that the
+commit **may be partial**, then directs the operator to release state.
+"Completed" is deliberate: provider-less releases may change no configuration
+file.
+
+**It must not say the version was not made permanent, and it did.**
+`do_make_permanent/2` writes `releases/start_erl.data` through
+`set_permanent_files/5` *before* `write_releases/3` updates the record, and a
+throw from that write — or from the Windows service update or the
+`ok = init:make_permanent/2` after it — is caught by `handle_call/3` and
+returned as `{:error, reason}`. So the file that decides what an ordinary
+restart boots can already name the target on a call that failed. Asserting the
+absence of an effect that may have happened is worse than reporting the
+uncertainty, because the rollback is the thing an operator acts on: the message
+states the partial case and sends them to `bin/castle releases`. Do not
+"tighten" it back into a claim about what was not done.
+
+Filesystem reasons in `Castle.Commands` and `Castle.Peer` both go through
+`Castle.FileReason`. It formats atoms with `:file.format_error/1`, retaining the
+atom as `:atom (formatted text)` only when the formatted text does not already
+contain its name as a complete token. A raw substring test is too broad and can
+mistake one atom for part of another word. Tests derive OTP's formatted text at
+runtime because its unknown-error wording differs across OTP 27 through 29; they
+assert that the explanation is preserved and the atom identity appears exactly
+once. Non-atoms are inspected because parser errors carry useful structure such
+as a line number.
 
 **`Castle.Error` is what `report!/1` raises, and it is not everything a command
 raises.** `report!/1` turns a returned `{:error, message}` into one; an
@@ -1095,9 +1169,11 @@ obviously — is a perfectly good Castle deployment built with
 `:tar` is also only Mix's own way of packing one — `make_tar/1`, private to
 `Mix.Tasks.Release` and so not callable — and a function step in the project's
 list can pack a tarball itself, so the absence of the atom is not the absence of
-a tarball. What `customize/1` knows is that the atom is not in the
-list; that is what the warning says, and it says nothing further — the same rule
-as the ERTS guard's message, which states the divergence and asserts no cause.
+a tarball. What `customize/1` knows is that the atom is not in the list. The
+warning says that, then preserves both valid qualifications: another step may
+create the archive, and a deployment used only as an upgrade base needs no
+tarball. The ERTS guard follows the same evidentiary rule: it states the
+divergence and offers common causes as explicitly non-exhaustive examples.
 
 Honouring it *silently* was the third option and is the one to keep rejecting.
 The cost is invisible until an operator meets it as a `bin/castle unpack` that
@@ -1134,7 +1210,8 @@ one Castle set silently would be one a consumer could not see in their own
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise — plus `customize/1`, the build-time release integration, which is not a command |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
-| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`read`/`rm` whose *failures* decide what a refusal says |
+| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`lstat`/`read`/`rm` whose *failures* decide what a refusal says |
+| `lib/castle/file_reason.ex` | Shared rendering for filesystem and parser reasons used by commands and peer configuration |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
 | `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
@@ -1299,6 +1376,15 @@ publishing again is refused rather than allowed to replace. Another calls
 window between them can be stood in, and never to be called in sequence by
 anything else.
 
+Their errors describe only the filesystem operation. The same primitives stage
+configuration and restart markers, so they must not claim that configuration was
+or was not written. The lifecycle caller adds that context: `Castle.Peer` owns
+configuration materialisation, while `Castle.Commands` says whether marker
+failure occurred before or after the peer ran. Primitive tests explicitly reject
+configuration-specific wording. `Commands.materialise/3` wraps a neutral peer
+error with `Cannot configure <vsn>:` and preserves a peer error that already has
+that context, so the command boundary names the failed lifecycle once.
+
 `fill/3` being separable is what lets a test swap the name between the exclusive
 open and the write, and assert that the content reached the inode that was
 created while the file the name now points at never saw it — with that same test
@@ -1437,7 +1523,7 @@ the target is left holding the first's configuration. With both callers answerin
 ran, which is exactly why the composition survived three rounds of review. Note
 what this test fails against, because it is the point of it — not just
 materialising outside the lock, but materialising *inside* the lock and in front
-of `unclaimed/3`, which is the fix that looks sufficient and is not.
+of `unclaimed/4`, which is the fix that looks sufficient and is not.
 
 **It is also the one case that runs through `Castle.install/5` rather than
 `Commands.install/5`, and that is not a detail.** The defect was a composition in
@@ -1477,13 +1563,14 @@ install. The `DeploymentStub` in these is given `nil` for both roots, so the ERT
 guard is inert exactly as it is under `mix test` with no `RELEASE_ROOT`.
 
 Every install case now names a `configured(dir)` — the version directory unpacked
-and a peer that says it configured it — because materialising is a step of the
-install rather than something composed in front of it. That is deliberate rather
-than an inconvenience: a case that did not say what the peer did would not have
-said what the version it installed is configured with. The ERTS-guard cases pass
-an **unstubbed** `Castle.PeerStub` instead, which raises if it is reached, so
-"refuses without starting a peer" is asserted by the guard holding rather than by
-a separate look.
+and a peer that completes the configuration step without writing — because
+materialising is a step of the install rather than something composed in front of
+it. The no-op is deliberate: it covers provider-less releases and prevents
+diagnostics from claiming a file changed merely because the step completed. Cases
+that need to distinguish the resulting configuration use a peer that writes it.
+The ERTS-guard cases pass an **unstubbed** `Castle.PeerStub` instead, which raises
+if it is reached, so "refuses without starting a peer" is asserted by the guard
+holding rather than by a separate look.
 
 `test/castle/customize_test.exs` needs none of that machinery, and should not
 acquire any: `customize/1` is a pure function on a keyword list, so there is no
@@ -1495,7 +1582,9 @@ side of `:assemble`, which is the only way to get the splice wrong. And the
 missing-`:tar` decision is pinned in **both** halves: that the list is built as
 the project wrote it (no `:tar` appended) and that the warning is emitted, since
 a case that only looked for the warning would pass against a `customize/1` that
-quietly added one. The warning is observed through `Mix.Shell.Process`, so the
+quietly added one. The warning assertion also pins both valid qualifications:
+another step may create the archive, and a base deployment needs no tarball.
+The warning is observed through `Mix.Shell.Process`, so the
 file is `async: false` — Mix's shell is one setting for the whole node — and the
 setup restores whatever shell was there. The cases that assert *nothing* was
 said depend on that shell just as much as the one that asserts something was,
@@ -1566,8 +1655,9 @@ it. A gate checked only on the maintainer's toolchain is a gate that discovers
 its own bugs through other people.
 
 **The figure is not the same on every supported toolchain, and the threshold has
-to be a floor across them rather than a reading from one.** Measured, one cell
-per toolchain with its own `MIX_HOME` and `MIX_BUILD_ROOT`:
+to be a floor across them rather than a reading from one.** The measurement that
+set the current floor, taken before the issue-29 diagnostic tests and helpers,
+used one cell per toolchain with its own `MIX_HOME` and `MIX_BUILD_ROOT`:
 
 | Elixir / OTP | `Castle.Peer` | Total | relevant |
 | --- | --- | --- | --- |
@@ -1588,23 +1678,22 @@ section, so the drift went straight into the set nothing can observe, making it
 distributed evenly over the module, and there is no reason to expect the next
 one to be either.
 
-Per module on the pinned toolchain: `Castle.Commands` 94.85%, `Castle` 90.48%,
-`Castle.Peer` 81.22%, `Castle.Deployment` and `Castle.Error` 100%.
+The issue-29 lifecycle tests brought a pinned Elixir 1.19.5 run to 90.34%:
+`Castle.Commands` 97.57%, `Castle` 90.48%, `Castle.Peer` 81.40%, and
+`Castle.Deployment`, `Castle.Error`, and `Castle.FileReason` 100%. That is a new
+reading on one toolchain, not a replacement multi-toolchain measurement.
 
-**So the threshold is 88 — the lowest reading, rounded down.** Two earlier
-values were wrong in opposite directions and both are worth keeping written
-down. 85 sat *below* the figure it was meant to floor, so it ratcheted nothing
-and licensed a thirteen-line regression. 88.58 was the pinned toolchain's exact
-reading with no slack, and it made the mandatory `mix precommit` fail on a clean
-tree under Elixir 1.20 — a false failure for anyone on a current release. The
-comment beside that number had *already said* attribution varies by version; the
-hazard was identified and the number ignored it, which is the more instructive
-half of the mistake. Do not set this from one machine, and do not raise it to
-88.40 or above: that re-creates the trap the moment another version attributes
-differently.
+**So the threshold remains 88 — the lowest measured supported-toolchain reading,
+rounded down.** Two earlier values were wrong in opposite directions and both
+are worth keeping written down. 85 sat *below* the figure it was meant to floor,
+so it ratcheted nothing. 88.58 was the pinned toolchain's exact reading with no
+slack, and it made the mandatory `mix precommit` fail on a clean tree under
+Elixir 1.20. Do not raise the floor from the new 1.19.5 result alone; remeasure
+the supported 1.18, 1.19, and 1.20 toolchains first.
 
-**What 88 costs, measured on the toolchain with the least slack rather than
-estimated.** Adding uncovered lines to `lib` under Elixir 1.20.3:
+**What 88 cost at the time it was set, measured on the toolchain with the least
+slack rather than estimated.** Adding uncovered lines to `lib` under Elixir
+1.20.3 before the issue-29 changes:
 
 | added | total | exit |
 | --- | --- | --- |
@@ -1644,32 +1733,32 @@ tests already do. Splitting them into a module of their own to exclude it is
 worse — `{Castle.Peer, :resolve, 1}` is a contract with the *next* version of
 Castle, so the MFA is not free to move for a metric.
 
-**Why 90% is not the threshold, stated as arithmetic rather than as a claim of
-impossibility.** 90% needs 426 covered on 1.19's denominator of 473 — 427 on
-1.20's 474 — so seven more than there are, eight on the newer attribution.
-Twenty-one
-missed lines are observable in principle, and they divide cleanly:
+**What the issue-29 tests changed.** The pre-materialisation marker-inspection
+failure and the post-materialisation working-directory failure now have
+lifecycle tests. They prove the former neither resolves configuration nor calls
+the release handler, and the latter has resolved configuration but has not
+installed a release. Do not put either path back in a list of unobservable
+branches.
+
+The remaining misses still divide into generated delegation clauses and genuine
+filesystem or process failures:
 
 * **Five are the compiler's own generated clauses**, one line per defaulted
   arity nothing calls: `Castle.install/2` and `/3`, `Castle.Commands.install/2`
   and `/3`, and `Castle.Commands.commit/3`. These *are* hittable — calling the
   intermediate arities was measured to cover all five and to take the total to
-  89.64% — and that is exactly the problem. Each is a delegation whose defaults
-  are a subset of an arity that is already called, so `Castle.install/1` in
-  `castle_test.exs` already establishes that the defaults are the real modules.
-  A case calling `install/3` would assert nothing that arity 1 and arity 4 do
-  not, and would move this number. That is the move this project does not make,
-  and it is the reason 90% is out of reach: five of the seven can only come from
-  here.
-* **Sixteen need a file mode, a device node, or a provider sabotaging Castle's
-  own working directory.** In `Castle.Commands`: `arm/4`'s three publish
-  failures (`work_dir/1` refusing, an `lstat` failing for anything but
-  `:enoent`, a staged marker that cannot be written or linked) together with
-  `unarmed/3` and `detail/1`, the message all three share — seven lines that
-  stand or fall together, and every route to them needs the releases directory
-  to stop behaving between one statement and the next. Plus
-  `armed_version/1`'s unreadable marker, and `describe_type/1`'s catch-all,
-  which only `:device` reaches now and a device node needs root to make. In
+  89.64% in the old measurement — and that is exactly the problem. Each is a
+  delegation whose defaults are a subset of an arity that is already called, so
+  `Castle.install/1` in `castle_test.exs` already establishes that the defaults
+  are the real modules. A case calling `install/3` would assert nothing that
+  arity 1 and arity 4 do not, and would move this number. Tests do not call them
+  only to improve the metric.
+* **The rest need a filesystem race, a device node, or a provider sabotaging
+  Castle's own working directory.** In `Castle.Commands`: the remaining staged
+  marker write or link failures, `armed_version/1`'s unreadable marker, and
+  `describe_type/1`'s catch-all, which only `:device` reaches now and a device
+  node needs root to make. The `Deployment.lstat/1` seam covers a failed initial
+  marker inspection without pretending a permission mode is portable. In
   `Castle.Peer`: `release_file/1`'s and `empty/1`'s listing failures (the
   second unreachable through `work_dir/1` at all, which has just created the
   directory — reaching it means calling `secure_dir/1` on something it never
@@ -1685,7 +1774,7 @@ missed lines are observable in principle, and they divide cleanly:
   some filesystems ignore one, so it would only sometimes describe the state it
   names.
 
-**Two things that were in this list and should not have been.** `publish/2`'s
+**Other things that were in this list and should not have been.** `publish/2`'s
 generic error needs none of the above — `File.ln/2` with a staging file that is
 not there answers `:enoent` and creates no destination — and it is now covered.
 So is `call/2`'s "answered … may carry a version of Castle that predates this
@@ -1743,7 +1832,7 @@ the exit statuses `bin/castle` returns are asserted. None of it is measured here
   `Castle.install/1` in a VM of its own against the same deployment gets the
   filesystem half of the protocol and nothing more: `publish/2` refuses rather
   than replaces, so the marker cannot be silently taken over, and the window the
-  lock closes — two callers both past `unclaimed/3` before either publishes — is
+  lock closes — two callers both past `unclaimed/4` before either publishes — is
   open again between them. Widening the lock does not fix it; a lock the
   filesystem holds would, at the price of a stale one after a hard kill blocking
   every later install. Nothing is known to do this, and Castle does not detect

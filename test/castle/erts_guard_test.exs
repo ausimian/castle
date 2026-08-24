@@ -9,6 +9,8 @@ defmodule Castle.ErtsGuardTest do
 
   import ExUnit.CaptureIO
 
+  alias Castle.FileReason
+
   setup do
     on_exit(fn -> System.delete_env("RELEASE_ROOT") end)
   end
@@ -32,7 +34,7 @@ defmodule Castle.ErtsGuardTest do
       :ok
     end
 
-    test "every operation that would write to the wrong tree raises" do
+    test "every operation that would write to the wrong tree raises", %{tmp_dir: dir} do
       # No release named here exists, and none of these reaches
       # :release_handler - which is the point. Without the guard, make_releases/0
       # would find the Erlang installation's own releases/RELEASES and report
@@ -63,44 +65,30 @@ defmodule Castle.ErtsGuardTest do
         assert error.message =~ refusal
 
         assert error.message =~
-                 "the deployment and the emulator's root are different directories"
+                 "deployment root #{Path.join(dir, "deployment")} differs from emulator root"
 
-        assert error.message =~ "cannot be upgraded by Castle"
+        assert error.message =~ "Castle cannot upgrade this deployment"
       end
     end
 
     test "the refusal is exactly the approved wording", %{tmp_dir: dir} do
       # Asserted whole, not by fragments. Two directories are all the guard
-      # observes, so the message may not claim to know why they differ - and it
-      # has claimed it twice, once asserting a missing ERTS and once asserting
-      # ERL_ROOTDIR as the only alternative. The obvious test, refuting those two
-      # phrasings and requiring the words that ought to be present, does not
-      # actually forbid the defect: "This is caused by include_erts: false"
-      # refutes clean and keeps every required fragment. Since the failure mode
-      # is a *categorical claim* rather than any particular sentence, nothing
-      # short of the full text pins it, and changing the wording deliberately
-      # should mean changing it here too.
+      # observes, so the message may offer common causes but must not claim either
+      # was established. It has made that mistake twice, once asserting a missing
+      # ERTS and once asserting ERL_ROOTDIR as the only alternative.
       deployment = Path.join(dir, "deployment")
       root_dir = to_string(:code.root_dir())
 
       message = assert_raise(Castle.Error, &Castle.make_releases/0).message
 
       assert message ==
-               "Cannot create #{Path.join(root_dir, "releases/RELEASES")}: the deployment " <>
-                 "and the emulator's root are different directories - the deployment is " <>
-                 "#{deployment} and the emulator runs in #{root_dir}. That is where " <>
-                 ":release_handler extracts applications, resolves every lib/<app>-<vsn> " <>
-                 "it reads, and deletes erts-<erts_vsn> from, because those paths are anchored " <>
-                 "to the emulator's root rather than to the deployment. Pointing Castle at " <>
-                 "the deployment instead would only move the release records away from the " <>
-                 "applications they describe. Relocating the records with RELDIR or the " <>
-                 "sasl releases_dir parameter does not help either, for the same reason: " <>
-                 "it moves the bookkeeping and leaves the applications where they were. " <>
-                 "Common causes are building the release with include_erts: false, which " <>
-                 "ships no emulator of its own, and an ERL_ROOTDIR in the environment, " <>
-                 "which the release's erl honours ahead of its own location; there may be " <>
-                 "others. This deployment cannot be upgraded by Castle until the two " <>
-                 "directories are the same one."
+               "Cannot create #{Path.join(root_dir, "releases/RELEASES")}: deployment root " <>
+                 "#{deployment} differs from emulator root #{root_dir}. :release_handler " <>
+                 "resolves applications under the emulator root, so Castle cannot upgrade " <>
+                 "this deployment. Make the roots match before retrying. Common causes " <>
+                 "include include_erts: false, which uses a shared emulator, and ERL_ROOTDIR, " <>
+                 "which overrides its root; other causes are possible. Changing RELDIR or " <>
+                 "sasl releases_dir only moves release records."
     end
 
     test "the read-only diagnostics answer as they always did" do
@@ -112,13 +100,13 @@ defmodule Castle.ErtsGuardTest do
   end
 
   describe "a deployment the guard has nothing to say about" do
-    # Both of these reach the real :release_handler and are refused by it, for a
+    # Both of these reach the real :release_handler and fail there, for a
     # release that does not exist - which is what says the guard let them
     # through. Neither has removed anything.
     test "one whose RELEASE_ROOT is the emulator's own root" do
       System.put_env("RELEASE_ROOT", to_string(:code.root_dir()))
 
-      assert_raise Castle.Error, ~r/^Removal of 9\.9\.9 failed\./, fn ->
+      assert_raise Castle.Error, ~r/^Removal failed for 9\.9\.9:/, fn ->
         Castle.remove("9.9.9")
       end
     end
@@ -126,7 +114,7 @@ defmodule Castle.ErtsGuardTest do
     test "one with no RELEASE_ROOT at all, which is anything but a release" do
       System.delete_env("RELEASE_ROOT")
 
-      assert_raise Castle.Error, ~r/^Removal of 9\.9\.9 failed\./, fn ->
+      assert_raise Castle.Error, ~r/^Removal failed for 9\.9\.9:/, fn ->
         Castle.remove("9.9.9")
       end
     end
@@ -144,12 +132,14 @@ defmodule Castle.ErtsGuardTest do
 
       message = assert_raise(Castle.Error, &Castle.make_releases/0).message
 
-      assert message =~ "cannot tell whether the deployment and the emulator's root"
-      assert message =~ "never-created could not be read (enoent)"
+      assert message =~ "could not verify that the deployment and emulator roots are the same"
+
+      assert message =~
+               "cannot inspect #{Path.join(dir, "never-created")}: #{FileReason.format(:enoent)}"
 
       # The distinction is the whole point: it must not claim the finding that
       # the version before this one claimed.
-      refute message =~ "are different directories"
+      refute message =~ "differs from emulator root"
     end
 
     @tag :tmp_dir
@@ -165,8 +155,8 @@ defmodule Castle.ErtsGuardTest do
 
       message = assert_raise(Castle.Error, &Castle.make_releases/0).message
 
-      assert message =~ "are different directories"
-      refute message =~ "cannot tell whether"
+      assert message =~ "differs from emulator root"
+      refute message =~ "could not verify that the deployment and emulator roots are the same"
     end
   end
 end

@@ -4,6 +4,7 @@ defmodule Castle.PeerTest do
   use ExUnit.Case, async: false
 
   alias Castle.Commands
+  alias Castle.FileReason
   alias Castle.IoSink
   alias Castle.PeerProviderStub
   alias Castle.SyntheticRelease
@@ -301,7 +302,7 @@ defmodule Castle.PeerTest do
       File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "other.rel"))
 
       assert {:error, message} = Castle.Peer.materialise(vsn_dir)
-      assert message =~ "Found more than one release file"
+      assert message =~ "Cannot determine the release file"
       assert message =~ "synthetic.rel"
       assert message =~ "other.rel"
     end
@@ -314,7 +315,7 @@ defmodule Castle.PeerTest do
       File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "synthetic-2.0.0.rel"))
 
       assert {:error, message} = Castle.Peer.materialise(vsn_dir)
-      assert message =~ "Found more than one release file"
+      assert message =~ "Cannot determine the release file"
       assert message =~ "synthetic-2.0.0.rel"
     end
 
@@ -323,7 +324,7 @@ defmodule Castle.PeerTest do
       File.cp!(Path.join(vsn_dir, "synthetic.rel"), Path.join(vsn_dir, "other.rel"))
 
       assert {:error, message} = Castle.Peer.materialise(vsn_dir)
-      assert message =~ "Found more than one release file"
+      assert message =~ "Cannot determine the release file"
       assert message =~ "other.rel"
     end
 
@@ -362,7 +363,7 @@ defmodule Castle.PeerTest do
       # and as terms - and it is the second that decides whether there is
       # anything to resolve at all. `:file.consult/1` answers a
       # `{Line, Module, Reason}` tuple for this rather than a posix atom, which is
-      # the one reason `format_error/1` has a clause for something that is not an
+      # the reason `FileReason.format/1` has a clause for something that is not an
       # atom: the line is the part an operator needs, and it is inside the tuple.
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
       sys_config = Path.join(vsn_dir, "sys.config")
@@ -664,7 +665,7 @@ defmodule Castle.PeerTest do
       File.ln_s!(elsewhere, pristine)
 
       assert {:error, message} = Commands.materialise(vsn_dir)
-      assert message =~ "Cannot read #{pristine}. no such file or directory"
+      assert message =~ "Cannot read #{pristine}. #{FileReason.format(:enoent)}"
       assert message =~ "Remove it, and unpack 1.0.0 again as well if"
 
       # Nothing was written through the link, and nothing was left behind either.
@@ -738,9 +739,12 @@ defmodule Castle.PeerTest do
       File.ln_s!(secret, planted)
 
       assert {:error, message} = Castle.Peer.secure_dir(poisoned)
+      assert message =~ "Cannot use #{poisoned}"
       assert message =~ "sys.config"
-      assert message =~ "Nothing has been written"
+      assert message =~ "removed it without writing to it"
       assert message =~ "umask"
+      refute message =~ "assemble configuration"
+      refute message =~ "without writing configuration"
 
       # Refused, removed, and the file that was pointed at neither truncated nor
       # written through: rm_rf unlinks a symlink rather than following it.
@@ -829,9 +833,10 @@ defmodule Castle.PeerTest do
       path = Path.join(root, "copy")
 
       assert {:error, message} = Castle.Peer.write_private(path, "secret")
-      assert message =~ root
+      assert message =~ "Cannot write in #{root}"
       assert message =~ "0755"
       assert message =~ "owner-only"
+      refute message =~ "Cannot write configuration in"
       refute File.exists?(path)
     end
 
@@ -898,7 +903,7 @@ defmodule Castle.PeerTest do
 
       # The close's own reason, which the write cannot produce here because the
       # write succeeded.
-      assert message =~ "Cannot write #{path}. no space left on device"
+      assert message =~ "Cannot write #{path}. #{FileReason.format(:enospc)}"
 
       # And the mode goes on only once both have succeeded, so a file that was
       # not written in full is never given the mode that says it was.
@@ -922,7 +927,7 @@ defmodule Castle.PeerTest do
       File.rm!(path)
 
       assert {:error, message} = Castle.Peer.fill(handle, path, "the configuration")
-      assert message =~ "Cannot set the mode of #{path}. no such file or directory"
+      assert message =~ "Cannot set the mode of #{path}. #{FileReason.format(:enoent)}"
       refute File.exists?(path)
     end
 
@@ -937,7 +942,7 @@ defmodule Castle.PeerTest do
       model = Path.join(root, "sys.config")
 
       assert {:error, message} = Castle.Peer.write_like(path, "the configuration", model)
-      assert message =~ "Cannot read #{model}. no such file or directory"
+      assert message =~ "Cannot read #{model}. #{FileReason.format(:enoent)}"
 
       # Written, and left at the mode a file holding configuration is created
       # with. Failing part way leaves it narrower than intended, never wider.
@@ -954,7 +959,7 @@ defmodule Castle.PeerTest do
       path = Path.join(missing, "sys.config")
 
       assert {:error, message} = Castle.Peer.write_private(path, "the configuration")
-      assert message =~ "Cannot read #{missing}. no such file or directory"
+      assert message =~ "Cannot read #{missing}. #{FileReason.format(:enoent)}"
       refute File.exists?(path)
     end
 
@@ -966,7 +971,7 @@ defmodule Castle.PeerTest do
 
       assert {:error, message} = Castle.Peer.work_dir(missing)
       assert message =~ "Cannot create #{Path.join(missing, "castle-")}"
-      assert message =~ "no such file or directory"
+      assert message =~ FileReason.format(:enoent)
       refute File.exists?(missing)
     end
 
@@ -986,7 +991,7 @@ defmodule Castle.PeerTest do
       destination = Path.join(root, "sys.config.pristine")
 
       assert {:error, message} = Castle.Peer.publish(staging, destination)
-      assert message =~ "Cannot write #{destination}. no such file or directory"
+      assert message =~ "Cannot write #{destination}. #{FileReason.format(:enoent)}"
       refute File.exists?(destination)
     end
 

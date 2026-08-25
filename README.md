@@ -80,8 +80,10 @@ the launcher setup Castle needs.
 
 ## Appups and relups
 
-Write an appup for each application whose code changes during a hot upgrade.
-The appup file uses Erlang terms written in Elixir syntax:
+Write an appup for each application you own that has to be upgraded in place.
+Whether a given transition needs one depends on the strategy below and on which
+applications changed; `mix castle.relup` documents the rules. The appup file
+uses Erlang terms written in Elixir syntax:
 
 ```elixir
 {
@@ -98,7 +100,7 @@ The appup file uses Erlang terms written in Elixir syntax:
 Generate a relup between assembled releases:
 
 ```shell
-mix forecastle.relup \
+mix castle.relup \
   --target _build/prod/rel/my_app/releases/1.1.0/my_app \
   --fromto _build/prod/rel/my_app/releases/1.0.0/my_app
 ```
@@ -106,6 +108,14 @@ mix forecastle.relup \
 The task writes `relup` to the project root by default. Leave it there for the
 next release build to package. Use `--hot` to require a hot transition or
 `--restart` to force a one-stage emulator restart.
+
+`mix castle.relup` is implemented in Forecastle, which Castle brings in as a
+build-time dependency. It is named for Castle because that is the package a
+project depends on, and nothing has to be added to `deps` to get it.
+
+The appup compiler comes from Forecastle the same way, but is named for what it
+does rather than for either package: it stays `mix compile.appup`, reached
+through the `:compilers` list above. There is no `mix castle.appup`.
 
 ## Managing releases
 

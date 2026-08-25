@@ -21,6 +21,15 @@ Forecastle 1.x and Elixir 1.18 or later.
 
 ### Changed
 
+- `mix forecastle.relup` is now `mix castle.relup`, and the README documents it
+  as Castle's while naming Forecastle as its implementer. There is no
+  compatibility alias, so a build pipeline calling the old name has to be
+  updated. Nothing changes in `deps` — Castle already brings Forecastle in at
+  build time, and which half implements a task is a packaging decision rather
+  than something a consumer should have to learn. The appup compiler is **not**
+  renamed and is unaffected: it stays `mix compile.appup`, named by its
+  `:compilers` entry rather than by either package.
+  ([forecastle#24](https://github.com/ausimian/forecastle/issues/24))
 - Release-management commands now raise on refusal or a returned OTP error, so
   `bin/castle` exits non-zero. Successful command output is unchanged.
 - Operator-facing errors and warnings are shorter, distinguish preflight

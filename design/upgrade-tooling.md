@@ -1,6 +1,9 @@
 # Upgrade tooling: appups, relups, and the tasks around them
 
-**Status:** accepted, unimplemented. Supersedes nothing.
+**Status:** accepted. D1 is implemented — the tasks are named `castle.*` as of
+[forecastle#24](https://github.com/ausimian/forecastle/issues/24), enforced by
+[castle#33](https://github.com/ausimian/castle/issues/33). The rest is
+unimplemented. Supersedes nothing.
 **Spans:** [ausimian/castle](https://github.com/ausimian/castle) and
 [ausimian/forecastle](https://github.com/ausimian/forecastle).
 **Tracked by:** [castle#32](https://github.com/ausimian/castle/issues/32).
@@ -55,7 +58,7 @@ appup lookups in `appup_file/2` — and those only exist **after** `:assemble`.
 So the real workflow is:
 
 1. `mix release` — assemble the target.
-2. `mix forecastle.relup --target … --fromto …` — write `relup` to the project root.
+2. `mix castle.relup --target … --fromto …` — write `relup` to the project root.
 3. `mix release --overwrite` — assemble it again, this time packaging the relup.
 
 The double build is mandatory and undocumented. Worse, it makes a mutable file in

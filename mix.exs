@@ -125,7 +125,18 @@ defmodule Castle.MixProject do
       # together, so each depends on the other's integration branch. This MUST be
       # flipped back to {:forecastle, "~> 1.0", runtime: false} before publishing:
       # mix hex.publish hard-fails on a git dependency.
-      {:forecastle, github: "ausimian/forecastle", branch: "release/1.0.0", runtime: false},
+      #
+      # Pinned to `feature/upgrade-tooling` rather than `release/1.0.0` for the
+      # duration of castle#32. The tooling work changes both halves at once - the
+      # task rename and the appup coverage check are Forecastle's, the
+      # `upgrade_from:` option is Castle's - so a branch here that read the
+      # integration branch would be building against a Forecastle without them.
+      # It goes back to `release/1.0.0` when that tree merges, and there is
+      # precedent for forgetting: the fixture's own pin had to be moved off
+      # castle#14's issue branch before that branch was deleted, which nothing
+      # enforced either.
+      {:forecastle,
+       github: "ausimian/forecastle", branch: "feature/upgrade-tooling", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:publisho, "~> 1.0", only: :dev, runtime: false}

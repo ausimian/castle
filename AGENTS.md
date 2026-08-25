@@ -1197,7 +1197,7 @@ which is precisely what `customize/1` exists to prevent. Mix validates `:steps`
 **It changes exactly one option.** What a consumer still has to declare by hand
 is listed in the `@doc`, because the alternative is finding out from a failed
 upgrade: the `:appup` project key with `compilers: Mix.compilers() ++ [:appup]`,
-a relup from `mix forecastle.relup` left in the project root, and
+a relup from `mix castle.relup` left in the project root, and
 `include_executables_for: [:unix]` — Windows is unsupported and assembly only
 warns — plus the optional `rel/env.sh.eex`. `:steps` is the one option whose
 contents are Castle's business; the others are the project's own choices, and
@@ -1920,10 +1920,22 @@ the exit statuses `bin/castle` returns are asserted. None of it is measured here
   refuses: `mix docs` catches a broken *reference*, and nothing at all catches a
   true sentence that has stopped being true. Both are read against
   `Castle.Commands` by hand.
-- **The README is out of date.** It documents an `:appup` compiler and a
-  `mix castle.relup` task that moved to Forecastle in 0.3.0, the release
-  management commands it describes on `bin/<release>` now live on `bin/castle`,
-  and its integration section still tells a consumer to place
-  `Forecastle.pre_assemble/1` and `Forecastle.post_assemble/1` around
-  `:assemble` by hand, which is what `Castle.customize/1` replaced
-  ([#9](https://github.com/ausimian/castle/issues/9)).
+- **Nothing runs the README's build-time instructions the way a consumer would,
+  and the gap is narrower than "there is no test".** Forecastle's suite
+  exercises `mix castle.relup` and the `:appup` compiler thoroughly — but its
+  sample fixture takes Forecastle as a `path` dependency with `override: true`,
+  so what it establishes is that the implementations work, not the claim this
+  README actually makes: that depending on **Castle alone** is enough to get
+  them. Neither repository runs that flow, and the `override:` is deliberate
+  (Forecastle has to be testable without Castle's API), so it is not something
+  to fix by tidying the fixture.
+
+  That is not hypothetical. Closing
+  [#9](https://github.com/ausimian/castle/issues/9) documented
+  `mix castle.relup` here while `mix.lock` still pinned a Forecastle from before
+  [forecastle#24](https://github.com/ausimian/forecastle/issues/24) renamed it —
+  so a clean checkout honouring the committed lock had no such task, and the
+  whole suite stayed green. Advancing the pin is what made the documentation
+  true. Until a consumer-shaped fixture exists, the check is manual: read the
+  lock against Forecastle's task surface whenever either side of the pair
+  changes.

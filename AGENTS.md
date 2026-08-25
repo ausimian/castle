@@ -1615,6 +1615,75 @@ underneath it, and answers with the new value. What lets it is that materialisin
 leaves no `config_provider_booted` marker behind and preserves the header Mix
 wrote, so Elixir's pipeline is still armed in the file the launcher reads.
 
+`test/castle/no_mix_tasks_test.exs` asserts something about the *pair* rather
+than about any of Castle's behaviour: **Castle ships no Mix tasks.** Every
+build-time task lives in Forecastle, whatever it is called — and since
+[forecastle#24](https://github.com/ausimian/forecastle/issues/24) they are called
+`castle.*`, because the namespace follows the vocabulary a developer thinks in
+rather than the package that implements them. That leaves `Mix.Tasks.Castle.*`
+a namespace both projects could write into, and Mix resolves a task by module
+name alone, so a module defined on both sides would be decided by whichever
+`ebin` came first on the code path, with nothing to say which had won.
+
+It reads the `ebin` rather than the application metadata, and the difference is
+not pedantry. `Mix.Task.load_all/0` walks `:code.get_path()` and matches each
+directory entry against `Elixir.Mix.Tasks.<name>.beam` — a filename, with no
+reference to a `.app` anywhere in it — so the beams are what the invariant is
+about, and `Mix.Project.compile_path/0` is where Castle's own beams are. The
+first version of this test asked `Application.spec(:castle, :modules)` instead
+and would have passed while Castle shipped a task: `Mix.Tasks.Compile.App` fills
+`:modules` in with `Keyword.put_new_lazy/3`, so a project that supplies its own
+list in `application/0` keeps it. Adding `modules: [Castle]` there and a task
+under `lib/mix/tasks/` produces a tree where the metadata says `[Castle]`, the
+beam sits in `ebin`, and `Mix.Task.load_all/0` finds the task — which is the
+whole hazard, reported clean.
+
+Scoping to Castle's *own* `ebin` rather than the code path is the other half:
+Castle takes Forecastle as a build-time dependency, so Forecastle's `ebin` is on
+the code path during this very test and `Mix.Tasks.Castle.Relup` is in it. That
+one is Forecastle's and is supposed to be there. A code-path check would fail on
+it; this one is scoped to the only side of the collision this project controls.
+
+There are two cases because a beam check can only see the environment that
+compiled it. `mix test` compiles one, and a module behind a `Mix.env()`
+condition would be absent there and present elsewhere, so the source is checked
+too. That second case reads the source with **Elixir's parser**, not a regex,
+and the reason is a concrete miss rather than taste: `defmodule(Mix.Tasks.X)` is
+ordinary Elixir that `mix format` preserves, and a pattern anchored on
+whitespace after `defmodule` never matched it — put that inside a `:prod` branch
+and *both* checks reported clean on a tree that ships a task. Relaxing the
+pattern only trades the miss for the opposite error, since module-looking prose
+in a `@moduledoc` would start matching. A `defmodule` is an AST node whatever
+the spacing and parenthesisation, and a heredoc is a binary in that AST rather
+than a node, so asking the parser settles both directions at once. Two cases in
+the file pin exactly those two, because both were live bugs in the first draft.
+
+Each check guards against looking at nothing: `Elixir.Castle.beam` must be among
+the entries, and `castle.ex` among the sources, because an empty directory
+filters to no tasks and that is indistinguishable from a clean result.
+
+**What the source check enforces is narrower than "no task in `lib`", and the
+difference is on the record rather than assumed.** It matches the two forms a
+module name is *written* in — an alias, `defmodule Mix.Tasks.X`, and a literal
+atom, `defmodule :"Elixir.Mix.Tasks.X"`. It does not *resolve* names, so
+`alias Mix.Tasks, as: N` followed by `defmodule N.Castle.X` defines the module
+and is invisible to it, as are a name built by `Module.concat/1`, one produced
+by a macro, and `Module.create/3`. Doing better means implementing alias scoping
+and constant folding inside a test, which is a compiler; the stopping point is
+to say so, and a case in the file pins the aliased form as a known limit so it
+reads as a decision rather than a gap someone rediscovers.
+
+That limit costs less than it looks, because the two checks fail differently.
+The beam check cannot be fooled by *any* of those forms — each still writes
+`Elixir.Mix.Tasks.<name>.beam` into `ebin`, which is the file Mix actually
+reads — so the only state that escapes both is a module named indirectly **and**
+compiled only in an environment `mix test` does not build. Reaching it is not a
+slip; it is circumvention of an invariant stated in words here, in the test, and
+in `design/upgrade-tooling.md`. Closing it would take a clean `MIX_ENV=prod`
+build scanned for task beams, which is a publish-time gate rather than a test,
+and it is not built. What this guards is the accident — someone adding
+`lib/mix/tasks/foo.ex` because it looked like the natural home for it.
+
 ### What `mix test --cover` measures
 
 `mix test --cover` measures `lib`, and `test_coverage` in `mix.exs` names the

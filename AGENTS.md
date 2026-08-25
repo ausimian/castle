@@ -1663,9 +1663,11 @@ the entries, and `castle.ex` among the sources, because an empty directory
 filters to no tasks and that is indistinguishable from a clean result.
 
 **What the source check enforces is narrower than "no task in `lib`", and the
-difference is on the record rather than assumed.** It matches the two forms a
-module name is *written* in — an alias, `defmodule Mix.Tasks.X`, and a literal
-atom, `defmodule :"Elixir.Mix.Tasks.X"`. It does not *resolve* names, so
+difference is on the record rather than assumed.** It matches the forms a module
+name is *written* in — an alias, `defmodule Mix.Tasks.X`; the same alias fully
+qualified, `defmodule Elixir.Mix.Tasks.X`, which parses with an extra leading
+segment; and a literal atom, `defmodule :"Elixir.Mix.Tasks.X"`. It does not
+*resolve* names, so
 `alias Mix.Tasks, as: N` followed by `defmodule N.Castle.X` defines the module
 and is invisible to it, as are a name built by `Module.concat/1`, one produced
 by a macro, and `Module.create/3`. Doing better means implementing alias scoping

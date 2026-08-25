@@ -139,6 +139,24 @@ defmodule Castle.NoMixTasksTest do
     assert task_definitions(@heredoc_sample, "docs.ex") == []
   end
 
+  # `Elixir.Mix.Tasks.X` names the same module as `Mix.Tasks.X` and parses with
+  # an extra leading segment, which the first version of the matcher did not
+  # expect. Guarded by an environment branch it was invisible to the beam check
+  # too, so it escaped the pair the same way the parenthesised form did.
+  test "the source check sees a fully qualified alias" do
+    source = ~S"""
+    if Mix.env() == :prod do
+      defmodule Elixir.Mix.Tasks.Castle.Qualified do
+        use Mix.Task
+      end
+    end
+    """
+
+    assert task_definitions(source, "qualified.ex") == [
+             "qualified.ex:2: Mix.Tasks.Castle.Qualified"
+           ]
+  end
+
   # The other written form of a module name.
   test "the source check sees a literal atom module name" do
     source = ~S"""
@@ -171,8 +189,9 @@ defmodule Castle.NoMixTasksTest do
   # AST node whatever the spacing, parenthesisation or line breaks around it
   # are, and text inside a string literal is a binary in that AST rather than a
   # node - so both of the cases above fall out of asking the parser instead of
-  # the characters. It matches the two forms a module name is *written* in: an
-  # alias (`Mix.Tasks.X`) and a literal atom (`:"Elixir.Mix.Tasks.X"`).
+  # the characters. It matches the forms a module name is *written* in: an alias
+  # (`Mix.Tasks.X`), the same alias fully qualified (`Elixir.Mix.Tasks.X`), and a
+  # literal atom (`:"Elixir.Mix.Tasks.X"`).
   #
   # **What it does not do is resolve names, and that is a deliberate limit
   # rather than an oversight.** `alias Mix.Tasks, as: N` followed by
@@ -200,8 +219,10 @@ defmodule Castle.NoMixTasksTest do
 
     {_ast, found} =
       Macro.prewalk(ast, [], fn
-        {:defmodule, meta, [{:__aliases__, _, [:Mix, :Tasks | _] = segments} | _]} = node, acc ->
-          {node, [{line(meta), Module.concat(segments)} | acc]}
+        {:defmodule, meta, [{:__aliases__, _, segments} | _]} = node, acc ->
+          if task_alias?(segments),
+            do: {node, [{line(meta), Module.concat(segments)} | acc]},
+            else: {node, acc}
 
         {:defmodule, meta, [module | _]} = node, acc when is_atom(module) ->
           if match?("Elixir.Mix.Tasks." <> _, Atom.to_string(module)),
@@ -216,6 +237,14 @@ defmodule Castle.NoMixTasksTest do
     |> Enum.reverse()
     |> Enum.map(fn {line, module} -> "#{label}:#{line}: #{inspect(module)}" end)
   end
+
+  # `Mix.Tasks.X` parses to `[:Mix, :Tasks, :X]`, and the fully qualified
+  # `Elixir.Mix.Tasks.X` to `[Elixir, :Mix, :Tasks, :X]` - the same module,
+  # written twice. `Module.concat/1` already renders both as `Mix.Tasks.X`, so
+  # only the recognition needs to know about the prefix.
+  defp task_alias?([Elixir | rest]), do: task_alias?(rest)
+  defp task_alias?([:Mix, :Tasks | _]), do: true
+  defp task_alias?(_segments), do: false
 
   defp line(meta), do: Keyword.get(meta, :line, 0)
 end

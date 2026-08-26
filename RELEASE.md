@@ -10,14 +10,19 @@ Forecastle 1.x and Elixir 1.18 or later.
 - Relup generation during assembly. A release that names one or more baselines
   with the `upgrade_from:` option — `tar:` a shipped tarball, `rel:` an
   assembled release or `ref:` a git ref — has its relup generated into the
-  version being assembled and packed with it, so a single `mix release` produces
-  a tarball carrying its own upgrade plan. Both directions are generated for
-  every baseline. This replaces the build-generate-rebuild cycle
+  version being assembled by a step placed immediately before `:tar`, so the
+  default `[:assemble, :tar]` produces a tarball carrying its own upgrade plan
+  from a single `mix release`. A project that packs its own archive, in a step
+  with no `:tar` or in one placed after it, has to place the generating step
+  itself; `Castle.customize/1` and the README give the rule. Both directions are
+  generated for every baseline. This replaces the build-generate-rebuild cycle
   `mix castle.relup` required, which the README documented without ever saying
-  that it was two builds. `mix castle.relup` remains for a plan between two
-  artefacts that already exist and for the `--hot`/`--restart` strategies; a
-  project-root `relup` and `upgrade_from:` together are refused rather than
-  ordered by precedence. Omitting the option assembles exactly as before.
+  that it was two builds. `mix castle.relup` remains for a target that is
+  already assembled, for separate up and down baselines, and for the
+  `--hot`/`--restart` strategies; it takes the same baseline specs, so a `ref:`
+  baseline is built there too. A project-root `relup` and `upgrade_from:`
+  together are refused rather than ordered by precedence. Omitting the option
+  assembles exactly as before.
   ([forecastle#28](https://github.com/ausimian/forecastle/issues/28))
 - Target configuration through a temporary VM running the target release's boot
   script, emulator and config providers. Each run starts from the original
@@ -44,6 +49,16 @@ Forecastle 1.x and Elixir 1.18 or later.
   ([forecastle#24](https://github.com/ausimian/forecastle/issues/24))
 - Release-management commands now raise on refusal or a returned OTP error, so
   `bin/castle` exits non-zero. Successful command output is unchanged.
+- The missing-`:tar` build warning now says something different when the release
+  also sets `upgrade_from:`. With no `:tar` the relup step is appended last, so
+  a step of the project's own that packs the archive packs it before the relup
+  is generated — and the previous wording told the author, on the error channel,
+  that no change was needed. It now states the rule that governs where the relup
+  step goes — after every step that changes the release, immediately before the
+  one that packs what ships — says what adding `:tar` achieves and what falls
+  outside it, and withdraws the two qualifications that do not hold for a
+  release naming baselines. The wording is unchanged for a release that does not
+  set the option.
 - Operator-facing errors and warnings are shorter, distinguish preflight
   refusals from attempted operations, report whether the configuration step ran,
   and preserve paths, reasons and recovery steps.

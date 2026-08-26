@@ -39,18 +39,34 @@ defmodule Castle.CustomizeTest do
     # writes a step before `:assemble` because it has to run before the release
     # is written, and one after because it has to run on what was written.
     #
-    # The relup step goes after the project's own post-assembly steps and not
-    # merely after `post_assemble/1`, which is Forecastle's decision and is
-    # pinned here because it is Castle's `@doc` that promises it: a function
-    # step between `:assemble` and `:tar` is Mix's documented way to change an
-    # assembled release, so generating the relup before one would describe a
-    # tree that `:tar` then packs differently.
+    # The relup step goes after the project's own steps *between `:assemble` and
+    # `:tar`*, and not merely after `post_assemble/1`. That is Forecastle's
+    # decision and is pinned here because it is Castle's `@doc` that promises
+    # it: a function step in exactly that span is Mix's documented way to change
+    # an assembled release, so generating the relup before one would describe a
+    # tree that `:tar` then packs differently. The span is the claim, not "after
+    # every step the project wrote" - Mix permits one after `:tar` too, and the
+    # case below covers it.
     test "keeps the project's own steps, and their order" do
       own_pre = fn release -> release end
       own_post = fn release -> release end
 
       assert Castle.customize(steps: [own_pre, :assemble, own_post, :tar]) ==
                [steps: [own_pre, pre(), :assemble, post(), own_post, relup(), :tar]]
+    end
+
+    # **A step after `:tar` is a list Mix accepts**, and it is the one placement
+    # the relup step does not come after. `validate_steps!/1` requires exactly
+    # one `:assemble`, at most one `:tar` and `:tar` after `:assemble`, and says
+    # nothing about function steps that follow it - so generation lands before
+    # `:tar` while the project's step runs after both, which is what makes the
+    # `:tar` remedy conditional rather than absolute (see the warning cases
+    # below). Nothing else in this file covers a step in that position.
+    test "leaves a step after :tar where it was, generating before :tar" do
+      own_post_tar = fn release -> release end
+
+      assert Castle.customize(steps: [:assemble, :tar, own_post_tar]) ==
+               [steps: [pre(), :assemble, post(), relup(), :tar, own_post_tar]]
     end
 
     # `:steps` absent is the case a project reaches by saying nothing, so the
@@ -155,6 +171,131 @@ defmodule Castle.CustomizeTest do
 
     test "says nothing about the default, which has one" do
       Castle.customize([])
+
+      refute_received {:mix_shell, :error, _}
+    end
+  end
+
+  # **The one case where the qualifications above are false, and it is a
+  # measured failure rather than a theoretical one.** With no `:tar` there is no
+  # packing step for the relup step to precede, so `Forecastle.steps/1` appends
+  # it last - after every step the project wrote. A project that packs its own
+  # archive in a function step therefore packs it *before* the relup is
+  # generated: the release ships an archive with no upgrade plan in it while the
+  # plan sits in the version directory on disk, the build exits 0, and the
+  # warning tells the author no change is needed.
+  #
+  # A fixture project with `steps: [:assemble, &pack/1]` and an `upgrade_from:`
+  # was built to confirm exactly that before this branch was added.
+  describe "customize/1 with no :tar and an upgrade_from:" do
+    test "names the ordering and the step to place" do
+      Castle.customize(steps: [:assemble], upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      assert message =~ ":tar"
+      assert message =~ "upgrade_from:"
+      assert message =~ "appended last"
+      assert message =~ "&Forecastle.generate_relup/1"
+    end
+
+    # **Both sides of the placement, because one side of it is wrong.** "Before
+    # the step that packs" is right for a read-only packer and wrong for a step
+    # that shapes the tree and then packs it - an ordinary thing for one
+    # function step to do. Generation then reads the tree as it was while the
+    # archive holds the tree as it became, so the release ships an upgrade plan
+    # for code it is not carrying: the same failure the late placement of this
+    # step exists to prevent, arrived at through the workaround for its edge
+    # case.
+    #
+    # Measured on a fixture project, not reasoned about. A packing step that
+    # rewrites the app's appup first produced an archived relup saying
+    # `brutal_purge` beside a regenerated on-disk one saying `soft_purge`, with
+    # the build green throughout.
+    test "constrains the placement on both sides, and says to split a step that does both" do
+      Castle.customize(steps: [:assemble], upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      assert message =~ "after every step that changes the release"
+      assert message =~ "immediately before the one that packs"
+      assert message =~ "splitting a step that does both"
+    end
+
+    # **`:tar` is the simple answer and is not an unconditional one, and this
+    # message said it was for one round.** `Mix.Release.validate_steps!/1`
+    # permits a function step *after* `:tar`, so `[:assemble, :tar, &pack/1]` is
+    # a list Mix accepts and this warning does not even fire for - and a step
+    # running after `:tar` can change the release and pack an artefact of its
+    # own from the changed tree. Measured: a step after `:tar` that rewrites the
+    # app's appup packs an archive carrying the rewritten appup beside a relup
+    # generated from the original.
+    test "names what :tar achieves and what is outside it" do
+      Castle.customize(steps: [:assemble], upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      assert message =~ "the relup goes into the archive :tar builds"
+      assert message =~ "unless a later step changes the release or packs an artefact of its own"
+
+      # The unconditional promise is gone, not merely qualified further down.
+      refute message =~ "needs nothing further"
+    end
+
+    # The half that a case looking only for the new sentence would miss: the two
+    # qualifications are *withdrawn*, not merely added to. Left in, the message
+    # would say on the error channel that the one thing the author has to do is
+    # unnecessary - and a release naming baselines to be upgraded from is a
+    # target rather than something used only as an upgrade base.
+    test "withdraws the qualifications that are false here" do
+      Castle.customize(steps: [:assemble], upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      refute message =~ "No change is needed if another step creates the archive"
+      refute message =~ "used only as an upgrade base needs no tarball of its own"
+    end
+
+    # The same evidentiary rule as the case above, in the case that tempted a
+    # verdict hardest. `customize/1` still cannot see whether any step packs, so
+    # it must not say the archive will lack the relup: a project may pack
+    # nothing in these steps at all, or add `:tar` to the steps still to run.
+    test "claims no verdict about what the archive will contain" do
+      Castle.customize(steps: [:assemble], upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"])
+
+      assert_received {:mix_shell, :error, [message]}
+
+      refute message =~ "will not contain"
+      refute message =~ "without the relup"
+      refute message =~ "no relup"
+
+      # And the consequence stays conditional on a step that packs, rather than
+      # the condition being dropped along with the verdict.
+      assert message =~ "a step of your own that packs the archive"
+    end
+
+    # Presence, never contents. Forecastle refuses this value at
+    # `pre_assemble/1` a moment later; the `:tar` observation is true whatever
+    # the value is, and a `customize/1` that started reading the list to decide
+    # what to say would be the second implementation of Forecastle's rules that
+    # this module exists to avoid.
+    test "reads only that the option is set, not what it holds" do
+      Castle.customize(steps: [:assemble], upgrade_from: [])
+
+      assert_received {:mix_shell, :error, [message]}
+      assert message =~ "upgrade_from:"
+    end
+
+    test "says nothing when the list has :tar" do
+      Castle.customize(steps: [:assemble, :tar], upgrade_from: ["tar:a.tar.gz"])
+
+      refute_received {:mix_shell, :error, _}
+    end
+
+    # The default carries `:tar`, so naming baselines while saying nothing about
+    # steps is the ordinary case and is silent.
+    test "says nothing about the default, which has :tar" do
+      Castle.customize(upgrade_from: ["tar:a.tar.gz"])
 
       refute_received {:mix_shell, :error, _}
     end

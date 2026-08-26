@@ -73,7 +73,9 @@ function later, when Castle is available.
 
 `Castle.customize/1` adds Forecastle's assembly steps around `:assemble`. When
 `:steps` is omitted, it uses `[:assemble, :tar]`. An explicit steps list is
-preserved; Castle warns if it has no `:tar` step.
+preserved; Castle warns if it has no `:tar` step. It changes that one option and
+passes every other release option through, `upgrade_from:` included — see
+[Appups and relups](#appups-and-relups).
 
 You can also provide `rel/env.sh.eex`. Forecastle keeps its contents and appends
 the launcher setup Castle needs.
@@ -97,7 +99,113 @@ uses Erlang terms written in Elixir syntax:
 }
 ```
 
-Generate a relup between assembled releases:
+### Generating the relup during the build
+
+Name the releases this one can be upgraded from, and the build generates the
+relup:
+
+```elixir
+defp releases do
+  [
+    my_app: fn ->
+      [
+        include_executables_for: [:unix],
+        upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"]
+      ]
+      |> Castle.customize()
+    end
+  ]
+end
+```
+
+The relup is written into the version being assembled by a step placed
+immediately before `:tar`, so the default `[:assemble, :tar]` produces a tarball
+carrying its own upgrade plan from a single `mix release`. Both directions are
+generated for every baseline, so each named version can also be rolled back to.
+
+**One rule governs where the relup step goes**, and the default `:steps` satisfy
+it without your doing anything: the relup must be generated **after every step
+that changes the release, and immediately before the one that packs what you
+ship.** With `[:assemble, :tar]` that is exactly where Forecastle puts it.
+
+Two ways to get it wrong, both of which build green:
+
+- **No `:tar`, and a step of your own packs the archive.** With no `:tar` to
+  precede, the relup step is appended last — after everything in the list — so
+  your archive is packed before the relup exists and ships without one. Place
+  `&Forecastle.generate_relup/1` in `:steps` yourself, before the packing step.
+  If one step both shapes the tree and packs it, split it in two and put the
+  generation between them: generated too early, the relup describes the tree as
+  it *was* while the archive holds the tree as it became — an upgrade plan for
+  code the release is not carrying.
+- **A function step after `:tar`.** Mix allows one, and Forecastle generates the
+  relup before `:tar`, so such a step runs after generation. If it changes the
+  release, or packs an artefact of its own, that artefact is outside the plan
+  the relup describes. Adding `:tar` puts the relup in the archive `:tar`
+  builds; it says nothing about one packed afterwards.
+
+`Castle.customize/1` warns about a missing `:tar` and says all of this, but it
+cannot see which of your steps packs or which of them mutates, so the placement
+is yours to get right — and it cannot warn at all about the second case, since a
+list containing `:tar` looks correct to it.
+
+Note also that with no `:tar` the appended step still runs even if you placed
+one yourself, so the relup is generated a second time after your archive is
+packed and its summary line appears twice. That is expected, and it is why the
+relup left on disk can differ from the one in your archive.
+
+Each baseline is named by a spec, and there are three sources:
+
+| Spec | Baseline |
+| --- | --- |
+| `tar:artifacts/my_app-1.0.0.tar.gz` | a release tarball that was shipped |
+| `rel:_build/prod/rel/my_app/releases/1.0.0/my_app` | an assembled release |
+| `ref:1.0.0` | a git ref, built in a worktree |
+
+A value with no prefix is a `rel:` path.
+
+**Prefer `tar:` wherever the artefact that actually shipped still exists.**
+`:release_handler` selects a relup entry by from-version string and never checks
+that the running code is what the relup was generated against. A baseline
+rebuilt from source today is built with today's Erlang, Elixir and dependencies,
+so if the module set differs at all from what is deployed, the relup's
+instructions miss modules — and the upgrade loads some of the new code over a
+system still running the rest of the old. `ref:` is the right answer for
+development and for the common case where nobody kept the artefact, and it says
+out loud that the baseline was rebuilt.
+
+Resolved baselines are cached under `_build/castle/baselines` — `tar:` keyed by
+a digest of the artefact, `ref:` by the resolved commit and the build context
+(`MIX_ENV`, `MIX_TARGET`, the Elixir and ERTS versions). A `ref:` baseline is
+built on a cache miss, not on every `mix release`; the first build of a given
+commit takes as long as building that version did, and later ones are a cache
+hit. Cache that directory in CI and the cost is paid once.
+
+Name several baselines to support upgrades from several versions:
+
+```elixir
+upgrade_from: [
+  "tar:artifacts/my_app-1.0.0.tar.gz",
+  "tar:artifacts/my_app-1.0.1.tar.gz"
+]
+```
+
+The release definition is a `fn -> ... end`, so the list can be computed rather
+than written out — read from the environment, or globbed from a directory of
+artefacts.
+
+**Castle checks none of this.** `upgrade_from:` is a release option that
+`Castle.customize/1` passes through untouched, and Forecastle owns both the
+grammar and the refusals. It refuses an empty list, a value that is not a list
+of strings, a spec whose prefix names no source, and the option given more than
+once — which a definition assembled by joining lists really can produce, and
+which is refused rather than resolved by precedence. Leaving the option out is
+the one quiet case, and deliberately so: a release that says nothing about
+upgrading is assembled exactly as it was before this existed.
+
+### Generating the relup by hand
+
+`mix castle.relup` generates a relup for a target that is already assembled:
 
 ```shell
 mix castle.relup \
@@ -105,9 +213,24 @@ mix castle.relup \
   --fromto _build/prod/rel/my_app/releases/1.0.0/my_app
 ```
 
-The task writes `relup` to the project root by default. Leave it there for the
-next release build to package. Use `--hot` to require a hot transition or
-`--restart` to force a one-stage emulator restart.
+`--target` is a `.rel` path with the extension removed, so the release it names
+has to exist. `--fromto`, `--upfrom` and `--downto` take the same baseline specs
+as `upgrade_from:` — all three sources, `ref:` included — so this route is not a
+rebuild-free one: a `ref:` baseline is built here exactly as it would be during
+assembly, through the same cache.
+
+It writes `relup` to the project root, where the next release build packages it.
+That means two builds: one to assemble the target the task reads, and one more
+to package the relup it wrote. `upgrade_from:` exists to remove that. What the
+task still covers is a target that has already been built — so a plan can be
+made for an artefact without rebuilding it — separate up and down baselines, and
+the strategy switches: `--hot` to require a hot transition, `--restart` to force
+a one-stage emulator restart. `upgrade_from:` can ask for none of those; it
+generates both directions for every baseline with the default `auto` strategy.
+
+A project-root `relup` and `upgrade_from:` together are refused rather than
+ordered by precedence. They are two upgrade plans for one release and only one
+of them can be packaged, so choosing silently would discard the other invisibly.
 
 `mix castle.relup` is implemented in Forecastle, which Castle brings in as a
 build-time dependency. It is named for Castle because that is the package a

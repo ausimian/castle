@@ -1131,12 +1131,30 @@ that same reason.
 
 **The splice is `Forecastle.steps/1`, and there must not be a second
 implementation of it here.** That function finds `:assemble`, puts
-`pre_assemble/1` before it and `post_assemble/1` after it, keeps whatever
-surrounded them in the order it was given, and returns a list with no
-`:assemble` untouched. `customize/1` is `Keyword.update/4` over `:steps` with
-that as the function and nothing else. Forecastle's own release fixture stays on
-the explicit `pre_assemble`/`post_assemble` steps deliberately: Forecastle has
-to be testable without Castle's API, so do not "tidy" it onto `customize/1`.
+`pre_assemble/1` before it and `post_assemble/1` after it, puts
+`generate_relup/1` immediately before `:tar` — appended when there is no
+`:tar` — keeps whatever surrounded them in the order it was given, and returns
+a list with no `:assemble` untouched. `customize/1` is `Keyword.update/4` over
+`:steps` with that as the function, and the only other thing it reads is whether
+`:upgrade_from` is *present* — see below for the one message that depends on it.
+Forecastle's own release
+fixture stays on the explicit `pre_assemble`/`post_assemble` steps deliberately:
+Forecastle has to be testable without Castle's API, so do not "tidy" it onto
+`customize/1`.
+
+The relup step goes immediately before `:tar`, so after every step the project
+wrote *between `:assemble` and `:tar`*, and that position is Forecastle's
+decision for a reason worth knowing here: `mix release` documents a function
+step in exactly that span as the way to customise an assembled release, so a
+relup generated before one would describe a tree that `:tar` then packs
+differently. Castle's `@doc` promises the position, so `customize_test.exs`
+asserts it.
+
+**Say the span and not "after any function step", which is the absolute this
+section keeps having to unlearn.** `validate_steps!/1` permits a function step
+*after* `:tar` as well, and generation does not come after that one — which is
+half of why the `:tar` remedy below is conditional. The invariant that holds
+everywhere is the placement rule, not a claim about all of a project's steps.
 
 **The lazy `fn -> … end` release form is required rather than preferred, and the
 `@doc` says so.** Mix evaluates `mix.exs` on every load of the project, the
@@ -1197,12 +1215,129 @@ which is precisely what `customize/1` exists to prevent. Mix validates `:steps`
 **It changes exactly one option.** What a consumer still has to declare by hand
 is listed in the `@doc`, because the alternative is finding out from a failed
 upgrade: the `:appup` project key with `compilers: Mix.compilers() ++ [:appup]`,
-a relup from `mix castle.relup` left in the project root, and
-`include_executables_for: [:unix]` — Windows is unsupported and assembly only
-warns — plus the optional `rel/env.sh.eex`. `:steps` is the one option whose
-contents are Castle's business; the others are the project's own choices, and
-one Castle set silently would be one a consumer could not see in their own
-`mix.exs`.
+a relup — either from `upgrade_from:` below or from `mix castle.relup` left in
+the project root — and `include_executables_for: [:unix]` — Windows is
+unsupported and assembly only warns — plus the optional `rel/env.sh.eex`.
+`:steps` is the one option whose contents are Castle's business; the others are
+the project's own choices, and one Castle set silently would be one a consumer
+could not see in their own `mix.exs`.
+
+**`upgrade_from:` is not a `customize/1` option, despite castle#34's title, and
+that is the answer rather than a shortcut taken.** It is an ordinary release
+option: `Mix.Release.from_config!/4` pops the ones it knows and keeps the rest
+in `%Mix.Release{}.options` — "a keyword list with all other user supplied
+release options" — so an option named in `mix.exs` reaches
+`Forecastle.generate_relup/1` with nothing in Castle carrying it. What castle#34
+actually needed was the pin advanced so the step and the option exist, the step
+list pinned in the tests that assert it, and the option documented where a
+consumer reads. Do not "complete" this by adding a named parameter, a default,
+or a normalising pass: `customize/1` returns `mix release` options, and an
+option it rewrote would be one the consumer could not see in their own
+`mix.exs` — the same rule as the paragraph above.
+
+**Castle adds no validation of it, and must not** — reading `has_key?` for the
+warning below is not validation, and nothing here ever looks at the value.
+Forecastle refuses an empty
+list, a value that is not a list, a non-string among the specs, a spec whose
+prefix names no source, the option given more than once, and a hand-written
+project-root `relup` alongside it — each with a message naming what the project
+wrote. A second refusal here would be a second wording of the same rule, free
+to drift from it, which is exactly the argument that already keeps a
+no-`:assemble` check and a `:steps`-is-not-a-list check out of this module.
+
+Two things follow that are easy to get wrong. The first: **the missing-`:tar`
+warning says something different when the release sets `upgrade_from:`, and the
+reason is a measured failure rather than a preference.** `Forecastle.steps/1`
+puts the relup step immediately before `:tar` and, with no `:tar` to precede,
+appends it *last of all* — after every step the project wrote. So a project that
+packs its own archive in a function step packs it before the relup exists: the
+release ships an archive with no upgrade plan in it, the plan sits in the
+version directory on disk, and the build exits 0. A fixture project with
+`steps: [:assemble, &pack/1]` and an `upgrade_from:` was built to confirm it.
+
+Both standing qualifications are then false. "No change is needed if another
+step creates the archive" is the worst sentence available in that state — it
+tells the author, on the error channel, that the one thing they have to do is
+unnecessary — and "a deployment used only as an upgrade base needs no tarball of
+its own" does not describe a release naming baselines to be upgraded *from*,
+which is a target. So both are withdrawn and replaced by the ordering and the
+remedies.
+
+**The hand-placement remedy is stated on both sides, and the second side was
+missed first time round.** "Place `&Forecastle.generate_relup/1` before the step
+that packs" is right for a read-only packer and wrong for a step that shapes the
+tree and then packs it — which is an ordinary thing for one function step to do.
+Generation reads the tree as it was, the archive holds the tree as it became,
+and the release ships an upgrade plan for code it is not carrying: the very
+failure the *late* placement of this step exists to prevent, reintroduced
+through the workaround for its own edge case. Measured on the same fixture — a
+packing step that rewrites the app's appup first yields an archived relup saying
+`brutal_purge` beside a regenerated on-disk one saying `soft_purge`, build
+green. So the message says *after every step that changes the release*,
+*immediately before the one that packs*, and to split a step that does both.
+
+**Adding `:tar` is the simple answer and is not an unconditional one, and the
+message said it was for one round.** `Mix.Release.validate_steps!/1` requires
+exactly one `:assemble`, at most one `:tar` and `:tar` after `:assemble` — and
+permits a function step *after* `:tar`. So `[:assemble, :tar, &pack/1]` is a
+list Mix accepts, this warning does not fire for it at all, and the step running
+after `:tar` can change the release and pack an artefact of its own from the
+changed tree. Measured on the fixture: a step after `:tar` that rewrites the
+app's appup packs an archive carrying the rewritten appup beside a relup
+generated from the original. So the sentence names what adding `:tar` achieves
+and what is outside it, and `customize_test.exs` refutes the unconditional
+phrasing rather than merely asserting the qualified one.
+
+The single rule underneath both cases — *after everything that changes the
+release, immediately before what packs the shipped artefact* — is what the
+warning, the `@doc` and the README all state, because a list of remedies drifts
+and a rule does not. `customize_test.exs` also pins the ordering for a step
+after `:tar`, which is the one placement the relup step does not come after and
+which nothing in that file covered before.
+
+**None of this is enforceable from here and none of it should be attempted.**
+`customize/1` cannot see which step packs, let alone which mutates, so it cannot
+require shaping and packing to be separate steps, and an API that identified the
+packing boundary would be Forecastle's to add — Castle ships no build-time code
+at all, which `no_mix_tasks_test.exs` asserts. Nor may this project stop
+`Forecastle.steps/1` appending a second generation when the list already holds
+an explicit one: that is Forecastle's function, and there must not be a second
+implementation of it here. The duplicate is why the on-disk relup can differ
+from the archived one, and the README says the summary line appears twice.
+
+**This is not the verdict the warning was rewritten to remove, and the line is
+exactly where it was.** What is said is the ordering, which is a fact about the
+list as given, and a consequence conditional on a step that packs — which
+`customize/1` still cannot see and still does not claim. It must not say the
+archive will lack the relup: a project may pack nothing in these steps at all,
+or add `:tar` to the steps still to run. `customize_test.exs` has a case whose
+whole job is to fail against a version that does claim it, beside the case that
+does the same for the ordinary message.
+
+**And it reads `Keyword.has_key?(opts, :upgrade_from)` and never the value.**
+That is the whole of what `customize/1` asks about the option, and it asks it
+only to keep this message true. It is therefore right for a value Forecastle is
+about to refuse as well: the `:tar` observation holds whatever the option
+contains, and the refusal follows a moment later at `pre_assemble/1`. Do not
+grow it into a second reading of what the option holds.
+
+An earlier draft of this section forbade the branch outright, on the argument
+that any strengthening would be a verdict `customize/1` cannot support. That was
+wrong, and wrong in the direction this project keeps having to correct: it
+preserved a sentence that is false in a reachable case in order to avoid a claim
+nobody was proposing to make.
+
+The second: **the deferral is a claim, so it is tested.** Saying "Forecastle
+refuses this" in a README and checking nothing is how a documented refusal
+becomes a build that quietly generates no relup. `customize_test.exs` therefore
+runs the step `customize/1` spliced in over the options `customize/1` produced,
+and asserts the refusal for each shape — asserting only that a `Mix.Error` is
+raised and that the message names what the project wrote, since the wording is
+Forecastle's. Note the one asymmetry, which was measured rather than guessed:
+the *shape* refusals name `upgrade_from:`, while the *grammar* refusal comes
+from `Forecastle.Baseline.parse!/1`, shared with `mix castle.relup`'s
+`--fromto`/`--upfrom`/`--downto` switches, and so names the offending spec
+instead.
 
 ## Layout
 
@@ -1574,11 +1709,19 @@ holding rather than by a separate look.
 
 `test/castle/customize_test.exs` needs none of that machinery, and should not
 acquire any: `customize/1` is a pure function on a keyword list, so there is no
-release to build and nothing to stub. Two things about how it is written are
-load bearing. **Every assertion is on the whole `:steps` list, in order** — a
-case that asked whether `:steps` was present, or whether the two Castle steps
-appeared somewhere in it, would pass against a splice that put them the wrong
-side of `:assemble`, which is the only way to get the splice wrong. And the
+release to build and nothing to stub. The `upgrade_from:` cases stay inside that
+budget — a `%Mix.Release{}` built with `struct!/2` and the spliced step called
+on it, which is a struct and a function call, and every refusal they exercise
+falls in `generate_relup/1`'s first expression, before it looks for a relup or
+asks `:systools` for anything. A *valid* `upgrade_from:` is deliberately not
+run: that one resolves baselines and writes a relup, which is Forecastle's to
+test and needs a release to do it against.
+
+Three things about how the file is written are load bearing. **Every assertion
+is on the whole `:steps` list, in order** — a case that asked whether `:steps`
+was present, or whether the Castle steps appeared somewhere in it, would pass
+against a splice that put them the wrong side of `:assemble`, which is the only
+way to get the splice wrong. And the
 missing-`:tar` decision is pinned in **both** halves: that the list is built as
 the project wrote it (no `:tar` appended) and that the warning is emitted, since
 a case that only looked for the warning would pass against a `customize/1` that
@@ -1589,6 +1732,15 @@ file is `async: false` — Mix's shell is one setting for the whole node — and
 setup restores whatever shell was there. The cases that assert *nothing* was
 said depend on that shell just as much as the one that asserts something was,
 which is why the whole file is sync rather than those two cases.
+
+The third is the `upgrade_from:` half, and it is asserted in both directions for
+the same reason. That `customize/1` passes the option through **exactly as
+written** — one baseline, several in order, none added when it is absent, and
+both occurrences of a repeated one surviving, which is the `Keyword.update/4`
+behaviour the whole deferral rests on. And that the refusals the documentation
+promises actually happen, because otherwise "Forecastle refuses this" is a
+sentence nothing checks and a build that generated no relup and said nothing
+would pass the suite.
 
 What is *not* covered here is a booted release: the upgrade of a running
 system, and the exit statuses `bin/castle` returns, belong to Forecastle's
@@ -1939,3 +2091,15 @@ the exit statuses `bin/castle` returns are asserted. None of it is measured here
   true. Until a consumer-shaped fixture exists, the check is manual: read the
   lock against Forecastle's task surface whenever either side of the pair
   changes.
+
+  **`upgrade_from:` widens that gap rather than sitting beside it, and the
+  widening is the reason `customize_test.exs` runs the spliced step at all.**
+  A task that has been renamed at least fails loudly when a pipeline calls the
+  old name. A release option is a keyword in a list: Mix keeps the ones it does
+  not recognise, so an `upgrade_from:` reaching a Forecastle that has never
+  heard of it is not an error anywhere — the release assembles, no relup is
+  generated, and the first news is an operator with a tarball that cannot be
+  installed onto anything. That is why the pin is advanced in the same commit as
+  the tests that depend on it, and why the refusals are asserted here rather
+  than described. Read the lock against Forecastle's **release-option** surface
+  too, not only its tasks.

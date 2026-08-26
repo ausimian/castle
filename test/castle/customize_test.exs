@@ -115,6 +115,42 @@ defmodule Castle.CustomizeTest do
       assert Castle.customize(steps: :assemble) == [steps: :assemble]
       refute_received {:mix_shell, :error, _}
     end
+
+    # **And the value that gets past that guard.** `is_list/1` is true of an
+    # improper list, so this reached the missing-`:tar` warning, where `:tar not
+    # in steps` is `Enum.member?/2` and so `:lists.member/2`, which raises on a
+    # tail that is not a list: `steps: [:assemble | :tar]` came back as "2nd
+    # argument: not a proper list" over a stacktrace naming `:lists` and `Enum`,
+    # which is the failure the clause above exists to prevent, arrived at
+    # through a value that passes its guard.
+    #
+    # What is asserted is that `customize/1` returns rather than raises, and
+    # that the improper tail survives the splice - `Forecastle.steps/1` is
+    # hand-written over the list precisely so it does - which is what carries
+    # the malformed value to `Mix.Release.validate_steps!/1`, whose job it is.
+    # Both halves are needed: returning a *proper* list here would hide the
+    # malformation from the function that validates it, and the raise is what
+    # regressed.
+    #
+    # It does not assert a better message, because there is not one: Mix's
+    # `validate_steps!/1` opens with `Enum.any?/2` and answers this input with a
+    # `FunctionClauseError` of its own. The gain is which module is in the
+    # stacktrace - the one that validates `:steps`, not the one the project
+    # named to splice them.
+    test "hands back an improper :steps list without raising" do
+      assert [steps: steps] = Castle.customize(steps: [:assemble | :tar])
+
+      assert steps == [pre(), :assemble, post(), relup() | :tar]
+      refute_received {:mix_shell, :error, _}
+    end
+
+    # The empty list is the other value `proper_list?/1` has to settle, and it
+    # has no `:assemble`, so `Forecastle.steps/1` hands it back and nothing is
+    # said about it.
+    test "hands back an empty :steps list untouched" do
+      assert Castle.customize(steps: []) == [steps: []]
+      refute_received {:mix_shell, :error, _}
+    end
   end
 
   # The decision, pinned in both halves: the project's list is built as the

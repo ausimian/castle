@@ -160,7 +160,7 @@ defmodule Castle do
   # Forecastle's function is the one thing customize/1 exists to keep out of a
   # consumer's `mix.exs`.
   defp spliced(steps, upgrading?) when is_list(steps) do
-    warn_missing_tar(steps, upgrading?)
+    if proper_list?(steps), do: warn_missing_tar(steps, upgrading?)
     Forecastle.steps(steps)
   end
 
@@ -169,6 +169,33 @@ defmodule Castle do
   # of Forecastle would name a module the project never mentioned, which is the
   # one thing this function is for.
   defp spliced(steps, _upgrading?), do: steps
+
+  # **`is_list/1` is true of an improper list, and `x in list` is not.** `in`
+  # over a non-literal reaches `Enum.member?/2` and so `:lists.member/2`, which
+  # raises `ArgumentError` the moment it meets a tail that is not a list - so
+  # `steps: [:assemble | :tar]` came out of `warn_missing_tar/2` as "2nd
+  # argument: not a proper list" over a stacktrace naming `:lists` and `Enum`,
+  # neither of which the project ever mentioned. That is the exact failure the
+  # clause just above exists to prevent, arrived at through a value that passes
+  # its guard.
+  #
+  # `Forecastle.steps/1` is hand-written over the list for this same reason: it
+  # splices and the improper tail *survives*, so the malformed value reaches
+  # `Mix.Release.validate_steps!/1`, which is where a `:steps` that cannot be
+  # used is refused. Skipping the warning is what lets that happen.
+  #
+  # **What this buys is which module is in the stacktrace, and not a better
+  # message - measured, so that nobody restores the `in` on the strength of an
+  # improvement that is not there.** Mix's own validation raises on this input
+  # too: `validate_steps!/1` opens with `Enum.any?/2`, which answers a
+  # `FunctionClauseError` in `Enum.predicate_list/3` for an improper list rather
+  # than the refusal that names `:steps`. So the author is told something
+  # unhelpful either way. The difference is that they are told it by the
+  # function whose job is to validate the option, rather than by a warning in a
+  # module they named only to splice their steps - which is the whole of what
+  # the clause above is for, and the reason this is worth two lines.
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(tail), do: tail == []
 
   # Said at the build, where the remedy is one atom, because the alternative is
   # an operator meeting it on a deployment as a `bin/castle unpack` with nothing

@@ -7,6 +7,18 @@ Forecastle 1.x and Elixir 1.18 or later.
 - `Castle.customize/1` as the release integration API. It adds Forecastle's
   steps around `:assemble` and defaults missing release steps to
   `[:assemble, :tar]`.
+- Relup generation during assembly. A release that names one or more baselines
+  with the `upgrade_from:` option — `tar:` a shipped tarball, `rel:` an
+  assembled release or `ref:` a git ref — has its relup generated into the
+  version being assembled and packed with it, so a single `mix release` produces
+  a tarball carrying its own upgrade plan. Both directions are generated for
+  every baseline. This replaces the build-generate-rebuild cycle
+  `mix castle.relup` required, which the README documented without ever saying
+  that it was two builds. `mix castle.relup` remains for a plan between two
+  artefacts that already exist and for the `--hot`/`--restart` strategies; a
+  project-root `relup` and `upgrade_from:` together are refused rather than
+  ordered by precedence. Omitting the option assembles exactly as before.
+  ([forecastle#28](https://github.com/ausimian/forecastle/issues/28))
 - Target configuration through a temporary VM running the target release's boot
   script, emulator and config providers. Each run starts from the original
   `sys.config` and validates the compile environment before installation.

@@ -73,6 +73,14 @@ Forecastle 1.x and Elixir 1.18 or later.
 
 ### Fixed
 
+- A `&Forecastle.generate_relup/1` a project placed in its own release steps is
+  now honoured rather than joined by a second appended copy, so the relup is
+  generated once, where the project asked for it. The README previously
+  documented the duplicate — and the differing on-disk and archived relups it
+  produced — as expected behaviour. A step placed after `:tar`, where the relup
+  it writes could never be packaged, is now refused at the build instead of
+  succeeding and shipping an archive with no upgrade plan in it.
+  ([forecastle#38](https://github.com/ausimian/forecastle/issues/38))
 - Protect pristine and resolved configuration files with owner-only staging,
   atomic publication and the original `sys.config` mode.
 - Refuse deployments whose emulator root differs from the release root,

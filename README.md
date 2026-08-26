@@ -149,10 +149,11 @@ cannot see which of your steps packs or which of them mutates, so the placement
 is yours to get right — and it cannot warn at all about the second case, since a
 list containing `:tar` looks correct to it.
 
-Note also that with no `:tar` the appended step still runs even if you placed
-one yourself, so the relup is generated a second time after your archive is
-packed and its summary line appears twice. That is expected, and it is why the
-relup left on disk can differ from the one in your archive.
+Note also that a `&Forecastle.generate_relup/1` you placed yourself is honoured
+rather than joined by a second one, so placing it is how you take the ordering
+into your own hands. Placed *after* `:tar` it is refused at the build instead,
+because the archive would be packed before generation had written anything into
+it and the build would still announce the upgrade plan it generated.
 
 Each baseline is named by a spec, and there are three sources:
 

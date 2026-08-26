@@ -1299,11 +1299,17 @@ which nothing in that file covered before.
 `customize/1` cannot see which step packs, let alone which mutates, so it cannot
 require shaping and packing to be separate steps, and an API that identified the
 packing boundary would be Forecastle's to add — Castle ships no build-time code
-at all, which `no_mix_tasks_test.exs` asserts. Nor may this project stop
-`Forecastle.steps/1` appending a second generation when the list already holds
-an explicit one: that is Forecastle's function, and there must not be a second
-implementation of it here. The duplicate is why the on-disk relup can differ
-from the archived one, and the README says the summary line appears twice.
+at all, which `no_mix_tasks_test.exs` asserts.
+
+**`Forecastle.steps/1` no longer appends a second generation when the list
+already holds an explicit one**, as of forecastle#38, and this paragraph used to
+say the opposite and call the duplicate expected. A caller-placed
+`generate_relup/1` between `:assemble` and `:tar` is honoured and nothing is
+added; one placed *after* `:tar` gets a `refuse_unpackaged_relup/1` guard spliced
+in ahead of it, which raises rather than shipping an archive announced as
+carrying an upgrade plan it does not carry. Either way it is Forecastle's
+function that decides, and there must still not be a second implementation of it
+here — what changed is the behaviour being deferred to, not the deferral.
 
 **This is not the verdict the warning was rewritten to remove, and the line is
 exactly where it was.** What is said is the ordering, which is a fact about the

@@ -264,13 +264,14 @@ defmodule Castle do
   # `:tar` observation holds whatever the value is, and the refusal follows a
   # moment later at `pre_assemble/1`.
   #
-  # The remedy is stated as placement rather than replacement because that is
-  # what works: `Forecastle.steps/1` appends its own copy regardless, so a
-  # project that places one of its own has the relup generated twice - once
-  # where it asked, into the archive, and once afterwards over the same path.
-  # Cheap (the baselines were resolved in `pre_assemble/1` and are read back
-  # from a stash), and the README says the summary line appears twice so that
-  # nobody reads it as a fault.
+  # The remedy is stated as placement because placement is what Forecastle
+  # reads: as of forecastle#38 `Forecastle.steps/1` honours a
+  # `generate_relup/1` the project placed between `:assemble` and `:tar` and
+  # appends nothing beside it, and splices a `refuse_unpackaged_relup/1` guard
+  # ahead of one placed after `:tar`. This comment used to say the opposite -
+  # that a copy was appended regardless and the relup generated twice - and the
+  # README carried the matching sentence about a summary line appearing twice.
+  # Both went when the pin advanced past forecastle#38.
   #
   # **The placement is stated on both sides, and the second side is not
   # decoration.** "Before the step that packs" alone is wrong for a step that

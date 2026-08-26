@@ -392,14 +392,17 @@ mentioned nowhere.
 ### `mix castle.appup.gen`
 
 Same inputs, plus writing. `.gen.` is the established Elixir idiom for *this
-writes source you will review and commit*, which is exactly D2's semantics. Three
-cases:
+writes source you will review and commit*, which is exactly D2's semantics. Four
+cases, the first three for an application this project owns:
 
 - no appup yet → write `appup.exs`
 - an existing appup whose AST is a pure literal → merge the new from-version
   entry, print the diff
 - an existing appup that computes → refuse to write, print the entry to merge by
   hand
+- `--app <dep>`, an application this project does *not* own → write
+  `rel/appups/<dep>-<from>-<to>.exs`, which §5.5 is about and §6's *Settled*
+  records the reasoning for
 
 The third case is why this is safe. An appup is arbitrary evaluated Elixir — the
 fixture's own is a `case` on `SAMPLE_VSN` — and flattening one into a static term
@@ -463,12 +466,45 @@ Then, in dependency order:
 
 ## 6. Open questions
 
-- **Does §1.1 reproduce?** §3.5. Everything in D3 rests on it.
 - **`DepMods` ordering.** Derivable from the changed modules' import tables.
   Worth it, or noise?
-- **Where does the dependency-appup source live**, and does `mix castle.appup.gen`
-  write there directly or print for review as it does for owned applications?
 - **Should this document ship to hexdocs?** It would need adding to `docs/0`'s
   `extras:` and to `package/0`'s `files:`, which currently ships only
   `lib CHANGELOG.md LICENSE mix.exs README.md .formatter.exs`. The user-facing
   half is worth publishing; the decision records probably are not.
+
+### Settled
+
+Kept here rather than deleted, because what a question turned out to rest on is
+worth as much as the answer to it.
+
+- **Does §1.1 reproduce?** Yes, and it is pinned —
+  [forecastle#25](https://github.com/ausimian/forecastle/issues/25), §3.5.
+  `upgrade_test.exs` carries a `Sample.Unmentioned` module that changes across
+  the transition and that no instruction mentions, and it asserts *both* halves
+  of the failure: the running process still answering from the from-version, and
+  the new code sitting on disk, reachable through `:code.get_object_code/1` and
+  unused. An assertion about the process alone cannot show the second, which is
+  the half that makes it a silent failure rather than a visible one. Everything
+  in D3 rests on this, and it holds.
+
+- **Where does the dependency-appup source live**, and does `mix castle.appup.gen`
+  write there directly or print for review as it does for owned applications?
+  `rel/appups/<app>-<from>-<to>.exs`, and it **writes** —
+  [forecastle#30](https://github.com/ausimian/forecastle/issues/30), §5.5.
+
+  **The argument is in what the refusal it replaced actually said**: *"a
+  dependency has no source here to write"* — an observation about a missing
+  destination, not a policy about dependencies. `rel/appups` is that
+  destination, so the premise is gone. Consistency then argues the same way
+  round rather than against: for an owned application the task writes, so
+  printing for a dependency would leave the merge case dead and a
+  copy-this-out-of-your-terminal workflow beside the good one.
+
+  D2 is satisfied identically — the output is source a person reviews and
+  commits, nothing generates an appup during assembly, and assembly places a
+  file somebody wrote after checking its name still describes the transition.
+  The safety story is in fact *stronger* than for `appup.exs`: a dependency file
+  is named for one transition, so the build refuses it by name the moment the
+  dependency moves on, where a drifted tag in `appup.exs` is only a `bad_vsn`
+  note.

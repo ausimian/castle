@@ -21,9 +21,15 @@ Forecastle 1.x and Elixir 1.18 or later.
   already assembled, for separate up and down baselines, and for the
   `--hot`/`--restart` strategies; it takes the same baseline specs, so a `ref:`
   baseline is built there too. A project-root `relup` and `upgrade_from:`
-  together are refused rather than ordered by precedence. Omitting the option
-  assembles exactly as before.
-  ([forecastle#28](https://github.com/ausimian/forecastle/issues/28))
+  together are refused rather than ordered by precedence. The option is resolved
+  once, before `:assemble`, and a release step that sets or changes it after
+  that is refused rather than half-honoured — a baseline named after the relup
+  has been generated produces an archive with no upgrade plan in it, and nothing
+  would otherwise say so; compute the list in the release definition, or in a
+  step placed before `:assemble`. Omitting the option assembles exactly as
+  before.
+  ([forecastle#28](https://github.com/ausimian/forecastle/issues/28),
+  [forecastle#40](https://github.com/ausimian/forecastle/issues/40))
 - Target configuration through a temporary VM running the target release's boot
   script, emulator and config providers. Each run starts from the original
   `sys.config` and validates the compile environment before installation.

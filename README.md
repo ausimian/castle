@@ -204,6 +204,15 @@ which is refused rather than resolved by precedence. Leaving the option out is
 the one quiet case, and deliberately so: a release that says nothing about
 upgrading is assembled exactly as it was before this existed.
 
+**And it refuses an `upgrade_from:` that changed after assembly began.** The
+option is resolved once, by the step Castle splices in before `:assemble`, and a
+release step of your own that sets or changes it afterwards is refused rather
+than half-honoured — because the relup is generated into the version directory
+just before `:tar` packs it, so a baseline named after that point produces an
+archive with no upgrade plan in it, and nothing would otherwise say so. Compute
+the list in the release definition itself, as above, or in a step you place
+before `:assemble`; both run early enough to be resolved normally.
+
 ### Generating the relup by hand
 
 `mix castle.relup` generates a relup for a target that is already assembled:

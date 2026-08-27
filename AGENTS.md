@@ -1239,11 +1239,21 @@ option it rewrote would be one the consumer could not see in their own
 warning below is not validation, and nothing here ever looks at the value.
 Forecastle refuses an empty
 list, a value that is not a list, a non-string among the specs, a spec whose
-prefix names no source, the option given more than once, and a hand-written
-project-root `relup` alongside it — each with a message naming what the project
-wrote. A second refusal here would be a second wording of the same rule, free
-to drift from it, which is exactly the argument that already keeps a
-no-`:assemble` check and a `:steps`-is-not-a-list check out of this module.
+prefix names no source, the option given more than once, a hand-written
+project-root `relup` alongside it, and — since forecastle#40 — an
+`upgrade_from:` that differs from the one `pre_assemble/1` resolved. Each names
+what the project wrote. A second refusal here would be a second wording of the
+same rule, free to drift from it, which is exactly the argument that already
+keeps a no-`:assemble` check and a `:steps`-is-not-a-list check out of this
+module.
+
+**That last one is why `Forecastle.steps/1` now returns a fourth hook**,
+`refuse_late_upgrade_from/1`, appended last of all — the only position from
+which an option a step set after `:tar` is visible at all. It is why every
+whole-list assertion in `customize_test.exs` grew a trailing element when the
+pin advanced, and it is the shape to expect from this file's own list too: read
+the arity of the splice off `Forecastle.steps/1` rather than off any count
+written here.
 
 Two things follow that are easy to get wrong. The first: **the missing-`:tar`
 warning says something different when the release sets `upgrade_from:`, and the

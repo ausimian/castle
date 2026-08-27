@@ -32,7 +32,7 @@ defmodule Castle.CustomizeTest do
   describe "customize/1" do
     test "puts the Castle steps either side of :assemble, and the relup before :tar" do
       assert Castle.customize(steps: [:assemble, :tar]) ==
-               [steps: [pre(), :assemble, post(), relup(), :tar]]
+               [steps: [pre(), :assemble, post(), relup(), :tar, late()]]
     end
 
     # Not just that they survive, but that they stay where they were: a project
@@ -52,7 +52,7 @@ defmodule Castle.CustomizeTest do
       own_post = fn release -> release end
 
       assert Castle.customize(steps: [own_pre, :assemble, own_post, :tar]) ==
-               [steps: [own_pre, pre(), :assemble, post(), own_post, relup(), :tar]]
+               [steps: [own_pre, pre(), :assemble, post(), own_post, relup(), :tar, late()]]
     end
 
     # **A step after `:tar` is a list Mix accepts**, and it is the one placement
@@ -66,14 +66,14 @@ defmodule Castle.CustomizeTest do
       own_post_tar = fn release -> release end
 
       assert Castle.customize(steps: [:assemble, :tar, own_post_tar]) ==
-               [steps: [pre(), :assemble, post(), relup(), :tar, own_post_tar]]
+               [steps: [pre(), :assemble, post(), relup(), :tar, own_post_tar, late()]]
     end
 
     # `:steps` absent is the case a project reaches by saying nothing, so the
     # default is what most releases will be built with. It is Mix's default plus
     # `:tar`: see the @doc, and the missing-`:tar` cases below.
     test "defaults :steps to Mix's own plus :tar when there is none" do
-      assert Castle.customize([]) == [steps: [pre(), :assemble, post(), relup(), :tar]]
+      assert Castle.customize([]) == [steps: [pre(), :assemble, post(), relup(), :tar, late()]]
     end
 
     test "leaves every other release option exactly as it was" do
@@ -87,14 +87,14 @@ defmodule Castle.CustomizeTest do
       customized = Castle.customize(opts)
 
       assert Keyword.delete(customized, :steps) == Keyword.delete(opts, :steps)
-      assert customized[:steps] == [pre(), :assemble, post(), relup(), :tar]
+      assert customized[:steps] == [pre(), :assemble, post(), relup(), :tar, late()]
     end
 
     test "adds :steps without disturbing the options that were there" do
       assert Castle.customize(include_executables_for: [:unix]) ==
                [
                  include_executables_for: [:unix],
-                 steps: [pre(), :assemble, post(), relup(), :tar]
+                 steps: [pre(), :assemble, post(), relup(), :tar, late()]
                ]
     end
 
@@ -140,7 +140,7 @@ defmodule Castle.CustomizeTest do
     test "hands back an improper :steps list without raising" do
       assert [steps: steps] = Castle.customize(steps: [:assemble | :tar])
 
-      assert steps == [pre(), :assemble, post(), relup() | :tar]
+      assert steps == [pre(), :assemble, post(), relup(), late() | :tar]
       refute_received {:mix_shell, :error, _}
     end
 
@@ -163,7 +163,9 @@ defmodule Castle.CustomizeTest do
     # tree. `Forecastle.steps/1` owns that, and it is asserted here because the
     # whole list is what these cases assert.
     test "honours the list as it stands" do
-      assert Castle.customize(steps: [:assemble]) == [steps: [pre(), :assemble, post(), relup()]]
+      assert Castle.customize(steps: [:assemble]) == [
+               steps: [pre(), :assemble, post(), relup(), late()]
+             ]
     end
 
     test "warns, naming the step, the file and the command that reads it" do
@@ -357,7 +359,7 @@ defmodule Castle.CustomizeTest do
       assert Castle.customize(upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"]) ==
                [
                  upgrade_from: ["tar:artifacts/my_app-1.0.0.tar.gz"],
-                 steps: [pre(), :assemble, post(), relup(), :tar]
+                 steps: [pre(), :assemble, post(), relup(), :tar, late()]
                ]
 
       refute_received {:mix_shell, :error, _}
@@ -375,7 +377,7 @@ defmodule Castle.CustomizeTest do
       ]
 
       assert Castle.customize(upgrade_from: specs) ==
-               [upgrade_from: specs, steps: [pre(), :assemble, post(), relup(), :tar]]
+               [upgrade_from: specs, steps: [pre(), :assemble, post(), relup(), :tar, late()]]
 
       refute_received {:mix_shell, :error, _}
     end
@@ -511,4 +513,5 @@ defmodule Castle.CustomizeTest do
   defp pre, do: &Forecastle.pre_assemble/1
   defp post, do: &Forecastle.post_assemble/1
   defp relup, do: &Forecastle.generate_relup/1
+  defp late, do: &Forecastle.refuse_late_upgrade_from/1
 end

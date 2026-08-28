@@ -30,6 +30,34 @@ Forecastle 1.x and Elixir 1.18 or later.
   before.
   ([forecastle#28](https://github.com/ausimian/forecastle/issues/28),
   [forecastle#40](https://github.com/ausimian/forecastle/issues/40))
+- `mix castle.appup`, which reports how an appup covers the modules that actually
+  changed between two builds. A module whose code moved and that no instruction
+  mentions upgrades to a node where the new code sits on disk, reachable and
+  unused, while the running process serves the old — silently, and at exit 0.
+  This is the check for that. It needs a baseline, so it is a release-pipeline
+  gate rather than something `mix precommit` can run.
+  ([forecastle#27](https://github.com/ausimian/forecastle/issues/27))
+- `mix castle.appup.gen`, which drafts the entries the check found missing,
+  writing source you review and commit rather than generating anything during
+  assembly. It answers *which modules moved*, and deliberately does not pretend
+  to answer what happens to their state. `--app <dep>` drafts an appup for a
+  dependency you do not own, into `rel/appups/<dep>-<from>-<to>.exs`, which
+  assembly places into the release — never into `deps/`. Most hot upgrades die
+  because a dependency bumped a patch version and shipped no appup; this is how
+  a project supplies one.
+  ([forecastle#29](https://github.com/ausimian/forecastle/issues/29),
+  [forecastle#30](https://github.com/ausimian/forecastle/issues/30))
+- `mix castle.relup --dry-run`, which answers whether a transition can be hot,
+  and if not which edge and why, without writing anything and before any appups
+  have been written.
+  ([forecastle#31](https://github.com/ausimian/forecastle/issues/31))
+- An upgrade test harness for downstream projects: `Forecastle.UpgradeCase` and
+  `Forecastle.Deployment` deploy a shipped artefact, start it, install the next
+  version and leave the assertions to you. The baseline is named with the same
+  spec grammar as `upgrade_from:`, so a test can point at the tarball that
+  actually shipped. It is a case template rather than a task because only the
+  project knows what a successful upgrade means, and it never enters a release.
+  ([forecastle#32](https://github.com/ausimian/forecastle/issues/32))
 - Target configuration through a temporary VM running the target release's boot
   script, emulator and config providers. Each run starts from the original
   `sys.config` and validates the compile environment before installation.

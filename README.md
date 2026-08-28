@@ -248,7 +248,17 @@ project depends on, and nothing has to be added to `deps` to get it.
 
 The appup compiler comes from Forecastle the same way, but is named for what it
 does rather than for either package: it stays `mix compile.appup`, reached
-through the `:compilers` list above. There is no `mix castle.appup`.
+through the `:compilers` list above.
+
+Two more tasks come from Forecastle under the same naming rule. `mix castle.appup`
+reports how an appup covers the modules that actually changed between two builds
+— a module whose code moved and that no instruction mentions is the failure this
+whole area exists to prevent, and it is a release-pipeline gate rather than
+something `mix precommit` can run, because it needs a baseline. `mix
+castle.appup.gen` drafts the entries it found missing, writing source you review
+and commit; `--app <dep>` drafts one for a dependency you do not own, into
+`rel/appups/<dep>-<from>-<to>.exs`. Both are documented by their own
+`mix help`, which is the authority on their switches.
 
 ## Managing releases
 
@@ -289,6 +299,61 @@ For a relup containing `restart_emulator`, `install` waits across the restart
 until the target version has finished booting. The external supervisor must
 restart the process. Castle does not support OTP's two-stage
 `restart_new_emulator` transition.
+
+## Testing an upgrade
+
+A release that assembles is a release that builds. Whether it can be *upgraded*
+is a different question, and the only thing that answers it is starting one
+version, installing the next and looking at what survived.
+
+`Forecastle.UpgradeCase` and `Forecastle.Deployment` are the half of that you do
+not have to write: an `ExUnit.CaseTemplate` and a deployment driver that assemble
+nothing new, but deploy an artefact, start it, install the next version and let
+you assert whatever "it worked" means for your project.
+
+```elixir
+defmodule MyApp.UpgradeTest do
+  use Forecastle.UpgradeCase
+
+  @moduletag :upgrade
+
+  setup_all %{scratch: scratch} do
+    deployment =
+      Forecastle.Deployment.deploy!(
+        "tar:artifacts/myapp-1.0.0.tar.gz",
+        Path.join(scratch, "deploy")
+      )
+
+    on_exit(fn -> Forecastle.Deployment.stop(deployment) end)
+    # start it, put state in it, stage and install the next version, assert
+  end
+end
+```
+
+The baseline is named with the same spec grammar as `upgrade_from:`, so `tar:`
+points the test at the artefact that actually shipped rather than at a rebuild
+of it. Forecastle's own README documents the whole recipe, including the part
+that catches people out: a hot upgrade and a `restart_emulator` transition are
+installed by different calls, because one never leaves its operating system
+process and the other needs a supervisor to bring it back.
+
+**These are named for Forecastle rather than Castle, unlike the tasks above, and
+that is deliberate.** A task name is a string you type, so it follows the package
+you depend on; a module name is something you read once in a `use` line, and
+`Castle` is a namespace Castle itself ships modules in — `Castle.Deployment`
+already exists and means something else entirely. Two packages writing into one
+namespace is decided by whichever `ebin` comes first on the code path, which is
+not a thing to arrange on purpose.
+
+**There is deliberately no `mix castle.upgrade.test`.** A task would have to
+hardcode what a successful upgrade means, and only your project knows: for one
+it is a counter that kept counting, for another a socket still open or a job
+still in flight. A case template composes with tags, with CI and with your own
+assertions instead.
+
+Nothing here reaches a release. Castle takes Forecastle as a build-time
+dependency, so the harness is present where `mix test` runs and absent from what
+you ship.
 
 ## Limitations
 

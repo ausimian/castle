@@ -2,25 +2,23 @@ defmodule Castle do
   @moduledoc """
   Runtime hot-code upgrade support for Elixir releases.
 
-  [Forecastle](https://hexdocs.pm/forecastle) prepares releases at build time.
-  Castle runs on the deployed node. It unpacks, installs, commits and removes
-  versions, and resolves each target version's config providers before OTP
-  installs it.
+  [Forecastle](https://hexdocs.pm/forecastle) prepares releases at build time;
+  Castle manages versions on the deployed node. It unpacks, installs, commits
+  and removes releases, resolving a target's config providers before install or
+  commit.
 
-  `customize/1` is the build-time integration API. Call it from a release
-  definition in `mix.exs`.
+  Call `customize/1` from the release definition in `mix.exs`. The remaining
+  public functions back the `bin/castle` commands.
 
-  The other public functions back the `bin/castle` commands. Successful commands
-  print their result and return `:ok`. A refusal from Castle or an error returned
-  by `:release_handler` raises `Castle.Error`, which gives `bin/castle` a non-zero
-  exit status. Unhandled exceptions, throws and exits propagate unchanged.
-  Automation that calls these functions over `rpc` should treat any raise as a
-  failed command.
+  Successful commands print their result and return `:ok`. Castle refusals and
+  `:release_handler` errors raise `Castle.Error`, giving `bin/castle` a non-zero
+  exit status. Other exceptions, throws and exits propagate unchanged. Treat any
+  raise over `rpc` as a failed command.
 
   Commands that modify a deployment require the VM's emulator root to match the
-  release root. This rejects releases built with `include_erts: false` and any
-  other setup where `:release_handler` would operate on the shared Erlang
-  installation. `upgradable/0` and `releases/0` remain available for diagnosis.
+  release root. This rejects `include_erts: false` and other layouts in which
+  `:release_handler` would modify a shared Erlang installation. The diagnostic
+  functions `upgradable/0` and `releases/0` remain available.
   """
 
   alias Castle.Commands
@@ -36,8 +34,7 @@ defmodule Castle do
   @doc """
   Makes a Mix release Castle-capable.
 
-  Adds Forecastle's build steps around `:assemble` and returns the updated
-  release options.
+  Adds Forecastle's build steps and returns the updated release options.
 
       # mix.exs
       defp releases do
@@ -52,46 +49,24 @@ defmodule Castle do
         ]
       end
 
-  Define the release with `fn -> ... end`. Mix can load `mix.exs` before Castle
-  has been compiled; it evaluates the release function later.
+  Define the release with `fn -> ... end` so Mix evaluates it after Castle has
+  been compiled.
 
   ## Steps
 
-  Existing steps keep their order. A missing `:steps` option becomes
-  `#{inspect(@default_steps)}` so the build produces the tarball used by
-  `bin/castle unpack`. An explicit list without `:tar` is kept and produces a
-  warning. Mix validates malformed step lists and lists without exactly one
-  `:assemble`.
+  Existing steps retain their order. If `:steps` is absent, this function uses
+  `#{inspect(@default_steps)}`. It preserves an explicit list and warns when the
+  list has no `:tar`.
 
-  Forecastle also places a relup-generating step immediately before `:tar` —
-  so after every step of the project's own that sits between `:assemble` and
-  `:tar`, which is where `mix release` documents a step that customises an
-  assembled release. It does nothing unless the release names a baseline; see
-  *Upgrades* below.
-
-  The rule that placement follows is: **after every step that changes the
-  release, and immediately before the one that packs what ships.**
-  `[:assemble, :tar]` satisfies it. Two lists do not, and both build green:
-
-    * With no `:tar` the step is **appended last**, after everything in the
-      list, so a project that packs its own archive in a function step must
-      place `&Forecastle.generate_relup/1` itself. Placed too early the relup
-      describes the tree as it was while the archive holds the tree as it
-      became; placed too late the archive has no relup at all. A step that
-      shapes *and* packs has to be split.
-    * Mix permits a function step **after** `:tar`, and generation happens
-      before `:tar`, so such a step runs after it. Adding `:tar` puts the relup
-      in the archive `:tar` builds and says nothing about one packed afterwards.
-
-  The missing-`:tar` warning says the first of those. It cannot name the step,
-  because nothing here can tell which of a project's steps packs or which
-  mutates, and it does not fire at all for the second — a list containing `:tar`
-  looks correct from here.
+  Forecastle generates the relup after custom steps that change the release and
+  immediately before `:tar`. If a custom step packages the release without
+  `:tar`, place `&Forecastle.generate_relup/1` immediately before that step.
+  Split steps that both modify and package the release. A step after `:tar` must
+  not modify or repackage it.
 
   ## Upgrades
 
-  `upgrade_from:` names the releases this one can be upgraded from, and the
-  relup step generates the plan during assembly:
+  `upgrade_from:` names the supported source releases:
 
       my_app: fn ->
         [
@@ -101,44 +76,26 @@ defmodule Castle do
         |> Castle.customize()
       end
 
-  A baseline is a `tar:` tarball, a `rel:` assembled release or a `ref:` git ref
-  — a bare path meaning `rel:` — and both directions are generated for each of
-  them. Prefer `tar:` where the shipped artefact still exists: a rebuilt
-  baseline is built with today's toolchain and dependencies, and a relup
-  generated against one describes a transition from a release that never
-  existed.
+  A baseline may be a shipped `tar:` archive, an assembled `rel:` release or a
+  `ref:` git ref. A path without a prefix means `rel:`. Forecastle generates
+  both directions for every baseline. Prefer `tar:` when the shipped artifact
+  is available because a rebuilt baseline may differ from the deployed release.
 
-  **`customize/1` does not check this option and never reads its value.** It is
-  an ordinary release option; Mix keeps the options it does not recognise, so it
-  reaches the step on its own. Forecastle owns the grammar and every refusal:
-  an empty list, a value that is not a list of strings, a spec whose prefix
-  names no source, and the option given more than once are each refused there,
-  as is a hand-written project-root `relup` alongside it. Omitting the option is
-  the only quiet case — assembly is then exactly what it was before this
-  existed. The one thing `customize/1` asks is whether the option is *present*,
-  and only so that the missing-`:tar` warning above can say what is true.
+  Forecastle validates `upgrade_from:`. It rejects malformed or duplicate
+  values and a project-root `relup` supplied alongside the option. Omitting the
+  option skips relup generation.
 
   The project must also provide:
 
-    * An appup for each application the project owns that has to be upgraded in
-      place, configured with the `:appup` project key and
-      `compilers: Mix.compilers() ++ [:appup]`.
-
-      Exactly which transitions need one depends on the strategy the relup is
-      generated with, on which applications changed and on who owns them, and
-      each direction is classified separately. `mix castle.relup` documents
-      those rules and is the authority on them; this list deliberately does not
-      restate them, because a summary short enough to belong here is wrong in
-      some case and a correct one is that task's `@moduledoc` copied into a
-      repository that cannot see it change.
-    * A relup — either generated during assembly from `upgrade_from:` above, or
-      generated by `mix castle.relup` and left in the project root. The task is
-      what covers two artefacts that already exist, and the `--hot`/`--restart`
-      strategies that `upgrade_from:` cannot ask for. Both at once is refused.
+    * An appup for each owned application upgraded in place, configured with the
+      `:appup` project key and `compilers: Mix.compilers() ++ [:appup]`. See
+      `mix help castle.relup` for the rules.
+    * A relup generated from `upgrade_from:`, or one generated by
+      `mix castle.relup` and left in the project root.
     * `include_executables_for: [:unix]`.
 
-  A custom `rel/env.sh.eex` is optional. Forecastle appends Castle's setup to
-  the generated file or the project's template.
+  Forecastle appends Castle's setup to the generated `env.sh` or to a custom
+  `rel/env.sh.eex`.
   """
   @spec customize(keyword()) :: keyword()
   def customize(opts) when is_list(opts) do
@@ -389,13 +346,12 @@ defmodule Castle do
   @doc """
   Checks whether the running node has a valid release record for upgrades.
 
-  Called by `bin/castle upgradable`. Success prints nothing. A node that booted
-  from a record synthesised by `:release_handler` raises `Castle.Error` with
+  `bin/castle upgradable` calls this function. Success prints nothing. A node
+  using a record synthesised by `:release_handler` raises `Castle.Error` with
   recovery instructions.
 
-  `unpack/1` and `install/1` repeat this check inside their own operations. A
-  prior call to `upgradable/0` is diagnostic only; the node may restart before a
-  later command acts.
+  `unpack/1` and `install/1` perform the same check when they act. A prior call
+  to `upgradable/0` is diagnostic only.
 
   The release-record file is normally `<root>/releases/RELEASES`. `RELDIR` or
   the SASL `releases_dir` option can move the file read by `:release_handler`.
@@ -408,12 +364,11 @@ defmodule Castle do
   @doc """
   Unpacks a release tarball into the deployment, and reports the version.
 
-  Called by `bin/castle unpack <vsn>`, which passes
-  `<release-name>-<vsn>` to `:release_handler`. Place the corresponding
+  `bin/castle unpack <vsn>` calls this function. Place
   `<release-name>-<vsn>.tar.gz` in the deployment's `releases` directory first.
 
-  Unpacking stages a version: it extracts the applications, writes a release
-  record with status `unpacked`, and leaves the running version unchanged.
+  The command extracts the applications and records the version as `unpacked`.
+  It does not change the running version.
 
   Raises `Castle.Error` if the node cannot be upgraded from. See
   `upgradable/0`. `RELDIR` and the SASL `releases_dir` option are not supported;
@@ -456,12 +411,12 @@ defmodule Castle do
   @doc """
   Installs `vsn` and makes it the version the system is running.
 
-  Called by `bin/castle install <vsn>` after `unpack/1` has staged the version.
+  `bin/castle install <vsn>` calls this function after `unpack/1` stages the
+  version.
 
-  Castle verifies the deployment, checks the running release record, resolves
-  the target's config providers in a temporary VM, and arms any marker needed
-  for an emulator restart. These checks finish before
-  `:release_handler.install_release/1` starts the upgrade.
+  Castle checks the deployment and release record, resolves the target's config
+  providers in a temporary VM, and prepares any emulator-restart marker before
+  calling `:release_handler.install_release/1`.
 
   A hot upgrade reports the new and previous running versions. An upgrade that
   restarts the emulator reports that the version was installed and remains
@@ -469,11 +424,10 @@ defmodule Castle do
   finished booting. Automation that calls `install/1` over `rpc` must perform
   the same check.
 
-  The installed version remains provisional until `commit/1` writes it as the
-  permanent version. An ordinary restart before commit boots the previous
-  permanent version. For a `restart_emulator` transition, the restart requested
-  by the install boots the target; later restarts still boot the previous
-  version until commit.
+  The installed version remains provisional until `commit/1`. An ordinary
+  restart before commit boots the previous permanent version. A
+  `restart_emulator` transition boots the target for its installation restart,
+  but later restarts still use the permanent version until commit.
 
   Castle serialises installs on the local Erlang node. A pending restart install
   owns its launcher marker and blocks another restart install from replacing it.
@@ -513,9 +467,9 @@ defmodule Castle do
   Success prints nothing. A different running version or an incomplete boot
   raises `Castle.Error` with the current state.
 
-  `bin/castle install` polls this function. It confirms either the `current`
-  release or the `permanent` release when no release is current, and requires
-  the boot script to have reached its `started` progress marker.
+  `bin/castle install` polls this function. It accepts the `current` release, or
+  the `permanent` release when no release is current, after the boot script
+  reaches its `started` marker.
   """
   @spec running(String.t()) :: :ok
   def running(vsn) when is_binary(vsn) do
@@ -525,13 +479,12 @@ defmodule Castle do
   @doc """
   Makes `vsn` permanent, so that it is the version a restart boots into.
 
-  Called by `bin/castle commit [<vsn>]`. Without a version, `bin/castle` selects
-  the `current` release. It exits non-zero when no release is awaiting commit.
+  `bin/castle commit [<vsn>]` calls this function. Without a version, the command
+  selects the `current` release and exits non-zero when none is awaiting commit.
 
-  Castle resolves the target's config providers again before promotion. This
-  records the configuration a boot at commit time would produce. An explicit
-  commit of an already-permanent version still performs this configuration
-  step.
+  Castle resolves the target's config providers again before promotion, storing
+  the configuration a boot at commit time would produce. An explicit commit of
+  the permanent version still performs this step.
 
   Raises `Castle.Error` if the configuration could not be expanded, or if the
   version cannot be promoted. This includes staged, rolled-back, superseded and
@@ -545,9 +498,9 @@ defmodule Castle do
   @doc """
   Removes `vsn` from the system, and deletes what nothing else is using.
 
-  Called by `bin/castle remove <vsn>`. Removes the version directory, unreferenced
-  application directories, and the `erts-<erts_vsn>` directory when no remaining
-  release uses that emulator.
+  `bin/castle remove <vsn>` calls this function. It removes the version directory,
+  unreferenced application directories, and an emulator directory unused by any
+  remaining release.
 
   Raises `Castle.Error` for the permanent version or an unknown version.
   """
@@ -559,8 +512,8 @@ defmodule Castle do
   @doc """
   Lists the releases the system knows of, and the status of each.
 
-  Called by `bin/castle releases`. Prints one line per release with its
-  `:release_handler` status: `permanent`, `current`, `unpacked` or `old`.
+  `bin/castle releases` calls this function. It prints one line per release with
+  its `:release_handler` status: `permanent`, `current`, `unpacked` or `old`.
 
   `unpacked` includes staged releases and releases returned to that state after
   a failed or rolled-back install. A node with no known releases prints nothing.

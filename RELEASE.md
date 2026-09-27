@@ -1,138 +1,74 @@
-Castle 1.0 moves target configuration into the target release and adds safe
-support for upgrades that restart under an external supervisor. It requires
-Forecastle 1.x and Elixir 1.18 or later.
+Castle 1.0 resolves each target release's configuration with that release's
+own code and config providers, and adds upgrades that restart the emulator under
+an external supervisor. It requires Forecastle 1.x and Elixir 1.18 or later.
+Two changes break existing pipelines: `mix forecastle.relup` is now
+`mix castle.relup`, and `Castle.generate/1` has been removed.
 
 ### Added
 
-- `Castle.customize/1` as the release integration API. It adds Forecastle's
-  steps around `:assemble` and defaults missing release steps to
-  `[:assemble, :tar]`.
-- Relup generation during assembly. A release that names one or more baselines
-  with the `upgrade_from:` option — `tar:` a shipped tarball, `rel:` an
-  assembled release or `ref:` a git ref — has its relup generated into the
-  version being assembled by a step placed immediately before `:tar`, so the
-  default `[:assemble, :tar]` produces a tarball carrying its own upgrade plan
-  from a single `mix release`. A project that packs its own archive, in a step
-  with no `:tar` or in one placed after it, has to place the generating step
-  itself; `Castle.customize/1` and the README give the rule. Both directions are
-  generated for every baseline. This replaces the build-generate-rebuild cycle
-  `mix castle.relup` required, which the README documented without ever saying
-  that it was two builds. `mix castle.relup` remains for a target that is
-  already assembled, for separate up and down baselines, and for the
-  `--hot`/`--restart` strategies; it takes the same baseline specs, so a `ref:`
-  baseline is built there too. A project-root `relup` and `upgrade_from:`
-  together are refused rather than ordered by precedence. The option is resolved
-  once, before `:assemble`, and a release step that sets or changes it after
-  that is refused rather than half-honoured — a baseline named after the relup
-  has been generated produces an archive with no upgrade plan in it, and nothing
-  would otherwise say so; compute the list in the release definition, or in a
-  step placed before `:assemble`. Omitting the option assembles exactly as
-  before.
+- `Castle.customize/1`, the release integration API. It adds Forecastle's steps
+  around `:assemble` and defaults missing release steps to `[:assemble, :tar]`.
+  ([#12](https://github.com/ausimian/castle/issues/12))
+- Relup generation during assembly. Name baselines in `upgrade_from:` (a shipped
+  `tar:` archive, an assembled `rel:` release or a `ref:` git ref) and one
+  `mix release` produces a tarball carrying both its upgrade and downgrade
+  instructions.
   ([forecastle#28](https://github.com/ausimian/forecastle/issues/28),
   [forecastle#40](https://github.com/ausimian/forecastle/issues/40))
-- `mix castle.appup`, which reports how an appup covers the modules that actually
-  changed between two builds. A module whose code moved and that no instruction
-  mentions upgrades to a node where the new code sits on disk, reachable and
-  unused, while the running process serves the old — silently, and at exit 0.
-  This is the check for that. It needs a baseline, so it is a release-pipeline
-  gate rather than something `mix precommit` can run.
-  ([forecastle#27](https://github.com/ausimian/forecastle/issues/27))
-- `mix castle.appup.gen`, which drafts the entries the check found missing,
-  writing source you review and commit rather than generating anything during
-  assembly. It answers *which modules moved*, and deliberately does not pretend
-  to answer what happens to their state. `--app <dep>` drafts an appup for a
-  dependency you do not own, into `rel/appups/<dep>-<from>-<to>.exs`, which
-  assembly places into the release — never into `deps/`. Most hot upgrades die
-  because a dependency bumped a patch version and shipped no appup; this is how
-  a project supplies one.
-  ([forecastle#29](https://github.com/ausimian/forecastle/issues/29),
-  [forecastle#30](https://github.com/ausimian/forecastle/issues/30))
-- `mix castle.relup --dry-run`, which answers whether a transition can be hot,
-  and if not which edge and why, without writing anything and before any appups
-  have been written.
-  ([forecastle#31](https://github.com/ausimian/forecastle/issues/31))
-- An upgrade test harness for downstream projects: `Forecastle.UpgradeCase` and
-  `Forecastle.Deployment` deploy a shipped artefact, start it, install the next
-  version and leave the assertions to you. The baseline is named with the same
-  spec grammar as `upgrade_from:`, so a test can point at the tarball that
-  actually shipped. It is a case template rather than a task because only the
-  project knows what a successful upgrade means, and it never enters a release.
-  ([forecastle#32](https://github.com/ausimian/forecastle/issues/32))
-- Target configuration through a temporary VM running the target release's boot
-  script, emulator and config providers. Each run starts from the original
-  `sys.config` and validates the compile environment before installation.
-- `Castle.upgradable/0` and matching checks in `unpack/1` and `install/1` to
-  refuse nodes using a release record synthesised by `:release_handler`.
-- `Castle.running/1` so installers can confirm that a version is running and has
-  finished booting.
-- Support for one-stage `restart_emulator` upgrades under systemd, Docker,
-  Kubernetes and other external supervisors. Installs are serialised and use an
-  attempt-owned marker to carry the target version across the restart.
-- Public documentation and specs for the Castle command surface.
+- Upgrade tooling from Forecastle:
+  - `mix castle.appup`, which checks that an appup covers every module that
+    changed between two builds.
+    ([forecastle#27](https://github.com/ausimian/forecastle/issues/27))
+  - `mix castle.appup.gen`, which drafts missing appup entries for review,
+    including for dependencies with `--app <dep>`.
+    ([forecastle#29](https://github.com/ausimian/forecastle/issues/29),
+    [forecastle#30](https://github.com/ausimian/forecastle/issues/30))
+  - `mix castle.relup --dry-run`, which reports whether a transition can be hot
+    without writing a relup.
+    ([forecastle#31](https://github.com/ausimian/forecastle/issues/31))
+  - `Forecastle.UpgradeCase` and `Forecastle.Deployment`, a harness for testing
+    upgrades against a shipped artifact.
+    ([forecastle#32](https://github.com/ausimian/forecastle/issues/32))
+- Target configuration resolved in a temporary VM running the target release's
+  boot script, emulator and config providers.
+  ([#13](https://github.com/ausimian/castle/issues/13))
+- `Castle.upgradable/0`, and matching checks in `unpack/1` and `install/1`, which
+  refuse nodes running a release record synthesised by `:release_handler` and
+  explain how to recover.
+- `Castle.running/1`, which confirms that a version is running and has finished
+  booting.
+- One-stage `restart_emulator` upgrades under systemd, Docker, Kubernetes and
+  other external supervisors.
+  ([#14](https://github.com/ausimian/castle/issues/14))
 
 ### Changed
 
-- `mix forecastle.relup` is now `mix castle.relup`, and the README documents it
-  as Castle's while naming Forecastle as its implementer. There is no
-  compatibility alias, so a build pipeline calling the old name has to be
-  updated. Nothing changes in `deps` — Castle already brings Forecastle in at
-  build time, and which half implements a task is a packaging decision rather
-  than something a consumer should have to learn. The appup compiler is **not**
-  renamed and is unaffected: it stays `mix compile.appup`, named by its
-  `:compilers` entry rather than by either package.
+- **Breaking:** `mix forecastle.relup` is now `mix castle.relup`. There is no
+  compatibility alias, so build pipelines calling the old name must be updated.
+  `mix compile.appup` is unchanged.
   ([forecastle#24](https://github.com/ausimian/forecastle/issues/24))
-- Release-management commands now raise on refusal or a returned OTP error, so
-  `bin/castle` exits non-zero. Successful command output is unchanged.
-- The missing-`:tar` build warning now says something different when the release
-  also sets `upgrade_from:`. With no `:tar` the relup step is appended last, so
-  a step of the project's own that packs the archive packs it before the relup
-  is generated — and the previous wording told the author, on the error channel,
-  that no change was needed. It now states the rule that governs where the relup
-  step goes — after every step that changes the release, immediately before the
-  one that packs what ships — says what adding `:tar` achieves and what falls
-  outside it, and withdraws the two qualifications that do not hold for a
-  release naming baselines. The wording is unchanged for a release that does not
-  set the option.
-- Operator-facing errors and warnings are shorter, distinguish preflight
-  refusals from attempted operations, report whether the configuration step ran,
-  and preserve paths, reasons and recovery steps.
-- `make_releases/0` now derives the release directory from the running emulator
-  instead of the current working directory.
-- The minimum supported Elixir version is now 1.18.
+- Release commands raise `Castle.Error` on a refusal or an error from
+  `:release_handler`, so `bin/castle` exits non-zero. Output on success is
+  unchanged. ([#10](https://github.com/ausimian/castle/issues/10))
+- Installs and commits on a node are serialised with configuration resolution.
+- The minimum supported Elixir version is 1.18.
 
 ### Removed
 
-- `Castle.generate/1` and the `build.config` configuration path. Castle 1.0
-  configures every target release with that release's own providers.
+- **Breaking:** `Castle.generate/1` and the `build.config` configuration path.
+  Each target release is now configured by its own config providers.
 
 ### Fixed
 
-- A `&Forecastle.generate_relup/1` a project placed in its own release steps is
-  now honoured rather than joined by a second appended copy, so the relup is
-  generated once, where the project asked for it. The README previously
-  documented the duplicate — and the differing on-disk and archived relups it
-  produced — as expected behaviour. A step placed after `:tar`, where the relup
-  it writes could never be packaged, is now refused at the build instead of
-  succeeding and shipping an archive with no upgrade plan in it.
-  ([forecastle#38](https://github.com/ausimian/forecastle/issues/38))
-- Protect pristine and resolved configuration files with owner-only staging,
-  atomic publication and the original `sys.config` mode.
-- Refuse deployments whose emulator root differs from the release root,
-  including releases built with `include_erts: false`, before Castle can modify
-  the shared Erlang installation.
-- Give actionable recovery instructions when `:release_handler` booted without
-  an accepted `RELEASES` file.
-- Clarify restart-marker failures, including whether the configuration step ran,
-  whether `new_start_erl.data` was removed or already absent, and when release
-  records, `castle-restart-pending` and `new_start_erl.data` must be inspected
-  before restarting, retrying or removing a marker. Also explain the `unpacked`
-  record left by an unfinished install and fix the former "a other" wording for
-  named pipes and similar marker-path conflicts.
-- Report a failed commit as possibly partial instead of claiming the version was
-  not made permanent. `:release_handler` writes `releases/start_erl.data` before
-  it updates the release record, so an error can leave the file that selects the
-  boot version already naming the target; the message now says so and directs
-  the operator to inspect release state.
-- Report restart installs without raising `CaseClauseError`.
-- Return an empty release list without raising `Enum.EmptyError`.
-- Report `RELEASES` read and write errors instead of raising `MatchError`.
+- `install/1` reports an upgrade that replaces the emulator, kernel, stdlib or
+  sasl instead of crashing with `CaseClauseError`.
+- `releases/0` prints nothing when no release is installed instead of raising
+  `Enum.EmptyError`.
+- `make_releases/0` reports `RELEASES` read and write errors instead of raising
+  `MatchError`, and finds the release directory from the running emulator rather
+  than the current working directory.
+- Resolved configuration is staged with owner-only permissions and published
+  atomically, keeping the original `sys.config` mode.
+- Commands that modify a deployment refuse a release whose emulator root differs
+  from the release root, including one built with `include_erts: false`, instead
+  of letting `:release_handler` modify the shared Erlang installation.

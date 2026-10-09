@@ -1,0 +1,4 @@
+## No epmd: the node listens on a fixed port instead, so that a deployment
+## neither depends on an epmd already running nor leaves one behind.
+-start_epmd false
+-erl_epmd_port 24617

@@ -79,8 +79,10 @@ Castle's launcher setup.
 
 ## Appups and relups
 
-Write an appup for each owned application that must be upgraded in place. The
-file contains Erlang terms written in Elixir syntax:
+Write an appup for each owned application that must be upgraded in place.
+Castle ships its own, so an upgrade that also moves Castle's version needs no
+appup from you for Castle. The file contains Erlang terms written in Elixir
+syntax:
 
 ```elixir
 {

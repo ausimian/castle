@@ -16,14 +16,22 @@ defmodule Castle.AppupTest do
   version does not exist until `mix publisho` bumps it, and `VERSION_OVERRIDE`
   will not do: Forecastle's `mix.exs` reads the same variable.
 
+  After publishing, `CASTLE_E2E_CANDIDATE=hex` takes the candidate from Hex at
+  the appup's version instead, so the same checks run against the package Hex
+  actually serves. There is then no unpacked package to inspect, so whether the
+  appup shipped is asserted on the built release alone - which the default run
+  asserts as well. The variable is read when the suite runs, and a value other
+  than `package` or `hex` is refused rather than taken to mean the default.
+
   The consumer is `test/fixtures/consumer`, which depends on Castle and nothing
   else, and whose own version never moves - so the relup between the two
   releases is Castle's appup and nothing else.
 
   Excluded from `mix test` and `mix precommit`; it needs the network for Hex and
-  takes minutes. Run it before every release:
+  takes minutes. Run it before every release, and again once it is published:
 
       mix test --include e2e test/e2e/appup_test.exs
+      CASTLE_E2E_CANDIDATE=hex mix test --include e2e test/e2e/appup_test.exs
   """
 
   use Forecastle.UpgradeCase
@@ -52,25 +60,37 @@ defmodule Castle.AppupTest do
         {from, build!(Path.join(builds, "baseline-#{from}"), "hex:#{from}", from)}
       end)
 
-    package = package!(Path.join(builds, "castle"))
+    {package, castle} =
+      case candidate!() do
+        :package ->
+          package = package!(Path.join(builds, "castle"))
+          {package, "path:#{package}"}
+
+        :hex ->
+          {nil, "hex:#{@to}"}
+      end
 
     target =
-      build!(Path.join(builds, "target"), "path:#{package}", @to,
+      build!(Path.join(builds, "target"), castle, @to,
         upgrade_from: Enum.map(baselines, fn {_from, tar} -> "tar:#{tar}" end)
       )
 
-    {:ok, builds: builds, baselines: baselines, package: package, target: target}
+    {:ok, builds: builds, baselines: baselines, package: package, castle: castle, target: target}
   end
 
   test "names a version to upgrade from" do
     assert @froms != [], "appup.exs names no literal version to upgrade from"
   end
 
-  test "the package carries the appup", %{package: package} do
-    # The other half of `files:` in `mix.exs`. A package without it builds a
-    # Castle with no appup and the upgrades below turn into emulator restarts -
-    # which they would report as a failure, but not as this one.
-    assert File.regular?(Path.join(package, "appup.exs"))
+  test "the candidate carries the appup", %{builds: builds, package: package} do
+    # The other half of `files:` in `mix.exs`. A package without it does not
+    # build at all, so this would rarely be the first failure - but it is the one
+    # that names the cause. From Hex there is no unpacked package, and the
+    # compiled appup in the release is the whole of the evidence.
+    if package, do: assert(File.regular?(Path.join(package, "appup.exs")))
+
+    release = Path.join(builds, "target/_build/prod/rel/consumer")
+    assert File.regular?(Path.join(release, "lib/castle-#{@to}/ebin/castle.appup"))
   end
 
   for from <- @froms do
@@ -93,7 +113,7 @@ defmodule Castle.AppupTest do
             "rel:" <>
               Path.join(builds, "target/_build/prod/rel/consumer/releases/#{@to}/consumer")
           ],
-          consumer_env("path:#{context.package}", @to)
+          consumer_env(context.castle, @to)
         )
 
       assert status == 0, output
@@ -186,6 +206,17 @@ defmodule Castle.AppupTest do
     tar = Path.join(dir, "_build/prod/consumer-#{vsn}.tar.gz")
     assert File.regular?(tar), "#{dir} built no #{Path.basename(tar)}"
     tar
+  end
+
+  # Where the candidate comes from: the package about to be published, by
+  # default, or the version Hex already serves. Anything else is refused, since a
+  # misspelt value quietly running the default would report on the wrong thing.
+  defp candidate! do
+    case System.get_env("CASTLE_E2E_CANDIDATE", "package") do
+      "package" -> :package
+      "hex" -> :hex
+      other -> flunk("CASTLE_E2E_CANDIDATE must be package or hex, not #{inspect(other)}")
+    end
   end
 
   # The package Hex would serve, unpacked, at the version the appup names.

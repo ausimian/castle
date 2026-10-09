@@ -1473,6 +1473,10 @@ after the one that installs it.
   built against each of those versions from Hex to the package about to be
   published. It needs the network and takes minutes, which is why it is not in
   `mix precommit`. See *Castle's own appup*.
+- **After the tag's publish run succeeds, run it again against Hex:**
+  `CASTLE_E2E_CANDIDATE=hex mix test --include e2e test/e2e/appup_test.exs`.
+  The first run checked the package about to be published; this one checks the
+  package Hex now serves, which is what consumers actually build.
 - Release with `mix publisho <patch|minor|major>`, which bumps `@version`, folds
   `RELEASE.md` into `CHANGELOG.md` at the `<!-- %% CHANGELOG_ENTRIES %% -->`
   placeholder, commits and tags. Tags are bare semver — no `v` prefix. Pushing
@@ -1901,6 +1905,15 @@ tree, so a file the package leaves out fails here before it fails a consumer.
 Its `@version` is rewritten in the unpacked copy rather than set through
 `VERSION_OVERRIDE`, because Forecastle's `mix.exs` reads the same variable and
 would move too.
+
+`CASTLE_E2E_CANDIDATE=hex` takes the candidate from Hex at the appup's version
+instead, for the post-publish run
+([#51](https://github.com/ausimian/castle/issues/51)). Nothing else changes
+except where the appup's presence is checked: with no unpacked package, the
+compiled `castle.appup` in the built release is the evidence, and the default run
+checks that too. Any other value is refused rather than read as the default,
+because a misspelling that quietly ran the pre-publish check would report on the
+wrong package.
 
 The fixture, `test/fixtures/consumer`, depends on Castle alone and never moves
 its own version, so the relup between the two releases is Castle's appup and

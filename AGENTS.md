@@ -271,23 +271,57 @@ Castle's job is configuration and release management on a running node.
 
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
-  can manage its own upgrades. The directory is derived from `code:root_dir()`,
+  can manage its own upgrades. The directory is `Castle.Deployment.releases_dir/0`,
   which no caller has to change directory to reach and none should: the working
   directory was only ever visible to the `File.exists?/1` guard, which is what
   let the file this looked for and the file OTP wrote be different ones.
 
-  **That derivation is right for the default Mix configuration and only for it.**
-  `:release_handler` resolves its relative paths against `code:root_dir()`
-  (`consult/2` is `file:consult(root_dir_relative_path(File))`, and
-  `do_write_release/3` the same), but the *releases directory* is not one of
-  them: `init/1` takes it from `{sasl, releases_dir}`, then `RELDIR`, and only
-  then `init:get_argument(root)`. Mix sets neither, so on a Mix release the two
-  coincide — but a deployment that sets either has Castle writing `RELEASES`
-  where the handler will not read it, and then the record check refuses with a
-  message naming a restart as the remedy, which a restart does not fix. That is
-  [#23](https://github.com/ausimian/castle/issues/23), not something to leave
-  implied here: the claim that this directory is "the one OTP writes" is true by
-  default and false under configuration OTP documents.
+  **It is the handler's releases directory, derived the way the handler derives
+  it, and it used to be the default one unconditionally.** `init/1` takes it from
+  `{sasl, releases_dir}`, then `RELDIR`, and only then `releases` under the root,
+  and a relative answer is resolved against `code:root_dir()` because every file
+  the handler opens goes through `root_dir_relative_path/1`. Castle derived
+  `<root>/releases` regardless, which is the right answer only when neither
+  override is set, so a deployment that set one had Castle writing a `RELEASES`
+  the handler never read, and a record check whose remedy a restart could not
+  satisfy. That was [#23](https://github.com/ausimian/castle/issues/23).
+  Everything Castle reads or writes beside the records is built on the same
+  directory: `RELEASES`, each version's `sys.config` and `relup`, and the restart
+  marker, which has to sit beside the `new_start_erl.data` the handler writes.
+
+  **It is a re-derivation, not a read of the handler's state.** The handler
+  resolves the directory once, at start; Castle resolves it per call. An install
+  can make the two differ, because `install_release/1` applies the target's
+  `sys.config`: a target that changes `{sasl, releases_dir}` leaves the handler
+  on the old directory and Castle on the new one, and a later commit refuses for
+  want of a version directory ([#46](https://github.com/ausimian/castle/issues/46)).
+  Do not describe the divergence as something Castle cannot cause. Its
+  `#state{}` record holds the answer, but that layout is private and
+  `:sys.get_state/1` queues behind an `install_release/1` in progress. The
+  precedence test compares Castle's answer with what `init/1` itself returns, so
+  the two cannot drift silently. `{sasl, client_directory}`, the diskless-client
+  branch of `init/1`, is deliberately not followed: Castle does not support a
+  handler with `masters`.
+
+  **What the handler decides is not the whole deployment, and Castle says so
+  rather than papering over it.** Mix's launcher reads
+  `$RELEASE_ROOT/releases/start_erl.data` and boots `$RELEASE_ROOT/releases/<vsn>`;
+  Forecastle's `env.sh` fragment looks for `RELEASES`, the restart marker and
+  `new_start_erl.data` there too; and OTP's own `unpack_release/1` reads
+  `<name>.rel` from the releases directory but extracts the tarball under the
+  root. So a moved releases directory still needs its files staged by hand, and
+  a restart install on one fails safe - neither marker is where the hook looks,
+  so the next start boots the permanent version. And `make_releases/0` runs in
+  Forecastle's preboot VM, which is started without the release's `sys.config`:
+  `RELDIR` reaches it, a `{sasl, releases_dir}` set in `sys.config` does not.
+
+  **The peer's root is the deployment's, not two levels above the version.**
+  `Castle.Peer.materialise/2` used to find `lib` and `erts-*` at `../..` of the
+  version directory, which is the root only when the version directory is in
+  `<root>/releases`. `Castle.Commands.materialise/3` now passes
+  `deployment.root_dir()` as `:root`, since that is where the handler extracts
+  the applications whatever the releases directory is; the `../..` default stays
+  for callers that build the default layout, which is what every peer test does.
 
   It calls **`create_RELEASES/3`**, never `/4` with the root
   supplied: `/3` is `create_RELEASES("", RelDir, RelFile, LibDirs)`, and
@@ -488,16 +522,17 @@ Castle's job is configuration and release management on a running node.
   wrong five times.
 
   **And it must not name `releases/RELEASES` unqualified**, because that is the
-  file the *release* creates, not necessarily the one the handler reads — see
-  `Castle.Deployment.root_dir/0` and
-  [#23](https://github.com/ausimian/castle/issues/23). Where `RELDIR` or
-  `{sasl, releases_dir}` points elsewhere the two are different files, and the
-  remedy is then genuinely harder rather than merely differently spelled: the
-  hook creates one at the root that the handler will not read, so "absent" does
-  not get the operator out either, and the file the handler *does* read has to be
-  put there by hand. The message says so. When #23 lands and Castle follows those
-  overrides, this paragraph and that sentence both need revisiting — the
-  divergence is the thing being described, and it is the thing #23 removes.
+  file the *launcher hook* checks for, not necessarily the one the handler reads.
+  Where `RELDIR` or `{sasl, releases_dir}` points elsewhere the two are different
+  files, and the remedy is then genuinely harder rather than merely differently
+  spelled. Castle itself now follows the handler
+  ([#23](https://github.com/ausimian/castle/issues/23)), but Forecastle's hook
+  gates on `$RELEASE_ROOT/releases/RELEASES` and runs `make_releases/0` in a VM
+  that cannot see a `releases_dir` set in `sys.config`, so for that case
+  "absent" does not get the operator out, and the file the handler *does* read
+  has to be put there by hand. The message says so. Revisit this sentence when
+  the hook follows the same directory; until then the divergence is Forecastle's
+  and it is still real.
 
   It has to be asked of the node rather than of the filesystem — a file that
   appeared *after* the boot that looked for it passes a shell test and still
@@ -1361,7 +1396,7 @@ instead.
 | --- | --- |
 | `lib/castle.ex` | The command boundary: print the outcome, or raise — plus `customize/1`, the build-time release integration, which is not a command |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
-| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, and the `stat`/`lstat`/`read`/`rm` whose *failures* decide what a refusal says |
+| `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, the handler's releases directory, and the `stat`/`lstat`/`read`/`rm` whose *failures* decide what a refusal says |
 | `lib/castle/file_reason.ex` | Shared rendering for filesystem and parser reasons used by commands and peer configuration |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
@@ -1467,6 +1502,19 @@ That is deliberate and it should stay that way: the defect being guarded is a
 message has previously been wrong in, while keeping every word a fragment-based
 test would require. Only the whole string pins it, and rewording the message on
 purpose should mean editing that assertion on purpose.
+
+`test/castle/deployment_test.exs` is `async: false` for the same reason: it sets
+`RELDIR` and the SASL application environment, which belong to the node. Its
+precedence test does not restate OTP's rule; it calls `:release_handler.init/1`
+directly and compares the `rel_dir` it decides with
+`Castle.Deployment.releases_dir/0`, for nothing set, each override alone, and
+both. `init/1` reads files and environment and starts nothing, and reading the
+field out of `#state{}` by position is deliberate in a test: if OTP reorders the
+record, the test fails loudly rather than passing. Relative resolution is
+asserted against explicit paths, since the handler keeps a relative directory
+unresolved. The boundary case points `RELDIR` at an empty directory and asserts
+that `Castle.make_releases/0`'s refusal names it, which is the only thing that
+tells a boundary deriving the handler's directory from one deriving the default.
 
 `test/castle/peer_test.exs` is the exception: it starts real peers. Stubbing the
 peer would prove nothing about the one thing it exists to do, which is to run a

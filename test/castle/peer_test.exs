@@ -4,6 +4,7 @@ defmodule Castle.PeerTest do
   use ExUnit.Case, async: false
 
   alias Castle.Commands
+  alias Castle.DeploymentStub
   alias Castle.FileReason
   alias Castle.IoSink
   alias Castle.PeerProviderStub
@@ -16,7 +17,7 @@ defmodule Castle.PeerTest do
   @moduletag :tmp_dir
   @moduletag timeout: 120_000
 
-  describe "materialise/1" do
+  describe "materialise/2" do
     test "resolves the target's configuration through the target's providers", %{tmp_dir: root} do
       runtime = Path.join(root, "runtime.exs")
 
@@ -50,6 +51,41 @@ defmodule Castle.PeerTest do
       # The configuration is assembled beside sys.config and moved onto it, so
       # nothing is left in the version directory afterwards.
       assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+
+    # The version directories are where :release_handler keeps its records,
+    # which RELDIR or {sasl, releases_dir} can move away from the root, while
+    # the applications and the emulator stay under code:root_dir(). So the root
+    # cannot be worked out from the version directory. The default does exactly
+    # that, and the second assertion shows it failing here: what found the
+    # emulator in the first was the root that was passed.
+    test "takes the release root it is given, not one above the version directory",
+         %{tmp_dir: root} do
+      built = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
+      moved = Path.join([root, "elsewhere", "records", Path.basename(built)])
+      File.mkdir_p!(Path.dirname(moved))
+      File.rename!(built, moved)
+
+      assert Castle.Peer.materialise(moved, root: root) == {:ok, []}
+      assert read_sys_config(moved)[:sample][:greeting] == "compile-time"
+
+      assert {:error, message} = Castle.Peer.materialise(moved)
+      assert message =~ Path.join(root, "elsewhere")
+    end
+
+    # The same move, through the command: what `Castle.Commands` hands the peer
+    # as the root is the deployment's, so a version directory outside it is
+    # still configured against the applications the handler extracted.
+    test "is given the deployment's root by Castle.Commands", %{tmp_dir: root} do
+      built = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
+      moved = Path.join([root, "elsewhere", "records", Path.basename(built)])
+      File.mkdir_p!(Path.dirname(moved))
+      File.rename!(built, moved)
+
+      assert Commands.materialise(moved, Castle.Peer, DeploymentStub.stub(nil, root)) ==
+               {:ok, []}
+
+      assert read_sys_config(moved)[:sample][:greeting] == "compile-time"
     end
 
     test "runs the target's provider module, not the running node's", %{tmp_dir: root} do
@@ -454,15 +490,15 @@ defmodule Castle.PeerTest do
       # Install with the feature, commit without it, which is the sequence an
       # operator runs.
       System.put_env("CASTLE_TEST_FEATURE", "1")
-      assert Commands.materialise(installed) == {:ok, []}
+      assert configure(installed) == {:ok, []}
       assert read_sys_config(installed)[:sample][:feature] == true
 
       System.delete_env("CASTLE_TEST_FEATURE")
-      assert Commands.materialise(installed) == {:ok, []}
+      assert configure(installed) == {:ok, []}
 
       # What one pass from the base produces, which is what booting the version
       # would produce.
-      assert Commands.materialise(control) == {:ok, []}
+      assert configure(control) == {:ok, []}
 
       refute Keyword.has_key?(read_sys_config(installed)[:sample], :feature)
       assert read_sys_config(installed) == read_sys_config(control)
@@ -479,21 +515,21 @@ defmodule Castle.PeerTest do
       mix_wrote = File.read!(sys_config)
 
       refute File.exists?(pristine)
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
       assert File.read!(pristine) == mix_wrote
 
       # Resolved, so no longer what Mix wrote - and the base is not touched by
       # the second run either.
       refute File.read!(sys_config) == mix_wrote
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
       assert File.read!(pristine) == mix_wrote
     end
 
     test "says so once, however often it is materialised", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: with_providers([{PeerProviderStub, []}], []))
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       lines = Path.join(vsn_dir, "sys.config") |> File.read!() |> String.split("\n")
 
@@ -506,7 +542,7 @@ defmodule Castle.PeerTest do
     test "keeps no base for a release with nothing to resolve", %{tmp_dir: root} do
       vsn_dir = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
       refute File.exists?(Path.join(vsn_dir, "sys.config.pristine"))
 
       # Not a working directory either, though one was made: a release that needs
@@ -570,7 +606,7 @@ defmodule Castle.PeerTest do
       orphan = Path.join(vsn_dir, "castle-99999-1.pristine")
       File.write!(orphan, "")
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       # Resolved from sys.config, which is still the original, and published
       # from that - not from the orphan, which is neither read nor removed,
@@ -592,7 +628,7 @@ defmodule Castle.PeerTest do
       sys_config = Path.join(vsn_dir, "sys.config")
       File.chmod!(sys_config, 0o600)
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       assert mode(Path.join(vsn_dir, "sys.config.pristine")) == 0o600
       assert mode(sys_config) == 0o600
@@ -610,7 +646,7 @@ defmodule Castle.PeerTest do
       # resolved from.
       File.write!(Path.join(vsn_dir, "sys.config.pristine"), "")
 
-      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert {:error, message} = configure(vsn_dir)
       assert message =~ "sys.config.pristine"
       assert message =~ "Remove it, and unpack 1.0.0 again as well if"
     end
@@ -621,7 +657,7 @@ defmodule Castle.PeerTest do
           config: with_providers([{PeerProviderStub, merge: [sample: [n: 1]]}], [])
         )
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       # What a release materialised by a Castle that kept no base looks like,
       # and what someone deleting the base leaves behind. Capturing the resolved
@@ -631,7 +667,7 @@ defmodule Castle.PeerTest do
       File.rm!(pristine)
       resolved = File.read!(Path.join(vsn_dir, "sys.config"))
 
-      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert {:error, message} = configure(vsn_dir)
       assert message =~ "was written by Castle"
       assert message =~ "Unpack 1.0.0 again to restore it."
       refute File.exists?(pristine)
@@ -664,7 +700,7 @@ defmodule Castle.PeerTest do
       original = File.read!(sys_config)
       File.ln_s!(elsewhere, pristine)
 
-      assert {:error, message} = Commands.materialise(vsn_dir)
+      assert {:error, message} = configure(vsn_dir)
       assert message =~ "Cannot read #{pristine}. #{FileReason.format(:enoent)}"
       assert message =~ "Remove it, and unpack 1.0.0 again as well if"
 
@@ -1051,7 +1087,7 @@ defmodule Castle.PeerTest do
 
       File.chmod!(Path.join(vsn_dir, "sys.config"), 0o600)
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       assert String.to_integer(File.read!(recorded), 8) == 0o600
       assert mode(Path.join(vsn_dir, "sys.config")) == 0o600
@@ -1083,7 +1119,7 @@ defmodule Castle.PeerTest do
             )
         )
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
 
       seen = snapshot(snapshot, vsn_dir)
@@ -1137,7 +1173,7 @@ defmodule Castle.PeerTest do
       File.chmod!(orphan, 0o700)
       File.write!(Path.join(orphan, "sys.config"), "")
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       assert File.dir?(orphan)
       assert File.ls!(orphan) == ["sys.config"]
@@ -1158,14 +1194,14 @@ defmodule Castle.PeerTest do
       sys_config = Path.join(vsn_dir, "sys.config")
       File.chmod!(sys_config, 0o440)
 
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
 
       assert mode(Path.join(vsn_dir, "sys.config.pristine")) == 0o440
       assert mode(sys_config) == 0o440
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
 
       # And again, over a base that is itself read-only now.
-      assert Commands.materialise(vsn_dir) == {:ok, []}
+      assert configure(vsn_dir) == {:ok, []}
       assert mode(sys_config) == 0o440
       assert read_sys_config(vsn_dir)[:sample][:n] == 1
 
@@ -1335,6 +1371,19 @@ defmodule Castle.PeerTest do
 
     for {seen, type, mode} <- entries,
         do: {Path.relative_to(to_string(seen), relative_to), type, mode}
+  end
+
+  # `Commands.materialise/3` through the real peer. The command takes the
+  # release root from the deployment, which under `mix test` is the Erlang
+  # installation, so it is pointed at the root the synthetic release was built
+  # in. `nil` for `RELEASE_ROOT` keeps the ERTS guard inert, as it is with no
+  # deployment stubbed at all.
+  defp configure(vsn_dir) do
+    Commands.materialise(
+      vsn_dir,
+      Castle.Peer,
+      DeploymentStub.stub(nil, Path.expand("../..", vsn_dir))
+    )
   end
 
   defp read_sys_config(vsn_dir) do

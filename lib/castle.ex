@@ -371,8 +371,13 @@ defmodule Castle do
   It does not change the running version.
 
   Raises `Castle.Error` if the node cannot be upgraded from. See
-  `upgradable/0`. `RELDIR` and the SASL `releases_dir` option are not supported;
-  see [issue #23](https://github.com/ausimian/castle/issues/23).
+  `upgradable/0`.
+
+  The releases directory is `:release_handler`'s: `<root>/releases` unless
+  `RELDIR` or the SASL `releases_dir` option moves it. OTP's unpack reads
+  `<release-name>-<vsn>.rel` from that directory but extracts the tarball's own
+  `releases/` files under the root, so where the directory has been moved those
+  files have to be put in it by hand.
   """
   @spec unpack(String.t()) :: :ok
   def unpack(name) when is_binary(name) do
@@ -559,17 +564,17 @@ defmodule Castle do
   # properties of the installation rather than arguments, and a caller's working
   # directory cannot make them name different ones.
   #
-  # `Castle.Deployment.root_dir/0` says what that root does and does not decide,
-  # and is the one place that says it. The part that bears on these two: it is
-  # the right derivation for a release Mix built, and only because Mix sets
-  # neither of the two things that would move the release records elsewhere -
-  # see castle#23.
+  # It is the handler's own releases directory: `{sasl, releases_dir}`, then
+  # `RELDIR`, then `releases` under the root, which is what
+  # `Castle.Deployment.releases_dir/0` derives and explains. It used to be the
+  # last of those unconditionally, which is right on a release Mix built and
+  # wrong wherever either override is set - Castle then wrote a `RELEASES` the
+  # handler never read (castle#23).
   #
   # It is read through `Castle.Deployment` so that there is one place naming it,
-  # the same place `Castle.Commands.ensure_own_erts/2` compares it against
-  # `RELEASE_ROOT` - which is the one deployment where this derivation names the
-  # wrong tree, and where every operation that would act on it refuses.
-  defp rel_dir, do: Path.join(Deployment.root_dir(), "releases")
+  # beside the root `Castle.Commands.ensure_own_erts/2` compares against
+  # `RELEASE_ROOT`.
+  defp rel_dir, do: Deployment.releases_dir()
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)
   defp report!({:error, message}), do: raise(Castle.Error, message)

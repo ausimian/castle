@@ -43,8 +43,8 @@ defmodule Castle.Deployment do
   `{sasl, releases_dir}`, then `RELDIR`, and only then `init:get_argument(root)`.
   Mix sets neither, so on a Mix release `releases/RELEASES` and
   `releases/<vsn>/…` land under this root too — but by default rather than
-  necessarily, and Castle currently derives them as though it were necessarily
-  (see [#23](https://github.com/ausimian/castle/issues/23)).
+  necessarily. `releases_dir/0` is where Castle derives them, and it follows the
+  handler rather than assuming the default.
 
   The distinction is what makes the ERTS guard correct: a deployment whose root
   is not its own cannot be rescued by relocating the records, because relocating
@@ -52,6 +52,57 @@ defmodule Castle.Deployment do
   """
   @spec root_dir() :: Path.t()
   def root_dir, do: to_string(:code.root_dir())
+
+  @doc """
+  The releases directory `:release_handler` keeps its records in.
+
+  `init/1` takes it from `{sasl, releases_dir}`, then from `RELDIR`, and only
+  then makes it `releases` under the root - OTP's own comment is "$RELDIR
+  overrides, and {sasl, releases_dir} overrides both" - and this follows it in
+  that order. A relative answer is resolved against `root_dir/0`, because every
+  file the handler opens goes through `root_dir_relative_path/1`, so a relative
+  releases directory names a directory under the root and not under whatever
+  the working directory happens to be.
+
+  Everything Castle reads or writes beside the release records is derived from
+  this: `RELEASES` itself, each version's directory and the `sys.config` and
+  `relup` in it, and the restart marker that has to pair with the
+  `new_start_erl.data` the handler writes here. Getting it from somewhere else
+  is how Castle came to write a `RELEASES` the handler never read
+  ([#23](https://github.com/ausimian/castle/issues/23)).
+
+  **This is a re-derivation, not a reading of the handler's state, and the
+  difference is a moment.** The handler resolves the directory once, when it
+  starts; this resolves it when asked. They agree unless the SASL environment
+  or `RELDIR` changes in between, and an install can do that: `install_release/1`
+  applies the target's `sys.config`, so a target that changes
+  `{sasl, releases_dir}` leaves the handler on the old directory and this on the
+  new one. A `commit/1` after it then finds no version directory and refuses
+  ([#46](https://github.com/ausimian/castle/issues/46)). The handler keeps the
+  answer in its `#state{}` record, which `:sys.get_state/1` would return, but
+  that is a private record layout, and the call queues behind an
+  `install_release/1` in progress.
+
+  Two things are deliberately left out. `init/1` has a fourth source, a
+  `{sasl, client_directory}` that applies only on a diskless client with
+  `masters` configured, and Castle does not support that configuration: its
+  handler writes records on other nodes. And this says nothing about where the
+  *launcher* looks. Mix's launcher and Forecastle's `env.sh` fragment both read
+  `$RELEASE_ROOT/releases`, whatever this returns.
+  """
+  @spec releases_dir() :: Path.t()
+  def releases_dir do
+    dir =
+      case Application.fetch_env(:sasl, :releases_dir) do
+        {:ok, dir} -> to_string(dir)
+        :error -> System.get_env("RELDIR") || Path.join(root_dir(), "releases")
+      end
+
+    case Path.type(dir) do
+      :absolute -> dir
+      _relative -> Path.join(root_dir(), dir)
+    end
+  end
 
   @doc """
   The deployment root the launcher exported, or `nil` when there is none.

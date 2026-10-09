@@ -17,7 +17,16 @@ defmodule Castle.MixProject do
       package: package(),
       docs: docs(),
       test_coverage: test_coverage(),
-      source_url: @source_url
+      # A project the end-to-end appup test builds, not a test: its `mix.exs`
+      # is the only `.exs` file under `test` that is neither.
+      test_ignore_filters: [&String.starts_with?(&1, "test/fixtures/")],
+      source_url: @source_url,
+      # Castle's own appup, so that a consumer upgrade which moves Castle's
+      # version can be hot. Compiled by Forecastle's appup compiler, which is
+      # here because Forecastle is a dependency - and so in a consumer's build
+      # too, where Castle is compiled from source with this file. See appup.exs.
+      appup: "appup.exs",
+      compilers: Mix.compilers() ++ [:appup]
     ]
   end
 
@@ -160,7 +169,12 @@ defmodule Castle.MixProject do
         "GitHub" => @source_url,
         "Forecastle" => "https://hex.pm/packages/forecastle"
       },
-      files: ~w(lib CHANGELOG.md LICENSE mix.exs README.md .formatter.exs)
+      # `appup.exs` ships because a consumer compiles it with the `appup:` key
+      # above. Left out, that key names a file that is not there, and every
+      # consumer's build fails with "could not compile dependency :castle" -
+      # measured, not guessed. The end-to-end appup test builds from the
+      # unpacked package rather than this tree so that it fails there first.
+      files: ~w(lib appup.exs CHANGELOG.md LICENSE mix.exs README.md .formatter.exs)
     ]
   end
 

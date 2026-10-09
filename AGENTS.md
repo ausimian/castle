@@ -1390,6 +1390,54 @@ from `Forecastle.Baseline.parse!/1`, shared with `mix castle.relup`'s
 `--fromto`/`--upfrom`/`--downto` switches, and so names the offending spec
 instead.
 
+## Castle's own appup
+
+Castle is part of every consumer release, so a Castle version change is part of
+every consumer upgrade that crosses it. Forecastle decides whether such an
+upgrade can be hot by reading the appup in the *target* release's
+`lib/castle-<vsn>/ebin`. With no entry for the version being upgraded from,
+`auto` judges the transition a `restart_emulator`. Nothing fails, and every such
+upgrade quietly restarts the emulator. That was
+[#48](https://github.com/ausimian/castle/issues/48): 1.0.0 shipped no appup.
+
+**It ships as source and is compiled in the consumer's build.** Hex serves
+source, so a consumer compiles Castle with this project's `mix.exs`, whose
+`appup:` key and `:appup` compiler turn `appup.exs` into `ebin/castle.appup`
+there. Forecastle is already Castle's dependency, so the compiler is available.
+`appup.exs` must therefore be in `package/0`'s `files`, and the stakes are higher
+than a missing appup: without it the `appup:` key names a file that is not
+there, and every consumer's build fails with "could not compile dependency
+:castle". That was measured.
+
+**Its version key runs ahead of `@version`.** The appup's first element is the
+version being released, so it is written before `mix publisho` bumps `@version`,
+and the two disagree on `main` in between. That is the one exception to
+`@version` being the single source of truth, and it is harmless: a relup reads
+Castle's appup only when Castle's version changes.
+
+**`load_module` is the whole of a transition.** Castle has no application
+callback and no processes. Each instruction names the changed modules it calls,
+so `:systools` orders the loads callee-first on the way up and reverses them on
+the way down. The default `brutal_purge` is safe: `release_handler_1` soft-purges
+at load time and purges brutally only when the release is made permanent, by
+which point the process that ran the install has finished.
+
+**The installing process outlives its own code, and that makes part of Castle
+an API between adjacent versions.** `bin/castle install` runs the *old* Castle.
+When `install_release/1` returns, the relup has loaded the new modules, but the
+installing process carries on in the old `Castle.Commands`: its local calls stay
+in the old code, and its remote calls reach the new modules. So everything
+`Castle.Commands` calls on another module after `install_release/1` returns
+must keep working when that module is a version newer: today that is
+`Castle.Deployment.read/1` and `rm/1`, and the `Castle.Peer` file primitives
+marker settling uses. This is the same kind of contract as
+`{Castle.Peer, :resolve, 1}`. The end-to-end test exercises it on every
+release, because its install is run by the baseline's Castle.
+
+A consequence worth knowing: the upgrade *to* a Castle version is driven by the
+*previous* one, so a fix in Castle's install path takes effect from the upgrade
+after the one that installs it.
+
 ## Layout
 
 | Path | Purpose |
@@ -1401,6 +1449,9 @@ instead.
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
 | `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
+| `appup.exs` | Castle's own appup, compiled into `ebin` by Forecastle's appup compiler in this build and in every consumer's |
+| `test/e2e/` | Opt-in end-to-end tests (`mix test --include e2e`) that build and upgrade real releases |
+| `test/fixtures/consumer/` | A project depending on Castle alone, which the end-to-end appup test builds on both sides of an upgrade |
 
 ## Working on this project
 
@@ -1413,6 +1464,15 @@ instead.
 - Add user-visible changes to `RELEASE.md` on the feature branch, using
   [Keep a Changelog](https://keepachangelog.com/) sections. Do not defer release
   notes to release time, and exclude internal CI/lint churn.
+- **Before every release, update `appup.exs` and run the end-to-end appup
+  test.** Set its version to the one `mix publisho` is about to produce, and
+  give it an upgrade and a downgrade entry from each version a consumer may be
+  upgrading from - at least the previous release - loading every module changed
+  since that version (`git diff <from>..HEAD -- lib`). Then run
+  `mix test --include e2e test/e2e/appup_test.exs`, which upgrades a consumer
+  built against each of those versions from Hex to the package about to be
+  published. It needs the network and takes minutes, which is why it is not in
+  `mix precommit`. See *Castle's own appup*.
 - Release with `mix publisho <patch|minor|major>`, which bumps `@version`, folds
   `RELEASE.md` into `CHANGELOG.md` at the `<!-- %% CHANGELOG_ENTRIES %% -->`
   placeholder, commits and tags. Tags are bare semver — no `v` prefix. Pushing
@@ -1831,6 +1891,44 @@ underneath it, and answers with the new value. What lets it is that materialisin
 leaves no `config_provider_booted` marker behind and preserves the header Mix
 wrote, so Elixir's pipeline is still armed in the file the launcher reads.
 
+`test/e2e/appup_test.exs` is the consumer-shaped test, and it is excluded by
+default (`ExUnit.start(exclude: [:e2e])`) because it fetches from Hex and builds
+releases. It takes everything version-specific from `appup.exs`: the version
+there is the candidate, and each literal from-version is a baseline built
+against that Castle from Hex. So the appup is edited per release and the test is
+not. The candidate is built from `mix hex.build --unpack` rather than from this
+tree, so a file the package leaves out fails here before it fails a consumer.
+Its `@version` is rewritten in the unpacked copy rather than set through
+`VERSION_OVERRIDE`, because Forecastle's `mix.exs` reads the same variable and
+would move too.
+
+The fixture, `test/fixtures/consumer`, depends on Castle alone and never moves
+its own version, so the relup between the two releases is Castle's appup and
+nothing else. Each build happens in a copy of it under the test's scratch
+directory, with a scrubbed environment, so `MIX_ENV=test` from the running
+suite never reaches it.
+
+What it asserts, and why each is there:
+
+  * `mix castle.appup --app castle` passes against the two releases. It compares
+    compiled modules, so it catches a module changed since the from-version that
+    the appup forgot.
+  * The upgrade is hot: the operating system pid is unchanged across
+    `unpack`/`install`/`commit`.
+  * After the install, every Castle module's loaded code has the md5 of the new
+    version's beam. It is compared by md5 and not by where the module was loaded
+    from, because a relup loads only the modules that changed, and an unchanged
+    one is still the copy from the previous version's directory. Forecastle's
+    docs warn that a missing instruction leaves old code serving while the
+    application reports the new version, and this is what would show it.
+  * After the commit, no Castle module carries old code, and a command run by the
+    new Castle (`upgradable`) succeeds.
+
+Two mutations were run against it rather than assumed. Removing
+`Castle.Commands` from the appup fails both the coverage check and the md5
+check, independently. Dropping `appup.exs` from `files` fails the target build
+in `setup_all`, which is the consumer-visible failure.
+
 `test/castle/no_mix_tasks_test.exs` asserts something about the *pair* rather
 than about any of Castle's behaviour: **Castle ships no Mix tasks.** Every
 build-time task lives in Forecastle, whatever it is called — and since
@@ -2142,9 +2240,15 @@ the exit statuses `bin/castle` returns are asserted. None of it is measured here
   sample fixture takes Forecastle as a `path` dependency with `override: true`,
   so what it establishes is that the implementations work, not the claim this
   README actually makes: that depending on **Castle alone** is enough to get
-  them. Neither repository runs that flow, and the `override:` is deliberate
-  (Forecastle has to be testable without Castle's API), so it is not something
-  to fix by tidying the fixture.
+  them. The `override:` is deliberate (Forecastle has to be testable without
+  Castle's API), so it is not something to fix by tidying the fixture.
+
+  **`test/e2e/appup_test.exs` now runs that flow, and only when asked.** Its
+  fixture depends on Castle alone, goes through `Castle.customize/1` and
+  `upgrade_from:`, and calls `mix castle.appup`. But it is opt-in, it is not in
+  CI, and its consumer resolves Forecastle from Hex for itself rather than
+  through Castle's `mix.lock`. So it checks what a consumer would get today, not
+  the pin this repository's own build uses.
 
   That is not hypothetical. Closing
   [#9](https://github.com/ausimian/castle/issues/9) documented

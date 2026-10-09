@@ -1,0 +1,5 @@
+## The same port, so `bin/consumer rpc` finds the node without epmd. The remote
+## node does not listen itself.
+-start_epmd false
+-erl_epmd_port 24617
+-dist_listen false

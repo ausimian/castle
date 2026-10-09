@@ -1,0 +1,4 @@
+# Never built in place, but a stray build here should not be committed.
+/_build/
+/deps/
+/mix.lock

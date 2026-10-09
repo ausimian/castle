@@ -1,3 +1,10 @@
+### Added
+
+- Castle now ships an appup, so a consumer upgrade that moves Castle from 1.0.0
+  is a hot upgrade under `auto`. Previously, unless the consumer supplied an
+  appup for Castle under `rel/appups`, Forecastle generated an emulator restart
+  for any upgrade that changed Castle's version.
+
 ### Fixed
 
 - Castle now uses the same releases directory as `:release_handler`, following

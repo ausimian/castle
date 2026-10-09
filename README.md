@@ -256,8 +256,12 @@ README and the module documentation for the full workflow.
 ## Limitations
 
 - Windows launchers are not supported.
-- `RELDIR` and the SASL `releases_dir` option are not supported. Castle and
-  `:release_handler` must use the same release directory. See
-  [issue #23](https://github.com/ausimian/castle/issues/23).
+- Castle follows `:release_handler`'s releases directory, including `RELDIR`
+  and the SASL `releases_dir` option. The Mix launcher and Forecastle's start
+  hook still read `$RELEASE_ROOT/releases`, and OTP's unpack extracts the
+  tarball's `releases/` files under the release root, so a moved releases
+  directory needs its files staged by hand. The start hook creates `RELEASES`
+  without loading `sys.config`, so it sees `RELDIR` but not a `releases_dir`
+  set there.
 - Castle serialises installs within one Erlang node. Do not run Castle from a
   second VM against the same deployment.

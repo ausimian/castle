@@ -10,7 +10,7 @@ defmodule Castle.PeerStub do
   # it: the call is made inline, in the test process.
 
   @doc """
-  Registers the reply `materialise/1` answers with, and returns this module so
+  Registers the reply `materialise/2` answers with, and returns this module so
   that it can be passed straight to the function under test.
 
   A reply that is a function of one argument is called with the version directory
@@ -28,11 +28,15 @@ defmodule Castle.PeerStub do
   @doc "The version directory of each call made, oldest first."
   def calls, do: Enum.reverse(Process.get({__MODULE__, :calls}, []))
 
-  def materialise(rel_vsn_dir) do
+  @doc "The options each call was given, oldest first, in step with `calls/0`."
+  def options, do: Enum.reverse(Process.get({__MODULE__, :options}, []))
+
+  def materialise(rel_vsn_dir, opts \\ []) do
     Process.put({__MODULE__, :calls}, [rel_vsn_dir | Process.get({__MODULE__, :calls}, [])])
+    Process.put({__MODULE__, :options}, [opts | Process.get({__MODULE__, :options}, [])])
 
     case Process.get(__MODULE__, :unstubbed) do
-      :unstubbed -> raise "materialise/1 was called without a registered reply"
+      :unstubbed -> raise "materialise/2 was called without a registered reply"
       reply when is_function(reply, 1) -> reply.(rel_vsn_dir)
       reply -> reply
     end

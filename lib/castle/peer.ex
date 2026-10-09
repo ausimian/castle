@@ -207,8 +207,12 @@ defmodule Castle.Peer do
   Materialises the configuration of the release whose version directory is
   given, reporting nothing when it succeeds.
 
-  The release root is the directory two levels above, which is where a release
-  keeps `lib`, `erts-*` and the `releases` directory this one lives in.
+  `:root` is the release root, where the release keeps `lib` and `erts-*`. It
+  defaults to the directory two levels above the version directory, which is
+  where it is when the version directory is in `<root>/releases`. That is only
+  the default layout: `RELDIR` or `{sasl, releases_dir}` can put the version
+  directories elsewhere while `:release_handler` still extracts applications
+  under `code:root_dir()`. So `Castle.Commands` always passes the root.
 
   `:boot_timeout` and `:resolve_timeout` override the deadlines. They are
   options for the same reason `Castle.Commands` takes the module to talk to: a
@@ -395,7 +399,7 @@ defmodule Castle.Peer do
   # second place to get that wrong. They are given the names they will have when
   # they leave.
   defp plan(rel_vsn_dir, opts) do
-    root = Path.expand("../..", rel_vsn_dir)
+    root = Keyword.get_lazy(opts, :root, fn -> Path.expand("../..", rel_vsn_dir) end)
     boot = Path.join(rel_vsn_dir, @boot_script)
     sys_config = Path.join(rel_vsn_dir, @sys_config)
     vsn = Path.basename(rel_vsn_dir)

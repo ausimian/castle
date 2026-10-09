@@ -19,6 +19,18 @@ defmodule Castle.CommandsTest do
       assert PeerStub.calls() == [dir]
     end
 
+    # Not the directory two above the version: RELDIR or {sasl, releases_dir}
+    # can put the version directories anywhere, and the applications the peer
+    # boots on are still under the root the handler extracted them into.
+    @tag :tmp_dir
+    test "gives the peer the deployment's root", %{tmp_dir: dir} do
+      unpacked(dir)
+      deployment = DeploymentStub.stub(nil, "/the/deployment")
+
+      assert Commands.materialise(dir, PeerStub.stub({:ok, []}), deployment) == {:ok, []}
+      assert PeerStub.options() == [[root: "/the/deployment"]]
+    end
+
     @tag :tmp_dir
     test "reports what the peer could not do", %{tmp_dir: dir} do
       unpacked(dir)

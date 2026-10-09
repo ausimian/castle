@@ -81,16 +81,16 @@ defmodule Castle.Commands do
   Does nothing if the file already exists.
 
   The directory is an argument because that is what makes this testable, not
-  because a caller gets to choose it: `Castle.make_releases/0` derives it from
-  the root of the release - `code:root_dir()`, never the working directory. So
-  the working directory was only ever visible to the check below, which is what
-  made it possible for the file this looked for and the file `create_RELEASES/3`
-  wrote to be different ones. Nothing has to change directory to call this, and
-  nothing should.
+  because a caller gets to choose it: `Castle.make_releases/0` derives it the
+  way `:release_handler` does - `Castle.Deployment.releases_dir/0` - and never
+  from the working directory. The working directory was only ever visible to
+  the check below, which is what made it possible for the file this looked for
+  and the file `create_RELEASES/3` wrote to be different ones. Nothing has to
+  change directory to call this, and nothing should.
 
-  That derivation is right for a release Mix built and not in general;
-  `Castle.Deployment.root_dir/0` is the one place that explains why, and
-  castle#23 is the gap.
+  The derivation can only see the VM it runs in. Forecastle's `env.sh` fragment
+  calls this from a preboot VM started without the release's `sys.config`, so
+  `RELDIR` reaches it and a `{sasl, releases_dir}` set in `sys.config` does not.
 
   Refuses a release that did not bring its own ERTS - see `ensure_own_erts/2`
   below - and refuses it *before* looking for the file, not after. The whole
@@ -425,11 +425,16 @@ defmodule Castle.Commands do
   The module is an argument for the same reason `:release_handler` is: so that a
   test can see what was asked of it without starting a VM.
 
+  The peer is given `deployment.root_dir()` as the release root rather than
+  working it out from `rel_vsn_dir`. On the default layout they agree, but
+  `RELDIR` or `{sasl, releases_dir}` can move the version directories away from
+  the root while `:release_handler` still extracts the applications under it.
+
   Gated on the release bringing its own ERTS - see `ensure_own_erts/2` - because
-  `rel_vsn_dir` is derived from `code:root_dir()`, so without the guard the
-  operator's first news of an ERTS-less deployment is that some version directory
-  inside the Erlang installation holds no release to configure, which is true and
-  says nothing about why.
+  both `rel_vsn_dir` and that root are derived from `code:root_dir()` by
+  default, so without the guard the operator's first news of an ERTS-less
+  deployment is that some version directory inside the Erlang installation holds
+  no release to configure, which is true and says nothing about why.
 
   The guard is redundant for both callers as things stand: `install/5` and
   `commit/5` each make it before they take the lock, and so before either
@@ -447,7 +452,8 @@ defmodule Castle.Commands do
     with :ok <- ensure_own_erts("Cannot configure #{vsn}", deployment) do
       case File.ls(rel_vsn_dir) do
         {:ok, [_ | _]} ->
-          peer.materialise(rel_vsn_dir) |> configuration_result(vsn)
+          peer.materialise(rel_vsn_dir, root: deployment.root_dir())
+          |> configuration_result(vsn)
 
         nothing ->
           {:error,
@@ -539,7 +545,9 @@ defmodule Castle.Commands do
 
   `rel_dir` is where the restart marker is armed. It is an argument for the
   reason `make_releases/3`'s is: nothing chooses it, `Castle.install/1` derives
-  it from `code:root_dir()`, and a test needs somewhere to look.
+  it as `:release_handler` does, and a test needs somewhere to look. The marker
+  belongs there because that is where the handler writes the
+  `new_start_erl.data` it pairs with.
 
   A transition that reboots the emulator is refused, with nothing touched, while
   another such install is still pending - see `unclaimed/4`. One at a time is the

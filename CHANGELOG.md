@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- %% CHANGELOG_ENTRIES %% -->
 
+## 1.1.0 - 2026-10-23
+
+### Changed
+
+- Castle now requires Forecastle 1.1 or later, which adds the
+  `require_relup: true` release option: a build that sets it and has no
+  `upgrade_from:` is rejected before assembly instead of producing a release
+  with no relup.
+- A consumer upgrade that moves Castle from 1.0.0 or 1.0.1 to 1.1.0 stays hot
+  under `auto`, since Castle's appup covers both.
+
 ## 1.0.1 - 2026-10-09
 
 ### Added

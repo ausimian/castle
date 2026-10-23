@@ -154,6 +154,16 @@ Forecastle validates `upgrade_from:` before assembly. Define or compute it in
 the release definition, or in a step before `:assemble`. A project-root `relup`
 cannot be combined with `upgrade_from:`.
 
+A release that ships hot upgrades can set `require_relup: true`, and Forecastle
+then rejects a build without `upgrade_from:` before assembly rather than
+producing a release with no relup. A project-root `relup` does not satisfy it.
+Set it conditionally so that local builds and `ref:` baseline builds, which
+inherit the environment, can still leave `upgrade_from:` out:
+
+```elixir
+require_relup: System.get_env("CI") != nil and System.get_env("CASTLE_BASELINE") == nil
+```
+
 ### Generate a relup for an existing target
 
 `mix castle.relup` generates a relup for an assembled target:

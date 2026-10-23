@@ -126,10 +126,20 @@ defmodule Castle.AppupTest do
           Path.join(context.scratch, "deploy")
         )
 
-      on_exit(fn -> Deployment.stop(deployment) end)
+      on_exit(:stop, fn -> Deployment.stop(deployment) end)
 
       Deployment.start!(deployment)
       os_pid = Deployment.os_pid(deployment)
+
+      # `stop` returns before the node has exited, and every from-version deploys
+      # into the same directory and listens on the same port. So with more than
+      # one baseline, the next case's `deploy!/3` meets this node still running
+      # and refuses. Once the pid is known, teardown waits for it to go.
+      on_exit(:stop, fn ->
+        Deployment.stop(deployment)
+        Deployment.await_exit!(os_pid)
+      end)
+
       assert castle(deployment).vsn == @from
 
       # `install` is run by the *old* Castle, which the relup replaces while that

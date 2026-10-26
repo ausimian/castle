@@ -2002,7 +2002,10 @@ The fixture, `test/fixtures/consumer`, depends on Castle alone and never moves
 its own version, so the relup between the two releases is Castle's appup and
 nothing else. Each build happens in a copy of it under the test's scratch
 directory, with a scrubbed environment, so `MIX_ENV=test` from the running
-suite never reaches it.
+suite never reaches it. Its `config/runtime.exs` reads two variables for the
+`CASTLE_ENV_FILE` case below; unset, they are defaults nothing else reads, but
+they do give every build a config provider, so the peer runs in every upgrade
+the test makes.
 
 What it asserts, and why each is there:
 
@@ -2019,11 +2022,22 @@ What it asserts, and why each is there:
     application reports the new version, and this is what would show it.
   * After the commit, no Castle module carries old code, and a command run by the
     new Castle (`upgradable`) succeeds.
+  * `CASTLE_ENV_FILE` reaches the target on the upgrade that ships it
+    ([#56](https://github.com/ausimian/castle/issues/56)). The baseline is
+    started with it set, as a supervisor would start it, and with a variable in
+    its environment; the target's `releases/<vsn>/castle.env`, written after
+    `unpack`, changes one variable and `unset`s that one. After the hot install
+    the consumer's application environment has both, and after the commit so
+    does the stored `sys.config`. The install is run by the baseline's Castle,
+    which knows nothing of the file, so this is the case that shows the work is
+    the target's.
 
 Two mutations were run against it rather than assumed. Removing
 `Castle.Commands` from the appup fails both the coverage check and the md5
 check, independently. Dropping `appup.exs` from `files` fails the target build
-in `setup_all`, which is the consumer-visible failure.
+in `setup_all`, which is the consumer-visible failure. Removing the sourcing
+from `Castle.Peer.resolve/1` fails the `CASTLE_ENV_FILE` case from every
+baseline, with the greeting still at its default.
 
 `test/castle/no_mix_tasks_test.exs` asserts something about the *pair* rather
 than about any of Castle's behaviour: **Castle ships no Mix tasks.** Every

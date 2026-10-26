@@ -27,6 +27,9 @@ defmodule Castle.AppupTest do
   else, and whose own version never moves - so the relup between the two
   releases is Castle's appup and nothing else.
 
+  From each baseline it also checks that a target's `CASTLE_ENV_FILE` reaches
+  its configuration on a hot install run by the baseline's Castle (#56).
+
   Excluded from `mix test` and `mix precommit`; it needs the network for Hex and
   takes minutes. Run it before every release, and again once it is published:
 
@@ -168,6 +171,86 @@ defmodule Castle.AppupTest do
 
       assert Deployment.os_pid(deployment) == os_pid, "the upgrade restarted the emulator"
     end
+
+    # #56, end to end, and across the boundary that matters: the install is run
+    # by Castle #{from}, which knows nothing of `CASTLE_ENV_FILE`, and the file
+    # is read anyway, because the peer runs the target's own Castle. That is the
+    # claim that it works from the upgrade that ships it.
+    #
+    # The node is started the way a supervisor would start it: with
+    # `CASTLE_ENV_FILE` naming a per-version file, and with `CONSUMER_FEATURE`
+    # set in its environment, so that the target's `unset` has something to
+    # remove. The baseline's own file is written too - a baseline built with a
+    # Forecastle that has the prefix reads it at boot and refuses to start
+    # without it - and says nothing the assertions depend on.
+    test "a consumer on Castle #{from} configures #{@to} from its CASTLE_ENV_FILE on a hot install",
+         context do
+      deployment =
+        Deployment.deploy!(
+          "tar:#{context.baselines[@from]}",
+          Path.join(context.scratch, "deploy")
+        )
+
+      supervisor = [{"CASTLE_ENV_FILE", "castle.env"}, {"CONSUMER_FEATURE", "on"}]
+
+      env_file!(deployment, @from, "CONSUMER_GREETING=from-the-baseline-file\n")
+
+      on_exit(:stop, fn -> Deployment.stop(deployment) end)
+
+      Deployment.start!(deployment, supervisor)
+      os_pid = Deployment.os_pid(deployment)
+
+      on_exit(:stop, fn ->
+        Deployment.stop(deployment)
+        Deployment.await_exit!(os_pid)
+      end)
+
+      assert castle(deployment).vsn == @from
+      assert app_env(deployment, :feature) == "on"
+
+      Deployment.stage!(deployment, context.target)
+      Deployment.castle!(deployment, ["unpack", @to])
+
+      # Written after `unpack`, which is what makes the directory, as the guide
+      # tells a deployment to.
+      env_file!(deployment, @to, """
+      CONSUMER_GREETING=from-the-target-file
+      unset CONSUMER_FEATURE
+      """)
+
+      Deployment.castle!(deployment, ["install", @to])
+
+      assert castle(deployment).vsn == @to
+      assert app_env(deployment, :greeting) == "from-the-target-file"
+      assert app_env(deployment, :feature) == "off"
+
+      # `commit` resolves again, from the same file, so what it stores for the
+      # next boot agrees with what the install applied.
+      Deployment.castle!(deployment, ["commit"])
+
+      sys_config =
+        deployment.root
+        |> Path.join("releases/#{@to}/sys.config")
+        |> String.to_charlist()
+        |> :file.consult()
+        |> then(fn {:ok, [config]} -> config end)
+
+      assert sys_config[:consumer][:greeting] == "from-the-target-file"
+      assert sys_config[:consumer][:feature] == "off"
+
+      assert Deployment.os_pid(deployment) == os_pid, "the upgrade restarted the emulator"
+    end
+  end
+
+  defp env_file!(deployment, vsn, contents) do
+    path = Path.join([deployment.root, "releases", vsn, "castle.env"])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, contents)
+  end
+
+  # A key of the consumer's application environment, on the running node.
+  defp app_env(deployment, key) do
+    Deployment.rpc!(deployment, "IO.puts(Application.fetch_env!(:consumer, #{inspect(key)}))")
   end
 
   # What the running node says about Castle: its version, any module whose

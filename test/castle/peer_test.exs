@@ -1313,6 +1313,209 @@ defmodule Castle.PeerTest do
     end
   end
 
+  # #56. The file is sourced in the peer, so the cases that matter most start
+  # one; the cases about what sourcing returns call `source_env_file/1` on this
+  # node, which it is safe to do because it reads the environment and changes
+  # nothing.
+  describe "CASTLE_ENV_FILE" do
+    @env_runtime """
+    import Config
+    config :sample, greeting: System.get_env("CASTLE_PEER_TEST_GREETING", "unset")
+    config :sample, feature: System.get_env("CASTLE_TEST_FEATURE", "off")
+    """
+
+    setup do
+      on_exit(fn ->
+        Enum.each(
+          ~w(CASTLE_ENV_FILE CASTLE_PEER_TEST_GREETING CASTLE_TEST_FEATURE),
+          &System.delete_env/1
+        )
+      end)
+    end
+
+    test "configures the target from the file, over the node's environment",
+         %{tmp_dir: root} do
+      vsn_dir = env_file_release(root)
+
+      env_file =
+        write_env_file(root, "castle.env", """
+        CASTLE_PEER_TEST_GREETING='from the file'
+        unset CASTLE_TEST_FEATURE
+        echo "read by the peer"
+        """)
+
+      System.put_env("CASTLE_PEER_TEST_GREETING", "from the node")
+      System.put_env("CASTLE_TEST_FEATURE", "on")
+      System.put_env("CASTLE_ENV_FILE", env_file)
+
+      {result, forwarded} = IoSink.with_group_leader(fn -> Castle.Peer.materialise(vsn_dir) end)
+
+      assert result == {:ok, []}
+      # A changed value wins, and `unset` removes what the node booted with.
+      assert read_sys_config(vsn_dir)[:sample][:greeting] == "from the file"
+      assert read_sys_config(vsn_dir)[:sample][:feature] == "off"
+      # What the file printed reaches whoever asked, as a provider's output does.
+      assert forwarded =~ "read by the peer"
+
+      # The peer's environment is the one that changed. The node's is left as it
+      # was: a hot upgrade changes configuration, not the environment of a system
+      # already running.
+      assert System.get_env("CASTLE_PEER_TEST_GREETING") == "from the node"
+      assert System.get_env("CASTLE_TEST_FEATURE") == "on"
+    end
+
+    # `RELEASE_ROOT` and `RELEASE_VSN` are what `env/1` gives the peer, so only
+    # a peer can show it. The node running the test has neither, and a file at
+    # the root - where a relative name used to resolve - is not the target's.
+    test "resolves a relative name in the target's own version directory",
+         %{tmp_dir: root} do
+      vsn_dir = env_file_release(root)
+      write_env_file(vsn_dir, "etc/castle.env", "CASTLE_PEER_TEST_GREETING=version\n")
+      write_env_file(root, "etc/castle.env", "CASTLE_PEER_TEST_GREETING=root\n")
+      System.put_env("CASTLE_ENV_FILE", "etc/castle.env")
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+      assert read_sys_config(vsn_dir)[:sample][:greeting] == "version"
+    end
+
+    test "refuses a file that is not there, changing nothing", %{tmp_dir: root} do
+      vsn_dir = env_file_release(root)
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+      missing = Path.join(root, "missing.env")
+      System.put_env("CASTLE_ENV_FILE", missing)
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+
+      # The words a start that cannot read the file prints, since a restart and a
+      # hot install refuse the same file.
+      assert message =~ "CASTLE_ENV_FILE names #{missing}, which is not a readable file"
+      assert File.read!(sys_config) == before
+      assert Enum.filter(File.ls!(vsn_dir), &String.starts_with?(&1, "castle-")) == []
+    end
+
+    # No providers, so no peer - and a start of the release still reads the
+    # file, so it is checked anyway, and against the target: the node running
+    # the test has no RELEASE_ROOT or RELEASE_VSN, so a relative name that finds
+    # the version's file was resolved with the target's.
+    test "checks the file of a release that has no providers", %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
+      sys_config = Path.join(vsn_dir, "sys.config")
+      before = File.read!(sys_config)
+      System.put_env("CASTLE_ENV_FILE", "castle.env")
+
+      assert {:error, message} = Castle.Peer.materialise(vsn_dir)
+      assert message =~ "CASTLE_ENV_FILE names #{Path.join(vsn_dir, "castle.env")}"
+
+      write_env_file(vsn_dir, "castle.env", "CASTLE_PEER_TEST_GREETING=unused\n")
+
+      assert Castle.Peer.materialise(vsn_dir) == {:ok, []}
+      assert File.read!(sys_config) == before
+      # Sourced in this VM, and nothing it set was kept.
+      assert System.get_env("CASTLE_PEER_TEST_GREETING") == nil
+    end
+
+    # With no peer there is no peer call to bound it, and it runs inside the
+    # region every later install waits on - so it has a deadline of its own.
+    test "gives up on the file of a release that has no providers, at the deadline",
+         %{tmp_dir: root} do
+      vsn_dir = SyntheticRelease.build(root, config: [sample: [greeting: "compile-time"]])
+      write_env_file(vsn_dir, "castle.env", "sleep 5\n")
+      System.put_env("CASTLE_ENV_FILE", "castle.env")
+
+      {elapsed, result} =
+        :timer.tc(fn -> Castle.Peer.materialise(vsn_dir, resolve_timeout: 500) end, :millisecond)
+
+      assert {:error, message} = result
+      assert message =~ "CASTLE_ENV_FILE did not finish within 500ms"
+      assert elapsed < 5_000
+    end
+
+    test "returns what sourcing changed, and only that", %{tmp_dir: root} do
+      env_file =
+        write_env_file(root, "castle.env", """
+        CASTLE_PEER_TEST_GREETING='two lines
+        and an = sign'
+        CASTLE_TEST_FEATURE=on
+        unset CASTLE_ENV_FILE_GONE
+        echo "said on standard output"
+        echo "said on standard error" >&2
+        """)
+
+      System.put_env("CASTLE_TEST_FEATURE", "on")
+      System.put_env("CASTLE_ENV_FILE_GONE", "here")
+      on_exit(fn -> System.delete_env("CASTLE_ENV_FILE_GONE") end)
+      System.put_env("CASTLE_ENV_FILE", env_file)
+
+      # CASTLE_TEST_FEATURE is set to the value it already had, so it is no
+      # change; and nothing the shell sets of its own appears either.
+      assert {:ok, changes, said} = Castle.Peer.source_env_file()
+
+      assert changes == [
+               {"CASTLE_ENV_FILE_GONE", nil},
+               {"CASTLE_PEER_TEST_GREETING", "two lines\nand an = sign"}
+             ]
+
+      assert said == "said on standard output\nsaid on standard error\n"
+    end
+
+    test "runs nothing when the variable is unset or empty" do
+      System.delete_env("CASTLE_ENV_FILE")
+      assert Castle.Peer.source_env_file() == {:ok, [], ""}
+
+      System.put_env("CASTLE_ENV_FILE", "")
+      assert Castle.Peer.source_env_file() == {:ok, [], ""}
+    end
+
+    # Under `set -e`, as the launcher runs it, so a start would stop here too.
+    test "refuses a file with a command that fails", %{tmp_dir: root} do
+      failing = write_env_file(root, "failing.env", "echo 'no vault' >&2\nfalse\n")
+      System.put_env("CASTLE_ENV_FILE", failing)
+
+      # What the file said reaches the refusal, and so does the status, which is
+      # all there is to go on when it said nothing.
+      assert {:error, message} = Castle.Peer.source_env_file()
+      assert message =~ "no vault"
+      assert message =~ "status 1"
+
+      silent = write_env_file(root, "silent.env", "false\n")
+      System.put_env("CASTLE_ENV_FILE", silent)
+
+      assert {:error, message} = Castle.Peer.source_env_file()
+      assert message =~ "status 1"
+    end
+
+    # The fragment is Forecastle's, copied, because a restart and a hot install
+    # have to read the file in the same way. This is what keeps the copy honest.
+    test "sources the file exactly as Forecastle's env.sh does" do
+      template = File.read!(Application.app_dir(:forecastle, "priv/env_prefix.sh.eex"))
+
+      [_before, from_if] =
+        :binary.split(template, ~s(if [ -n "${CASTLE_ENV_FILE-}" ]; then\n))
+
+      [body, _after] = :binary.split(from_if, "\nfi\n")
+
+      assert Castle.Peer.env_file_fragment() ==
+               ~s(if [ -n "${CASTLE_ENV_FILE-}" ]; then\n) <> body <> "\nfi\n"
+    end
+  end
+
+  defp env_file_release(root) do
+    runtime = Path.join(root, "runtime.exs")
+    File.write!(runtime, @env_runtime)
+
+    SyntheticRelease.build(root,
+      config: with_providers([{Config.Reader, path: runtime, env: :prod}], [])
+    )
+  end
+
+  defp write_env_file(dir, name, contents) do
+    path = Path.join(dir, name)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, contents)
+    path
+  end
+
   # The configuration Mix writes for a release with providers: the initialised
   # provider state under the elixir application's key, merged over the
   # compile-time configuration.

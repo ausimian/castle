@@ -423,6 +423,12 @@ defmodule Castle do
   providers in a temporary VM, and prepares any emulator-restart marker before
   calling `:release_handler.install_release/1`.
 
+  The temporary VM inherits this node's environment. When `CASTLE_ENV_FILE` is
+  set there, the target sources the file it names before its providers run, as
+  a boot does. A relative name is in the target's own version directory,
+  `releases/<vsn>/`. A file that is missing, unreadable or fails refuses the
+  install. See the "Configuring from environment variables" guide.
+
   A hot upgrade reports the new and previous running versions. An upgrade that
   restarts the emulator reports that the version was installed and remains
   provisional. `bin/castle install` then polls `running/1` until the target has
@@ -488,8 +494,9 @@ defmodule Castle do
   selects the `current` release and exits non-zero when none is awaiting commit.
 
   Castle resolves the target's config providers again before promotion, storing
-  the configuration a boot at commit time would produce. An explicit commit of
-  the permanent version still performs this step.
+  the configuration a boot at commit time would produce, including the file
+  `CASTLE_ENV_FILE` names. It does not apply that configuration to the running
+  system. An explicit commit of the permanent version still performs this step.
 
   Raises `Castle.Error` if the configuration could not be expanded, or if the
   version cannot be promoted. This includes staged, rolled-back, superseded and

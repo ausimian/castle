@@ -269,6 +269,74 @@ Castle's job is configuration and release management on a running node.
   recognise what it was given: it refuses instead, because a check that silently
   passes everything looks exactly like a check that works.
 
+  **The peer sources the file `CASTLE_ENV_FILE` names before the providers run,
+  and it is the peer that does it, on the target's code**
+  ([#56](https://github.com/ausimian/castle/issues/56)). The peer inherits the
+  environment the running node booted with, so without this a variable changed
+  for the target reached a restart and never a hot install. Forecastle's `env.sh`
+  sources the same file at boot (forecastle#60), and the two have to read it in
+  the same way, so `Castle.Peer.env_file_fragment/0` is Forecastle's
+  `priv/env_prefix.sh.eex` copied word for word, and a test compares them. Do not
+  change one without the other.
+
+  **A relative name is per version**: `$RELEASE_ROOT/releases/$RELEASE_VSN/`, the
+  version's directory under the release root, where its `env.sh` is. That is
+  beside its `sys.config` on the default layout and not on a deployment that
+  moved its releases directory - the split *What the handler decides is not the
+  whole deployment* describes - where the file stays under the root and `remove`
+  does not delete it. It was joined to
+  `RELEASE_ROOT` at first, which made it one file for every version, written by
+  the deployment and belonging to none of them: a rollback configured the old
+  version from the new values, and a refused install left its edit behind for
+  the running version's next restart. Per version, the file `install` reads for
+  the target is the one the target boots with and the one a rollback to it
+  reads, and `remove` deletes it. The deployment writes it after `unpack`; it is
+  not in the tarball, which would put secrets in a build artefact. An absolute
+  name is still one file for every version.
+
+  Placement is what makes it reach existing deployments. `env/1` runs in the
+  origin, which is the version being replaced, so a change there would take
+  effect from the upgrade *after* the one that ships it, and `bin/castle` never
+  changes through a hot upgrade at all. `resolve/1` runs in the target, and needs
+  nothing from the origin but `CASTLE_ENV_FILE` (inherited from the node),
+  `RELEASE_ROOT` and `RELEASE_VSN` (both set to the target's by `env/1` in every
+  Castle since 1.0). The alternatives
+  that were weighed and refused are recorded on #56: forwarding the invoking
+  shell's environment, sourcing the target's whole `env.sh` (its `start` branch
+  consumes the restart marker), and an empty base (it loses what the supervisor
+  provides).
+
+  Only the *difference* sourcing made is applied. One `/bin/sh` dumps its
+  environment with `env -0`, sources the file, and dumps it again, so what the
+  shell adds of its own cancels out and an `unset` in the file shows up as a
+  removal. Both dumps are run the same way and neither is exec'd — bash adjusts
+  `SHLVL` and drops `_` for an exec'd command, and zsh execs the last command of
+  a `-c` script by itself, hence the trailing `:`. That was measured under dash,
+  bash 3.2 and 5, and zsh, and each leaked a variable the file never touched
+  until the script took this shape. The dumps hold secrets, so they stay in
+  memory. Unset or empty, nothing is run.
+
+  The node's own environment is left alone: what a hot upgrade changes is
+  configuration, through `config_change/3`. A variable the running version's
+  file set and the target's leaves out, rather than `unset`s, survives in the
+  node's environment and so in the hot install, until a plain restart. A restart
+  into a pending version does the same, reading the replaced version's file and
+  then the target's, so the two agree. That is documented, not fixed.
+
+  `source_env_file/1` sits above `## In the peer` because it changes nothing in
+  the VM it runs in, so the tests call it on their own node and it is measured.
+  Applying the difference is the part below the line.
+
+  **A release with no providers starts no peer, and its file is still checked.**
+  A start of it reads the file and refuses to go on without one, so an install
+  or a commit that let a missing or failing file through would leave a release
+  that cannot boot. `env_file_only/1` sources it in the origin, with
+  `RELEASE_ROOT` and `RELEASE_VSN` pointed at the target exactly as `env/1`
+  points the peer's (both come from `release_env/1`), and discards what it
+  changed. Being origin code, it checks an *install* from the upgrade after the
+  one that ships it; a *commit* runs it on the new code, because the relup has
+  loaded `Castle.Peer` by then. Codex found this on #57.
+
 - **`Castle.make_releases/0`** — creates the `RELEASES` file from the running
   permanent release if it does not already exist, so a release assembled by Mix
   can manage its own upgrades. The directory is `Castle.Deployment.releases_dir/0`,
@@ -1448,6 +1516,7 @@ after the one that installs it.
 | `lib/castle/file_reason.ex` | Shared rendering for filesystem and parser reasons used by commands and peer configuration |
 | `lib/castle/peer.ex` | The temporary VM that runs the target's own config providers, both sides of it |
 | `lib/castle/error.ex` | The exception a failed command raises |
+| `guides/environment-configuration.md` | The consumer guide to configuring from environment variables and `CASTLE_ENV_FILE`, published with the docs |
 | `test/support/` | Stubs for `:release_handler`, `:init`, the peer, the deployment and config providers, plus the release-shaped tree a real peer is booted on |
 | `appup.exs` | Castle's own appup, compiled into `ebin` by Forecastle's appup compiler in this build and in every consumer's |
 | `test/e2e/` | Opt-in end-to-end tests (`mix test --include e2e`) that build and upgrade real releases |
@@ -1626,6 +1695,20 @@ materialised twice with the environment changing in between — install, then
 commit — and the other once with the environment as it ended up. The two
 `sys.config` terms have to be equal. That is why `Castle.SyntheticRelease` makes
 its symlinks idempotently: a root has to be able to hold two versions.
+
+The `CASTLE_ENV_FILE` cases split the same way the code does. Three start a real
+peer, because the claim is about the peer: a changed value and an `unset` reach
+the providers while the test node's own environment is untouched, a relative
+name resolves in the target's version directory from the `RELEASE_ROOT` and
+`RELEASE_VSN` that `env/1` gives the peer, not at the root, and a
+missing file is refused in Forecastle's words with nothing written. Removing the
+sourcing from `resolve/1` fails all three, which was checked. The rest call
+`source_env_file/1` on the test node — the exact difference returned, with
+shell noise absent and a value holding a newline and an `=` intact, the two
+failure messages, and nothing run when the variable is unset or empty. One more
+reads Forecastle's `priv/env_prefix.sh.eex` from the dependency and compares its
+`if … fi` block with `env_file_fragment/0`, which is what keeps "copied word for
+word" from being a sentence nothing checks.
 
 `Castle.Peer.work_dir/1`, `secure_dir/1`, `write_like/3`, `write_private/2`,
 `create_exclusive/1`, `fill/3` and `publish/2` are public for the same kind of
@@ -1919,7 +2002,10 @@ The fixture, `test/fixtures/consumer`, depends on Castle alone and never moves
 its own version, so the relup between the two releases is Castle's appup and
 nothing else. Each build happens in a copy of it under the test's scratch
 directory, with a scrubbed environment, so `MIX_ENV=test` from the running
-suite never reaches it.
+suite never reaches it. Its `config/runtime.exs` reads two variables for the
+`CASTLE_ENV_FILE` case below; unset, they are defaults nothing else reads, but
+they do give every build a config provider, so the peer runs in every upgrade
+the test makes.
 
 What it asserts, and why each is there:
 
@@ -1936,11 +2022,22 @@ What it asserts, and why each is there:
     application reports the new version, and this is what would show it.
   * After the commit, no Castle module carries old code, and a command run by the
     new Castle (`upgradable`) succeeds.
+  * `CASTLE_ENV_FILE` reaches the target on the upgrade that ships it
+    ([#56](https://github.com/ausimian/castle/issues/56)). The baseline is
+    started with it set, as a supervisor would start it, and with a variable in
+    its environment; the target's `releases/<vsn>/castle.env`, written after
+    `unpack`, changes one variable and `unset`s that one. After the hot install
+    the consumer's application environment has both, and after the commit so
+    does the stored `sys.config`. The install is run by the baseline's Castle,
+    which knows nothing of the file, so this is the case that shows the work is
+    the target's.
 
 Two mutations were run against it rather than assumed. Removing
 `Castle.Commands` from the appup fails both the coverage check and the md5
 check, independently. Dropping `appup.exs` from `files` fails the target build
-in `setup_all`, which is the consumer-visible failure.
+in `setup_all`, which is the consumer-visible failure. Removing the sourcing
+from `Castle.Peer.resolve/1` fails the `CASTLE_ENV_FILE` case from every
+baseline, with the greeting still at its default.
 
 `test/castle/no_mix_tasks_test.exs` asserts something about the *pair* rather
 than about any of Castle's behaviour: **Castle ships no Mix tasks.** Every
@@ -2081,6 +2178,12 @@ The issue-29 lifecycle tests brought a pinned Elixir 1.19.5 run to 90.34%:
 `Castle.Deployment`, `Castle.Error`, and `Castle.FileReason` 100%. That is a new
 reading on one toolchain, not a replacement multi-toolchain measurement.
 
+[#56](https://github.com/ausimian/castle/issues/56) moved it to 89.87%, with
+`Castle.Peer` at 80.67%, on the same pinned toolchain. Sourcing the environment
+file is measured, because the tests call `source_env_file/1` on their own node;
+what moved the figure is six lines in the peer that apply the difference, which
+nothing here can observe. 1.18 and 1.20 were not remeasured.
+
 **So the threshold remains 88 — the lowest measured supported-toolchain reading,
 rounded down.** Two earlier values were wrong in opposite directions and both
 are worth keeping written down. 85 sat *below* the figure it was meant to floor,
@@ -2119,8 +2222,9 @@ in a VM with no distribution. What actually happens is that Mix starts cover on
 separate VM loading `Castle.Peer` from the target release's own beam files,
 which nothing has instrumented. Cover's only mechanism for reaching another VM
 is `:cover.start/1` over a *distributed* node, and this peer deliberately has
-none. So `resolve/1` and everything below the `## In the peer` comment — 33
-lines on 1.19 and 34 on 1.20, about 7% of the shipped total — runs on every
+none. So `resolve/1` and everything below the `## In the peer` comment — 39
+lines on 1.19 since #56, and 34 on 1.20 before it, about 8% of the shipped
+total — runs on every
 `Castle.PeerTest` and is counted as missed, which puts the observable ceiling
 near 93%.
 
@@ -2192,6 +2296,17 @@ the exit statuses `bin/castle` returns are asserted. None of it is measured here
 
 ## Known limitations
 
+- **A command in the `CASTLE_ENV_FILE` file that never returns is bounded, but
+  its shell is not reaped.** `System.cmd/3` has no deadline of its own, so a
+  file that blocks — a secrets fetch that hangs, say — holds the install until
+  `resolve_timeout` expires: through the peer call that waits on the peer, or,
+  for a release with no providers, through the task `env_file_only/1` waits on
+  in the origin (which Codex found unbounded on #57 — it runs inside the
+  serialised region, so it held every later install too). The install is then
+  refused and the peer or the task stopped, but the `/bin/sh` under it is left
+  until its own command returns. That is not
+  a correctness problem, since nothing reads what it produces, and it is
+  recorded rather than fixed.
 - **Nothing in the release restarts it after an emulator restart, and that is
   the design.** `init:reboot()` takes the OS process down, `bin/start` is inert,
   and `HEART_COMMAND` is unset, so the external supervisor is the only thing that

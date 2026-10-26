@@ -130,7 +130,7 @@ defmodule Castle.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:forecastle, "~> 1.1", runtime: false},
+      {:forecastle, "~> 1.2.0-rc.1", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:publisho, "~> 1.0", only: :dev, runtime: false}
@@ -174,7 +174,7 @@ defmodule Castle.MixProject do
       # consumer's build fails with "could not compile dependency :castle" -
       # measured, not guessed. The end-to-end appup test builds from the
       # unpacked package rather than this tree so that it fails there first.
-      files: ~w(lib appup.exs CHANGELOG.md LICENSE mix.exs README.md .formatter.exs)
+      files: ~w(lib guides appup.exs CHANGELOG.md LICENSE mix.exs README.md .formatter.exs)
     ]
   end
 
@@ -182,7 +182,7 @@ defmodule Castle.MixProject do
     [
       main: "readme",
       source_ref: @version,
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "guides/environment-configuration.md", "CHANGELOG.md"]
     ]
   end
 end

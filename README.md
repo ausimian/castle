@@ -228,6 +228,13 @@ target code, then asks OTP to install it. The version remains provisional until
 `commit` makes it permanent. A restart before commit normally returns to the
 previous permanent version.
 
+The temporary VM inherits the running node's environment. When the supervisor
+sets `CASTLE_ENV_FILE`, Castle also sources the file it names there, as
+Forecastle's `env.sh` does at boot, so a hot install and a restart configure the
+release from the same values. A relative name is a file in each version's own
+directory, `releases/<vsn>/`, which the deployment writes after `unpack`. See
+[Configuring from environment variables](guides/environment-configuration.md).
+
 For a relup containing `restart_emulator`, `install` waits across the restart
 until the target has finished booting. The external supervisor must restart the
 process. Castle does not support the two-stage `restart_new_emulator`

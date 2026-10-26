@@ -234,11 +234,45 @@ defmodule Castle.Peer do
       # A release with no providers has nothing to resolve: what Mix wrote is
       # already its final configuration, and `sys.config` is left exactly as it
       # is rather than rewritten with the same contents. No base is kept for it
-      # either - there is nothing that could change it.
-      if declares_providers?(base.config), do: expand(peer, base), else: {:ok, []}
+      # either - there is nothing that could change it. Its environment file is
+      # still checked; see `env_file_only/1`.
+      if declares_providers?(base.config), do: expand(peer, base), else: env_file_only(peer)
     end
   after
     discard(peer.work)
+  end
+
+  # A release with no providers starts no peer, so nothing would source its
+  # environment file - and a start of it would, and refuses to go on without it,
+  # so an install or a commit that let it through would leave a release that
+  # cannot boot. So it is sourced here instead, with the variables that say which
+  # release this is pointed at the target as the peer's are, and what it changed
+  # is thrown away: there is nothing for it to configure.
+  #
+  # This runs on the origin's code, unlike the peer's sourcing, so an install
+  # checks a provider-less target from the upgrade *after* the one that ships
+  # it. A commit checks it at once, because the relup has loaded this module by
+  # then.
+  #
+  # It has the peer's deadline, `resolve_timeout`, because the peer's sourcing
+  # is bounded by the call that waits on it and this has no call around it: a
+  # file that blocks would otherwise hold the install - and the serialised
+  # region every later install waits on - for as long as it liked. On expiry the
+  # task goes and the shell under it is left until its command returns, as on
+  # the peer's side.
+  defp env_file_only(peer) do
+    task = Task.async(fn -> source_env_file(release_env(peer)) end)
+
+    case Task.yield(task, peer.resolve_timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, _changes, _said}} ->
+        {:ok, []}
+
+      {:ok, {:error, message}} ->
+        {:error, message}
+
+      nil ->
+        {:error, "Sourcing CASTLE_ENV_FILE did not finish within #{peer.resolve_timeout}ms."}
+    end
   end
 
   defp declares_providers?(config) do
@@ -377,13 +411,16 @@ defmodule Castle.Peer do
   # nothing to say that its output has not already said, and the dump would be
   # left in whatever directory the operator ran the command from.
   defp env(peer) do
-    for {name, value} <- [
-          {"RELEASE_ROOT", peer.root},
-          {"RELEASE_VSN", peer.vsn},
-          {"RELEASE_SYS_CONFIG", Path.rootname(peer.sys_config)},
-          {"ERL_CRASH_DUMP_SECONDS", "0"}
-        ],
-        do: {to_charlist(name), to_charlist(value)}
+    for {name, value} <- release_env(peer), do: {to_charlist(name), to_charlist(value)}
+  end
+
+  defp release_env(peer) do
+    [
+      {"RELEASE_ROOT", peer.root},
+      {"RELEASE_VSN", peer.vsn},
+      {"RELEASE_SYS_CONFIG", Path.rootname(peer.sys_config)},
+      {"ERL_CRASH_DUMP_SECONDS", "0"}
+    ]
   end
 
   ## Preflight
@@ -952,6 +989,166 @@ defmodule Castle.Peer do
 
   defp format(config), do: :io_lib.format(~c"~tp.~n", [config])
 
+  ## The environment file
+  #
+  # A deployment can keep the variables its `runtime.exs` reads in one file and
+  # name it in `CASTLE_ENV_FILE` (#56). Forecastle's `env.sh` sources it on every
+  # launcher command, so a restart configures the release from it; this sources
+  # it too, before the target's providers run, so a hot install or a commit
+  # configures the target from the same values. Without it, the peer would see
+  # only the environment the running node booted with, and a change to the file
+  # would reach a restart and never a hot upgrade.
+  #
+  # A relative name is the version's own: it is joined to `releases/<vsn>` under
+  # the release root, where the version's `env.sh` is, so the file `install`
+  # reads for the target is the one the target boots with, and the one a
+  # rollback to it would read. That is the launcher's directory, not the
+  # handler's, so on a deployment that moved its releases directory it is not
+  # where `sys.config` is - and it has to agree with the launcher, not with
+  # `sys.config`. The
+  # deployment writes it after `unpack`. An absolute name is one file for every
+  # version.
+  #
+  # It runs in the peer, on the *target's* code, and that is the point of putting
+  # it here rather than in `env/1`. `env/1` runs in the origin, which is the
+  # version being replaced, so a change there would take effect from the upgrade
+  # after the one that ships it. What this needs from the origin is
+  # `CASTLE_ENV_FILE`, `RELEASE_ROOT` and `RELEASE_VSN` in the peer's
+  # environment, and every Castle since 1.0 passes all three on: the first
+  # because the peer inherits the node's environment, the other two because
+  # `env/1` sets them, to the target.
+  #
+  # The file is sourced by `/bin/sh` and by the fragment below, which is
+  # Forecastle's `priv/env_prefix.sh.eex` copied word for word. A restart and a
+  # hot install have to read the file in the same way, so it is the same code
+  # rather than a second implementation of it, and a test compares the two.
+  # Change them together or not at all.
+  #
+  # What comes back is the *difference* sourcing made, and only that is applied.
+  # The shell dumps its environment before and after, so what the shell adds of
+  # its own - `PWD`, `SHLVL`, `_` - is in both and cancels out, while a variable
+  # the file sets, changes or unsets is in the difference. `unset NAME` in the
+  # file is therefore how a variable is removed, at a hot install as at boot.
+  # `env -0` separates the entries with NUL, the one byte no variable can
+  # contain, so a value holding a newline or an `=` survives. The two dumps and
+  # what the file said are told apart by a delimiter made per call, passed as an
+  # argument and shifted off before the file is read.
+  #
+  # The dumps hold everything the environment does, secrets included, so they
+  # never touch a disk: they travel through the port and are parsed in memory.
+  #
+  # Unset or empty, nothing is run at all, which is exactly what a peer did
+  # before this existed.
+  #
+  # It is above `## In the peer` because nothing in it changes the VM it runs
+  # in: it reads the environment and returns. That is what lets the origin call
+  # it for a release with no providers (`env_file_only/1`), and the tests call
+  # it on the node running them.
+
+  @env_file "CASTLE_ENV_FILE"
+
+  @env_file_fragment ~S"""
+  if [ -n "${CASTLE_ENV_FILE-}" ]; then
+    case $CASTLE_ENV_FILE in
+      /*) castle_env_file=$CASTLE_ENV_FILE ;;
+      *)  castle_env_file=$RELEASE_ROOT/releases/$RELEASE_VSN/$CASTLE_ENV_FILE ;;
+    esac
+    if ! [ -f "$castle_env_file" ] || ! [ -r "$castle_env_file" ]; then
+      printf '%s\n' "ERROR: CASTLE_ENV_FILE names $castle_env_file, which is not a readable file" >&2
+      exit 1
+    fi
+    set -a
+    . "$castle_env_file"
+    set +a
+    unset castle_env_file
+  fi
+  """
+
+  # `set -e` because the launcher runs under it, so a command in the file that
+  # fails stops a start, and has to stop this too.
+  #
+  # The two dumps are run in exactly the same way, and neither is exec'd: bash
+  # lowers `SHLVL` for a command it execs and leaves `_` out, so the dumps would
+  # disagree about variables the file never touched. Hence the `:` after the
+  # second, since some shells - zsh among them - exec the last command of a
+  # `-c` script of their own accord. All measured.
+  @env_file_script """
+  set -e
+  castle_delimiter=$1
+  shift
+  /usr/bin/env -0
+  printf '%s' "$castle_delimiter"
+  #{@env_file_fragment}printf '%s' "$castle_delimiter"
+  /usr/bin/env -0
+  :
+  """
+
+  @typedoc "A variable to set to a value, or to remove (`nil`)."
+  @type env_change :: {String.t(), String.t() | nil}
+
+  @doc false
+  @spec env_file_fragment() :: String.t()
+  def env_file_fragment, do: @env_file_fragment
+
+  # `env` is for a caller that is not the target's peer, and so has to point the
+  # shell at the target itself; see `env_file_only/1`. The peer passes nothing,
+  # since `env/1` started it pointed there.
+  @doc false
+  @spec source_env_file([{String.t(), String.t()}]) ::
+          {:ok, [env_change()], String.t()} | {:error, String.t()}
+  def source_env_file(env \\ []) do
+    case System.get_env(@env_file) do
+      name when name in [nil, ""] -> {:ok, [], ""}
+      _name -> run_env_file(delimiter(), env)
+    end
+  end
+
+  defp run_env_file(delimiter, env) do
+    {output, status} =
+      System.cmd("/bin/sh", ["-c", @env_file_script, "castle", delimiter],
+        env: env,
+        stderr_to_stdout: true
+      )
+
+    case {status, :binary.split(output, delimiter, [:global])} do
+      {0, [before, said, after_sourcing]} ->
+        {:ok, env_changes(env_dump(before), env_dump(after_sourcing)), said}
+
+      # What the file said is what follows the first dump - or everything, if
+      # the shell stopped before it, which is a shell that cannot run `env`.
+      {status, parts} ->
+        {:error, sourcing_failed(status, Enum.at(parts, 1, hd(parts)))}
+    end
+  end
+
+  # Not a secret, and it does not need to be: it only has to be something the
+  # file and the environment do not happen to print.
+  defp delimiter, do: "--castle-env-file-#{Base.encode16(:rand.bytes(16))}--"
+
+  defp env_dump(dump) do
+    for entry <- :binary.split(dump, <<0>>, [:global, :trim_all]),
+        [name, value] <- [:binary.split(entry, "=")],
+        name != "",
+        into: %{},
+        do: {name, value}
+  end
+
+  defp env_changes(before, after_sourcing) do
+    set = for {name, value} <- after_sourcing, Map.get(before, name) != value, do: {name, value}
+    unset = for {name, _value} <- before, not Map.has_key?(after_sourcing, name), do: {name, nil}
+
+    Enum.sort(set ++ unset)
+  end
+
+  # What the shell said leads, because for a file that is not there it is the
+  # fragment's own sentence, which is the one a failed start prints too.
+  defp sourcing_failed(status, said) do
+    case String.trim(said) do
+      "" -> "Sourcing #{@env_file} exited with status #{status}."
+      said -> "#{said} (sourcing #{@env_file} exited with status #{status})"
+    end
+  end
+
   ## In the peer
   #
   # Everything below here runs in the temporary VM, on the target release's own
@@ -962,10 +1159,29 @@ defmodule Castle.Peer do
   def resolve(path) do
     forward_standard_error()
 
-    with {:ok, config} <- consult(path),
+    with {:ok, changes, said} <- source_env_file(),
+         :ok <- apply_env(changes, said),
+         {:ok, config} <- consult(path),
          {:ok, provider} <- provider(config, path) do
       run_pipeline(path, provider)
     end
+  end
+
+  # Into this VM's environment, which is the one the providers read, and which
+  # is thrown away with the VM. The running node's own is left alone: what a hot
+  # upgrade changes is configuration, through `config_change/3`, not the
+  # environment of a system that is already running.
+  #
+  # What the file printed goes where a provider's output does, to whoever asked
+  # for the install.
+  defp apply_env(changes, said) do
+    Enum.each(changes, fn
+      {name, nil} -> System.delete_env(name)
+      {name, value} -> System.put_env(name, value)
+    end)
+
+    if said != "", do: IO.write(:standard_error, said)
+    :ok
   end
 
   # Everything the pipeline writes has to leave this VM through the control

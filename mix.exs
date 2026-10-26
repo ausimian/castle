@@ -130,7 +130,7 @@ defmodule Castle.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:forecastle, "~> 1.2.0-rc.1", runtime: false},
+      {:forecastle, "~> 1.2", runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:publisho, "~> 1.0", only: :dev, runtime: false}

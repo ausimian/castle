@@ -11,3 +11,6 @@
   brings this version. A file that is missing, unreadable or fails refuses the
   operation, and nothing changes.
   ([#56](https://github.com/ausimian/castle/issues/56))
+- A guide, *Configuring from environment variables*, covering how to set up the
+  file, how to deploy a version with it, and how to write `runtime.exs` and
+  `config_change/3` for hot upgrades.

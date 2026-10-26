@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- %% CHANGELOG_ENTRIES %% -->
 
-## 1.2.0-rc.1 - 2026-10-26
+## 1.2.0 - 2026-10-26
 
 ### Added
 
@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A guide, *Configuring from environment variables*, covering how to set up the
   file, how to deploy a version with it, and how to write `runtime.exs` and
   `config_change/3` for hot upgrades.
+
+### Changed
+
+- Castle now requires Forecastle 1.2 or later, whose `env.sh` sources
+  `CASTLE_ENV_FILE` at boot, so a start reads the same file that `install` and
+  `commit` do.
+- A consumer upgrade that moves Castle from 1.0.0, 1.0.1, 1.1.0 or 1.2.0-rc.1 to
+  1.2.0 stays hot under `auto`, since Castle's appup covers each.
 
 ## 1.1.0 - 2026-10-23
 

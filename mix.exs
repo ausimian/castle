@@ -1,7 +1,7 @@
 defmodule Castle.MixProject do
   use Mix.Project
 
-  @version "1.2.0"
+  @version "1.2.1"
   @source_url "https://github.com/ausimian/castle"
 
   def project do

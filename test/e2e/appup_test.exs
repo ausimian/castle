@@ -164,6 +164,13 @@ defmodule Castle.AppupTest do
       # Committing is what purges the old code, and it runs on the new Castle.
       committed = castle(deployment)
       assert committed.old_code == []
+
+      # And the new Castle leaves the commit in the node's own log, not only on
+      # the operator's terminal. That log is written by Elixir's default handler,
+      # whose `remote_gl` filter drops anything logged under the `rpc` caller's
+      # group leader (#63). `unpack` and `install` above were run by the old
+      # Castle, which may predate the fix, so nothing is claimed for them.
+      await_logged!(deployment, ~r/\[info\] Committed #{Regex.escape(@to)}\. /)
       assert Deployment.castle!(deployment, ["releases"]) =~ ~r/#{@to}\s+permanent/
 
       # And the new Castle answers a command of its own.
@@ -239,6 +246,34 @@ defmodule Castle.AppupTest do
       assert sys_config[:consumer][:feature] == "off"
 
       assert Deployment.os_pid(deployment) == os_pid, "the upgrade restarted the emulator"
+    end
+  end
+
+  # Waits for `pattern` to appear in the node's own log: what `run_erl` keeps of
+  # a daemon's standard output, which is where the consumer's default handler
+  # writes. It lands there a moment after the command that logged it returns.
+  defp await_logged!(deployment, pattern, timeout \\ 10_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_logged!(deployment, pattern, timeout, deadline)
+  end
+
+  defp await_logged!(deployment, pattern, timeout, deadline) do
+    log =
+      [deployment.root, "tmp/log/erlang.log.*"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.map_join(&File.read!/1)
+
+    cond do
+      log =~ pattern ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("#{inspect(pattern)} was not in the node's log within #{timeout}ms:\n#{log}")
+
+      true ->
+        Process.sleep(100)
+        await_logged!(deployment, pattern, timeout, deadline)
     end
   end
 

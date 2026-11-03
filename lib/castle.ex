@@ -612,10 +612,25 @@ defmodule Castle do
   #
   # A restart install logs before `init:reboot()` takes the node down, and the
   # entry can be lost to that reboot.
+  #
+  # The event names the node's `:user` as its group leader rather than taking
+  # the evaluating process's. That one belongs to the `rpc` caller, on another
+  # node, and Elixir's `Logger` gives its default handler a `remote_gl` filter
+  # that drops every event whose group leader is remote - so left to the
+  # default, the line never reaches the node's log. A process spawned to log
+  # would inherit the same group leader. Where `:user` is not registered the
+  # event keeps its own, as before.
   defp record!({:ok, lines} = outcome) do
-    :logger.info(Enum.join(lines, " "), %{domain: [:castle]})
+    :logger.info(Enum.join(lines, " "), record_metadata())
     report!(outcome)
   end
 
   defp record!(outcome), do: report!(outcome)
+
+  defp record_metadata do
+    case Process.whereis(:user) do
+      user when is_pid(user) -> %{domain: [:castle], gl: user}
+      nil -> %{domain: [:castle]}
+    end
+  end
 end

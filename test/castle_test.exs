@@ -59,9 +59,16 @@ defmodule CastleTest do
 
     # `install/5` is the one command here with seams, so it stands for the four
     # that log: they share `record!/1`. The line is logged as well as printed, in
-    # Castle's own domain.
+    # Castle's own domain, and under the node's `:user` rather than the caller's
+    # group leader. On a node a command reaches through `rpc` the caller's is on
+    # another node, and the `remote_gl` filter Elixir gives its default handler
+    # drops what is logged under it (#63). Here the caller's is `capture_io`'s,
+    # which is local and gets past that filter, so what this can check is that
+    # the event does not carry it; the end-to-end test checks the node's log.
     @tag :tmp_dir
     test "logs what a command that changes the deployment reports", %{tmp_dir: dir} do
+      record_castle_events()
+
       Stub.stub(:which_releases, [
         {~c"sample", ~c"1.2.2", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
       ])
@@ -80,13 +87,19 @@ defmodule CastleTest do
           {:ok, log} =
             with_log([metadata: [:domain]], fn -> Castle.install("1.2.3", dir, handler, peer) end)
 
-          send(self(), {:log, log})
+          send(self(), {:log, log, Process.group_leader()})
         end)
 
-      assert_received {:log, log}
+      assert_received {:log, log, caller_gl}
       assert printed == "Now running 1.2.3 (previously 1.2.2).\n"
       assert log =~ "[info] Now running 1.2.3 (previously 1.2.2).\n"
       assert log =~ "domain=castle"
+
+      assert_received {:recorded,
+                       %{msg: {:string, "Now running 1.2.3 (previously 1.2.2)."}, meta: %{gl: gl}}}
+
+      assert gl == Process.whereis(:user)
+      refute gl == caller_gl
     end
 
     test "confirms the release that is running, silently" do
@@ -104,5 +117,25 @@ defmodule CastleTest do
         Castle.running("9.9.9")
       end
     end
+  end
+
+  # A `:logger` handler that hands each `[:castle]` event to the test that
+  # attached it, metadata included, which `with_log/2` does not show.
+  defmodule Recorder do
+    def log(event, %{config: %{to: pid}}), do: send(pid, {:recorded, event})
+  end
+
+  defp record_castle_events do
+    id = :"castle_test_#{System.unique_integer([:positive])}"
+    castle_only = {&:logger_filters.domain/2, {:log, :equal, [:castle]}}
+
+    :ok =
+      :logger.add_handler(id, Recorder, %{
+        config: %{to: self()},
+        filters: [castle: castle_only],
+        filter_default: :stop
+      })
+
+    on_exit(fn -> :logger.remove_handler(id) end)
   end
 end

@@ -28,8 +28,9 @@
 # `Castle.Peer`'s file primitives - are an API between adjacent versions. See
 # AGENTS.md.
 {
-  ~c"1.3.0",
+  ~c"1.3.1",
   [
+    {~c"1.3.0", [{:load_module, Castle, []}]},
     {~c"1.2.1", [{:load_module, Castle, []}]},
     {~c"1.2.0", [{:load_module, Castle, []}]},
     {~c"1.2.0-rc.1", [{:load_module, Castle, []}]},
@@ -52,6 +53,7 @@
      ]}
   ],
   [
+    {~c"1.3.0", [{:load_module, Castle, []}]},
     {~c"1.2.1", [{:load_module, Castle, []}]},
     {~c"1.2.0", [{:load_module, Castle, []}]},
     {~c"1.2.0-rc.1", [{:load_module, Castle, []}]},

@@ -1,3 +1,9 @@
+### Changed
+
+- A consumer upgrade that moves Castle from 1.0.0, 1.0.1, 1.1.0, 1.2.0-rc.1,
+  1.2.0, 1.2.1 or 1.3.0 to 1.3.1 stays hot under `auto`, since Castle's appup
+  covers each.
+
 ### Fixed
 
 - The lines `unpack`, `install`, `commit` and `remove` log now reach the node's

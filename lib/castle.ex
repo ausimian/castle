@@ -10,7 +10,9 @@ defmodule Castle do
   Call `customize/1` from the release definition in `mix.exs`. The remaining
   public functions back the `bin/castle` commands.
 
-  Successful commands print their result and return `:ok`. Castle refusals and
+  Successful commands print their result and return `:ok`. `unpack/1`,
+  `install/1`, `commit/1` and `remove/1` also log it on the running node, at
+  `info` level in the `[:castle]` logger domain. Castle refusals and
   `:release_handler` errors raise `Castle.Error`, giving `bin/castle` a non-zero
   exit status. Other exceptions, throws and exits propagate unchanged. Treat any
   raise over `rpc` as a failed command.
@@ -381,7 +383,7 @@ defmodule Castle do
   """
   @spec unpack(String.t()) :: :ok
   def unpack(name) when is_binary(name) do
-    report!(Commands.unpack(name))
+    record!(Commands.unpack(name))
   end
 
   # Materialising is *inside* `Commands.install/5`, and this composing it here is
@@ -468,7 +470,7 @@ defmodule Castle do
         deployment \\ Deployment
       )
       when is_binary(vsn) do
-    report!(Commands.install(vsn, rel_dir, handler, peer, deployment))
+    record!(Commands.install(vsn, rel_dir, handler, peer, deployment))
   end
 
   @doc """
@@ -504,7 +506,7 @@ defmodule Castle do
   """
   @spec commit(String.t()) :: :ok
   def commit(vsn) when is_binary(vsn) do
-    report!(Commands.commit(vsn, rel_dir()))
+    record!(Commands.commit(vsn, rel_dir()))
   end
 
   @doc """
@@ -518,7 +520,7 @@ defmodule Castle do
   """
   @spec remove(String.t()) :: :ok
   def remove(vsn) when is_binary(vsn) do
-    report!(Commands.remove(vsn))
+    record!(Commands.remove(vsn))
   end
 
   @doc """
@@ -585,4 +587,35 @@ defmodule Castle do
 
   defp report!({:ok, lines}), do: Enum.each(lines, &IO.puts/1)
   defp report!({:error, message}), do: raise(Castle.Error, message)
+
+  # `report!/1` for the four commands that change the deployment, which also
+  # leave what they did in the running node's log. What `report!/1` prints goes
+  # to the group leader of the `rpc` that asked, so it reaches the operator's
+  # terminal and nothing on the node keeps it.
+  #
+  # Erlang's `:logger` rather than Elixir's `Logger`, because `Logger` belongs to
+  # the `:logger` application and using it would put that application in
+  # `castle.app`. A consumer release without it would then gain an application
+  # across the upgrade that brings this version. `:logger` is kernel's, and
+  # Elixir's handlers receive what it logs.
+  #
+  # `info` and not `notice`, although `notice` describes these events well: the
+  # external logging systems a node ships to mostly have only info, warning and
+  # error, and `notice` has no clean mapping onto them. The cost is a node not
+  # running Elixir's `:logger` application. There, kernel's primary level of
+  # `notice` applies and drops these lines. Elixir's `Logger` sets the primary
+  # level from its own configuration, `:debug` by default.
+  #
+  # Logged before printing, so that a caller gone by the time the lines are
+  # printed does not take the record with it. Refusals raise to the caller, as
+  # before, and are not logged here.
+  #
+  # A restart install logs before `init:reboot()` takes the node down, and the
+  # entry can be lost to that reboot.
+  defp record!({:ok, lines} = outcome) do
+    :logger.info(Enum.join(lines, " "), %{domain: [:castle]})
+    report!(outcome)
+  end
+
+  defp record!(outcome), do: report!(outcome)
 end

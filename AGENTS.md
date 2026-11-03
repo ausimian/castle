@@ -2046,6 +2046,12 @@ What it asserts, and why each is there:
     application reports the new version, and this is what would show it.
   * After the commit, no Castle module carries old code, and a command run by the
     new Castle (`upgradable`) succeeds.
+  * The commit's `Committed <vsn>.` line reaches the node's own log, which is
+    what `run_erl` keeps of the daemon's output and is written by Elixir's
+    default handler, `remote_gl` filter and all
+    ([#63](https://github.com/ausimian/castle/issues/63)). Only the commit is
+    checked, because it is the one command here the new Castle runs; `unpack`
+    and `install` are the baseline's.
   * `CASTLE_ENV_FILE` reaches the target on the upgrade that ships it
     ([#56](https://github.com/ausimian/castle/issues/56)). The baseline is
     started with it set, as a supervisor would start it, and with a variable in

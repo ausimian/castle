@@ -28,12 +28,21 @@
 # `Castle.Peer`'s file primitives - are an API between adjacent versions. See
 # AGENTS.md.
 {
-  ~c"1.2.1",
+  ~c"1.3.0",
   [
-    {~c"1.2.0", []},
-    {~c"1.2.0-rc.1", []},
-    {~c"1.1.0", [{:load_module, Castle.Peer, []}]},
-    {~c"1.0.1", [{:load_module, Castle.Peer, []}]},
+    {~c"1.2.1", [{:load_module, Castle, []}]},
+    {~c"1.2.0", [{:load_module, Castle, []}]},
+    {~c"1.2.0-rc.1", [{:load_module, Castle, []}]},
+    {~c"1.1.0",
+     [
+       {:load_module, Castle.Peer, []},
+       {:load_module, Castle, [Castle.Peer]}
+     ]},
+    {~c"1.0.1",
+     [
+       {:load_module, Castle.Peer, []},
+       {:load_module, Castle, [Castle.Peer]}
+     ]},
     {~c"1.0.0",
      [
        {:load_module, Castle.Deployment, []},
@@ -43,10 +52,19 @@
      ]}
   ],
   [
-    {~c"1.2.0", []},
-    {~c"1.2.0-rc.1", []},
-    {~c"1.1.0", [{:load_module, Castle.Peer, []}]},
-    {~c"1.0.1", [{:load_module, Castle.Peer, []}]},
+    {~c"1.2.1", [{:load_module, Castle, []}]},
+    {~c"1.2.0", [{:load_module, Castle, []}]},
+    {~c"1.2.0-rc.1", [{:load_module, Castle, []}]},
+    {~c"1.1.0",
+     [
+       {:load_module, Castle.Peer, []},
+       {:load_module, Castle, [Castle.Peer]}
+     ]},
+    {~c"1.0.1",
+     [
+       {:load_module, Castle.Peer, []},
+       {:load_module, Castle, [Castle.Peer]}
+     ]},
     {~c"1.0.0",
      [
        {:load_module, Castle.Deployment, []},

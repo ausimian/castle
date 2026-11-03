@@ -1136,7 +1136,7 @@ interface and the function is the thing behind it.
 
 **`unpack`, `install`, `commit` and `remove` also log what they report**, through
 `record!/1`, because what `report!/1` prints goes to the group leader of the
-`rpc` that asked and nothing on the node keeps it. Three choices in it are
+`rpc` that asked and nothing on the node keeps it. Four choices in it are
 deliberate. It is Erlang's `:logger`, not Elixir's `Logger`: `Logger` belongs to
 the `:logger` application, and listing that in `castle.app` would add an
 application to a consumer release that lacked it, across the upgrade that brings
@@ -1145,7 +1145,15 @@ node ships to mostly have only info, warning and error, and `notice` maps onto
 none of them cleanly. The cost is a node not running Elixir's `:logger`
 application, where kernel's primary level of `notice` drops these lines. The
 suite starts that application in `test_helper.exs` for the same reason. And it is
-in the `[:castle]` domain, so a handler can select it or filter it out. Only
+in the `[:castle]` domain, so a handler can select it or filter it out. Last, it
+names the node's `:user` as the event's group leader: the evaluating process's
+is the `rpc` caller's, on another node, and Elixir's `Logger` gives its default
+handler a `remote_gl` filter that drops every event whose group leader is
+remote. 1.3.0 left the default and its lines never reached such a node's log
+(#63). Spawning a process to log does not help, since it inherits the same
+group leader. The unit test can only check that the event does not carry the
+caller's group leader, because the caller's is local there; the end-to-end test
+checks the commit line in the node's own log. Only
 success is logged; a refusal raises to the caller. The install that brings a
 Castle with this is run by the previous Castle, so that one install is not logged
 (see *Castle's own appup*).

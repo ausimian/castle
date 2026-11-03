@@ -1134,6 +1134,22 @@ refusal raises `Castle.Error` rather than returning `{:error, _}`. Every command
 `@doc` names the `bin/castle` command that reaches it, because that is the
 interface and the function is the thing behind it.
 
+**`unpack`, `install`, `commit` and `remove` also log what they report**, through
+`record!/1`, because what `report!/1` prints goes to the group leader of the
+`rpc` that asked and nothing on the node keeps it. Three choices in it are
+deliberate. It is Erlang's `:logger`, not Elixir's `Logger`: `Logger` belongs to
+the `:logger` application, and listing that in `castle.app` would add an
+application to a consumer release that lacked it, across the upgrade that brings
+the change. It is `info`, not `notice`, because the external logging systems a
+node ships to mostly have only info, warning and error, and `notice` maps onto
+none of them cleanly. The cost is a node not running Elixir's `:logger`
+application, where kernel's primary level of `notice` drops these lines. The
+suite starts that application in `test_helper.exs` for the same reason. And it is
+in the `[:castle]` domain, so a handler can select it or filter it out. Only
+success is logged; a refusal raises to the caller. The install that brings a
+Castle with this is run by the previous Castle, so that one install is not logged
+(see *Castle's own appup*).
+
 **Say "a refusal", not "a failure", and the distinction is the one drawn just
 above.** `report!/1` turns a returned `{:error, message}` into `Castle.Error`,
 and that covers every refusal these commands make deliberately — but
@@ -1510,7 +1526,7 @@ after the one that installs it.
 
 | Path | Purpose |
 | --- | --- |
-| `lib/castle.ex` | The command boundary: print the outcome, or raise — plus `customize/1`, the build-time release integration, which is not a command |
+| `lib/castle.ex` | The command boundary: print the outcome (and log it, for the four commands that change the deployment), or raise — plus `customize/1`, the build-time release integration, which is not a command |
 | `lib/castle/commands.ex` | The commands themselves, returning their outcome |
 | `lib/castle/deployment.ex` | The facts about the deployment Castle cannot arrange and a test cannot produce: the two roots, the handler's releases directory, and the `stat`/`lstat`/`read`/`rm` whose *failures* decide what a refusal says |
 | `lib/castle/file_reason.ex` | Shared rendering for filesystem and parser reasons used by commands and peer configuration |

@@ -216,6 +216,10 @@ my_app/bin/castle commit
 my_app/bin/castle remove 1.0.0
 ```
 
+`unpack`, `install`, `commit` and `remove` also log what they report on the
+running node, at `info` level in the `[:castle]` logger domain, so the node's
+own log records each change to the deployment.
+
 Release statuses are:
 
 - `permanent`: used on the next ordinary restart.

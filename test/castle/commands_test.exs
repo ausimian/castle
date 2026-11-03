@@ -1199,7 +1199,10 @@ defmodule Castle.CommandsTest do
              "the waiting caller cleared the reboot's own new_start_erl.data"
     end
 
+    # `capture_log`, because the install that succeeds goes through the boundary
+    # and so logs what it reports, which is `castle_test.exs`'s business.
     @tag :tmp_dir
+    @tag :capture_log
     test "leaves the target configured by the one that installed it", %{tmp_dir: dir} do
       # The defect this describes was not in the marker protocol at all: it was in
       # `Castle.install/1` composing `materialise/3` and `install/4`, so two

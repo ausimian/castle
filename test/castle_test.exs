@@ -2,6 +2,10 @@ defmodule CastleTest do
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureIO
+  import ExUnit.CaptureLog
+
+  alias Castle.PeerStub
+  alias Castle.ReleaseHandlerStub, as: Stub
 
   doctest Castle
 
@@ -51,6 +55,38 @@ defmodule CastleTest do
 
     test "prints what a successful operation has to report" do
       assert capture_io(&Castle.releases/0) =~ ~r/^\S+\s+permanent$/m
+    end
+
+    # `install/5` is the one command here with seams, so it stands for the four
+    # that log: they share `record!/1`. The line is logged as well as printed, in
+    # Castle's own domain.
+    @tag :tmp_dir
+    test "logs what a command that changes the deployment reports", %{tmp_dir: dir} do
+      Stub.stub(:which_releases, [
+        {~c"sample", ~c"1.2.2", [~c"kernel-10.5", ~c"stdlib-7.2"], :permanent}
+      ])
+
+      handler = Stub.stub(:install_release, {:ok, ~c"1.2.2", ~c"upgrade"})
+      version_dir = Path.join(dir, "1.2.3")
+      File.mkdir_p!(version_dir)
+      File.write!(Path.join(version_dir, "sys.config"), "[].\n")
+      peer = PeerStub.stub({:ok, []})
+
+      # The log is captured inside `capture_io/1`, not around it: capturing IO
+      # swaps the group leader, and a log is captured for the group leader it
+      # was emitted under.
+      printed =
+        capture_io(fn ->
+          {:ok, log} =
+            with_log([metadata: [:domain]], fn -> Castle.install("1.2.3", dir, handler, peer) end)
+
+          send(self(), {:log, log})
+        end)
+
+      assert_received {:log, log}
+      assert printed == "Now running 1.2.3 (previously 1.2.2).\n"
+      assert log =~ "[info] Now running 1.2.3 (previously 1.2.2).\n"
+      assert log =~ "domain=castle"
     end
 
     test "confirms the release that is running, silently" do
